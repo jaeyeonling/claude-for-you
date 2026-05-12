@@ -1,0 +1,32 @@
+{
+  "name": "claude-for-you",
+  "version": "0.1.0",
+  "description": "Self-hosted Anthropic API proxy that routes your Claude.ai subscription token to a trusted few via API keys.",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "scripts": {
+    "dev": "bun --hot src/server.ts",
+    "build": "bun build src/server.ts --outdir dist --target bun --minify && cp src/template/cc-snapshot.json dist/template/cc-snapshot.json",
+    "start": "bun run src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "extract-template": "bun scripts/extract-cc-template.mjs",
+    "extract-template:check": "bun scripts/extract-cc-template.mjs --check",
+    "synthesize-snapshot": "bun scripts/synthesize-snapshot.mjs",
+    "synthesize-snapshot:check": "bun scripts/synthesize-snapshot.mjs --check"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.2",
+    "hono": "^4.6.14",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "license": "MIT",
+  "private": true
+}

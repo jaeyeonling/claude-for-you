@@ -1,0 +1,25 @@
+node_modules
+dist
+.env
+.env.local
+.env.bak
+.env.*.local
+!.env.example
+*.log
+.DS_Store
+coverage
+.vitest
+
+# terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/terraform.tfvars
+*.tfplan
+terraform/tfplan
+
+# captures (sensitive — full request bodies)
+captures/
+
+.env.bak

@@ -1,0 +1,40 @@
+# Caddy automatically provisions Let's Encrypt certificates on first request
+# to {$DOMAIN}, renews them, and redirects HTTP → HTTPS.
+#
+# EC2 prerequisites:
+#   - Security Group allows 80/tcp + 443/tcp inbound (and 80 reachable from
+#     Let's Encrypt — leave it open for ACME http-01 challenge).
+#   - DNS A record points {$DOMAIN} at the EC2 public IP.
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Trust nothing about client identity at the edge — the app handles auth.
+	# Just forward and let API-key middleware decide.
+	reverse_proxy app:3456 {
+		# Streaming responses need flush_interval -1 so SSE chunks aren't buffered.
+		flush_interval -1
+		# Conservative timeouts: header 30s, full request stays open for long
+		# streaming completions.
+		transport http {
+			dial_timeout 10s
+			response_header_timeout 30s
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		# CORS is the client's problem — this is a back-end API, not a browser
+		# service. If a browser client ever needs it, add Access-Control-* here.
+	}
+
+	log {
+		output stdout
+		format console
+		level INFO
+	}
+}

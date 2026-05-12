@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+# All variables have defaults — most deployments can leave this file empty.
+# Override only what differs from the defaults below.
+
+# region              = "ap-northeast-2"
+# instance_type       = "t3.micro"
+# root_volume_size_gb = 20
+
+# If your domain lives in Route53, set both. Otherwise leave empty and
+# create the A record manually with the public_ip output.
+# domain_zone_id = "Z1234567890ABC"
+# domain_name    = "claude.your-domain.com"
+
+# If you want EC2 to auto-clone the repo on boot (public repo only — for
+# private use git over HTTPS with a deploy token instead).
+# git_repo_url = "https://github.com/your-handle/claude-for-you.git"

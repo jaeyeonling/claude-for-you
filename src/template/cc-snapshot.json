@@ -1,0 +1,198 @@
+{
+  "schemaVersion": 2,
+  "extractedAt": "2026-05-12T23:13:52.338Z",
+  "capturedCount": 42,
+  "capturedFrom": "2026-05-12T23:01:55.555Z",
+  "capturedTo": "2026-05-12T23:10:23.754Z",
+  "headerOrder": [
+    "accept",
+    "content-type",
+    "user-agent",
+    "x-claude-code-session-id",
+    "x-stainless-arch",
+    "x-stainless-lang",
+    "x-stainless-os",
+    "x-stainless-package-version",
+    "x-stainless-retry-count",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-stainless-timeout",
+    "anthropic-beta",
+    "anthropic-dangerous-direct-browser-access",
+    "anthropic-version",
+    "x-api-key",
+    "x-app",
+    "connection",
+    "host",
+    "accept-encoding",
+    "content-length"
+  ],
+  "headerOrderDistribution": [
+    {
+      "count": 41,
+      "names": [
+        "accept",
+        "content-type",
+        "user-agent",
+        "x-claude-code-session-id",
+        "x-stainless-arch",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "x-stainless-package-version",
+        "x-stainless-retry-count",
+        "x-stainless-runtime",
+        "x-stainless-runtime-version",
+        "x-stainless-timeout",
+        "anthropic-beta",
+        "anthropic-dangerous-direct-browser-access",
+        "anthropic-version",
+        "x-api-key",
+        "x-app",
+        "connection",
+        "host",
+        "accept-encoding",
+        "content-length"
+      ]
+    },
+    {
+      "count": 1,
+      "names": [
+        "host",
+        "user-agent",
+        "accept",
+        "z-last-header",
+        "a-first-header",
+        "m-middle-header",
+        "x-api-key",
+        "content-type",
+        "content-length"
+      ]
+    }
+  ],
+  "headerValues": [
+    {
+      "name": "accept",
+      "value": "application/json"
+    },
+    {
+      "name": "content-type",
+      "value": "application/json"
+    },
+    {
+      "name": "user-agent",
+      "value": "claude-cli/2.1.126 (external, cli)"
+    },
+    {
+      "name": "x-stainless-arch",
+      "value": "arm64"
+    },
+    {
+      "name": "x-stainless-lang",
+      "value": "js"
+    },
+    {
+      "name": "x-stainless-os",
+      "value": "MacOS"
+    },
+    {
+      "name": "x-stainless-package-version",
+      "value": "0.81.0"
+    },
+    {
+      "name": "x-stainless-retry-count",
+      "value": "0"
+    },
+    {
+      "name": "x-stainless-runtime",
+      "value": "node"
+    },
+    {
+      "name": "x-stainless-runtime-version",
+      "value": "v24.3.0"
+    },
+    {
+      "name": "x-stainless-timeout",
+      "value": "600"
+    },
+    {
+      "name": "anthropic-beta",
+      "value": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24"
+    },
+    {
+      "name": "anthropic-dangerous-direct-browser-access",
+      "value": "true"
+    },
+    {
+      "name": "anthropic-version",
+      "value": "2023-06-01"
+    },
+    {
+      "name": "x-app",
+      "value": "cli"
+    }
+  ],
+  "bodyKeyOrder": [
+    "model",
+    "messages",
+    "system",
+    "tools",
+    "metadata",
+    "max_tokens",
+    "thinking",
+    "context_management",
+    "output_config",
+    "stream"
+  ],
+  "bodyKeyOrderDistribution": [
+    {
+      "count": 27,
+      "keys": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "thinking",
+        "context_management",
+        "output_config",
+        "stream"
+      ]
+    },
+    {
+      "count": 10,
+      "keys": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "temperature",
+        "output_config",
+        "stream"
+      ]
+    },
+    {
+      "count": 4,
+      "keys": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "temperature",
+        "stream"
+      ]
+    },
+    {
+      "count": 1,
+      "keys": [
+        "model",
+        "max_tokens",
+        "messages"
+      ]
+    }
+  ]
+}

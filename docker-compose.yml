@@ -1,0 +1,95 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: claude-for-you:latest
+    container_name: claude-for-you
+    restart: unless-stopped
+    environment:
+      # OAuth — pick ONE source:
+      #   A) Single-account: set ANTHROPIC_OAUTH_REFRESH_TOKEN (env)
+      #   B) Multi-account pool: drop accounts.json into the tokens volume
+      ANTHROPIC_OAUTH_REFRESH_TOKEN: ${ANTHROPIC_OAUTH_REFRESH_TOKEN:-}
+      ANTHROPIC_OAUTH_ACCESS_TOKEN: ${ANTHROPIC_OAUTH_ACCESS_TOKEN:-}
+      ANTHROPIC_OAUTH_EXPIRES_AT: ${ANTHROPIC_OAUTH_EXPIRES_AT:-}
+      ACCOUNTS_PATH: /data/accounts.json
+      # API keys — env baseline (optional if API_KEYS_PATH is provided)
+      API_KEYS: ${API_KEYS:-}
+      API_KEYS_PATH: /data/api-keys.json
+      # Limits — optional
+      DAILY_TOKEN_LIMIT_PER_KEY: ${DAILY_TOKEN_LIMIT_PER_KEY:-0}
+      # Postgres connection — required for per-user usage tracking.
+      # Local dev: docker compose --profile dev brings up the postgres service.
+      # Production: points to RDS endpoint (DATABASE_URL injected via SSM).
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL required}
+      GLOBAL_SUBSCRIPTION_THRESHOLD_TOKENS: ${GLOBAL_SUBSCRIPTION_THRESHOLD_TOKENS:-0}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-8}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Drift alarm channel
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # Wire-fidelity tuning (optional)
+      PACING_MIN_GAP_MS: ${PACING_MIN_GAP_MS:-0}
+      ACCOUNT_UUID_OVERRIDE: ${ACCOUNT_UUID_OVERRIDE:-}
+      CANARY_PERCENT: ${CANARY_PERCENT:-0}
+    volumes:
+      - tokens:/data
+    networks:
+      - internal
+    # Not exposing 3456 to host directly — Caddy fronts it. If you don't run
+    # Caddy, add `ports: ["127.0.0.1:3456:3456"]` and SSH-tunnel for access.
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: claude-for-you-caddy
+    restart: unless-stopped
+    environment:
+      # Required by Caddy itself. Empty → Caddyfile syntax error at boot.
+      # IP-only deployment can set DOMAIN=:80 to serve HTTP without ACME.
+      DOMAIN: ${DOMAIN:-}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - internal
+    depends_on:
+      - app
+
+  # Local-dev Postgres. Runs only with `docker compose --profile dev up`.
+  # Production EC2 leaves this off and points DATABASE_URL at RDS instead.
+  postgres:
+    profiles: ['dev']
+    image: postgres:16-alpine
+    container_name: claude-for-you-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: claude_for_you
+      POSTGRES_USER: claude
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      # 5433 on host avoids collision with any other local postgres instance.
+      # Update DATABASE_URL in .env to match (port=5433).
+      - '127.0.0.1:5433:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U claude -d claude_for_you']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  tokens:
+  caddy_data:
+  caddy_config:
+  postgres_data:
+
+networks:
+  internal:
