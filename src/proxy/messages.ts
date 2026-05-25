@@ -9,7 +9,7 @@ import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { UsageTracker } from '../usage/per-user.js';
-import { sniffUsage } from '../usage/sniff.js';
+import { extractUsage, safeParseJson, sniffUsage } from '../usage/sniff.js';
 import { callUpstream } from './upstream.js';
 
 /**
@@ -119,27 +119,50 @@ export const createMessagesHandler =
     deps.accountLearner.observe(upstream.response.headers);
 
     const contentType = upstream.response.headers.get('content-type') ?? '';
-    const sniffed =
-      upstream.response.body !== null
-        ? sniffUsage(upstream.response.body, contentType, (usage) => {
-            // Fire-and-forget: the SSE stream is already flowing to the client,
-            // so we must not block on the DB write. Worst case on crash: one
-            // request's accounting is lost — acceptable for usage counters.
-            void deps.tracker.record(user.name, usage).catch((err: unknown) => {
-              const msg = `[usage] record failed: ${err instanceof Error ? err.message : String(err)}`;
-              // Sink is cooldown-wrapped — DB outage triggers one alarm per
-              // window, not one per request. No console.error here either,
-              // for the same reason.
-              void deps.usageErrorSink(msg);
-            });
-            deps.billingMonitor.observe(usage.serviceTier, upstream.response.headers);
-            if (decision.useCandidate && usage.serviceTier && usage.serviceTier !== 'standard') {
-              deps.canary.trip(`candidate served service_tier=${usage.serviceTier}`);
-            }
-          })
-        : null;
+    const isStream = contentType.toLowerCase().startsWith('text/event-stream');
 
-    return new Response(sniffed, {
+    // Common usage-observation callback. Fire-and-forget DB write (we don't
+    // block the response on accounting), then alarm sinks.
+    const onUsage = (usage: import('../usage/sniff.js').SniffedUsage): void => {
+      void deps.tracker.record(user.name, usage).catch((err: unknown) => {
+        const msg = `[usage] record failed: ${err instanceof Error ? err.message : String(err)}`;
+        void deps.usageErrorSink(msg);
+      });
+      deps.billingMonitor.observe(usage.serviceTier, upstream.response.headers);
+      if (decision.useCandidate && usage.serviceTier && usage.serviceTier !== 'standard') {
+        deps.canary.trip(`candidate served service_tier=${usage.serviceTier}`);
+      }
+    };
+
+    // Streaming responses (SSE): wrap with sniffUsage TransformStream so we
+    // forward chunks byte-for-byte to the client while extracting usage from
+    // each event payload as it flies past.
+    if (isStream && upstream.response.body !== null) {
+      const sniffed = sniffUsage(upstream.response.body, contentType, onUsage);
+      return new Response(sniffed, {
+        status: upstream.response.status,
+        statusText: upstream.response.statusText,
+        headers: forwardHeaders(upstream.response.headers),
+      });
+    }
+
+    // Non-streaming responses (JSON or empty): buffer fully, extract usage
+    // from the parsed body, and return a fresh Response with the buffered
+    // text. Avoids piping the upstream body through a TransformStream —
+    // Bun's stream internals can race the consumer-close edge there.
+    const bodyText =
+      upstream.response.body !== null
+        ? await new Response(upstream.response.body).text()
+        : '';
+    const usage = extractUsage(safeParseJson(bodyText));
+    if (usage) {
+      onUsage({
+        inputTokens: usage.input ?? 0,
+        outputTokens: usage.output ?? 0,
+        serviceTier: usage.tier,
+      });
+    }
+    return new Response(bodyText, {
       status: upstream.response.status,
       statusText: upstream.response.statusText,
       headers: forwardHeaders(upstream.response.headers),
