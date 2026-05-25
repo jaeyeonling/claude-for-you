@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { createAccountLearner } from './account-learner.js';
 import { createAlertsHandlers } from './admin/alerts.js';
 import { csrfGuard } from './admin/csrf.js';
+import { createAdminEventsHandler } from './admin/events.js';
 import { createKeysHandlers } from './admin/keys.js';
 import { createOAuthReplaceHandler } from './admin/oauth.js';
 import { createAdminPageHandler } from './admin/page.js';
@@ -222,6 +223,11 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   app.get('/admin/stats', createStatsHandler(adminDeps));
   app.get('/admin', createAdminPageHandler({ ...adminDeps, apiKeyStore, alertStore }));
   app.get('/admin/', createAdminPageHandler({ ...adminDeps, apiKeyStore, alertStore }));
+  // Live SSE stream that powers the no-flicker dashboard.
+  app.get(
+    '/admin/events',
+    createAdminEventsHandler({ ...adminDeps, apiKeyStore, alertStore }),
+  );
 
   const keysH = createKeysHandlers(apiKeyStore);
   app.get('/admin/keys', keysH.list);
