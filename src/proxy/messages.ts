@@ -146,6 +146,7 @@ export const createMessagesHandler =
       });
     }
 
+<<<<<<< Updated upstream
     // Non-streaming responses (JSON or empty): buffer fully, extract usage
     // from the parsed body, and return a fresh Response with the buffered
     // text. Avoids piping the upstream body through a TransformStream —
@@ -154,6 +155,14 @@ export const createMessagesHandler =
       upstream.response.body !== null
         ? await new Response(upstream.response.body).text()
         : '';
+=======
+    // Non-streaming responses (JSON or empty): consume the upstream Response
+    // via its own .text() helper — NOT by re-wrapping `response.body` in a
+    // new Response. Bun's small-body optimization can leave the body stream
+    // in a "used" state that throws synchronously when re-wrapped, while
+    // `response.text()` always works because it owns the internal buffer.
+    const bodyText = await upstream.response.text().catch(() => '');
+>>>>>>> Stashed changes
     const usage = extractUsage(safeParseJson(bodyText));
     if (usage) {
       onUsage({
