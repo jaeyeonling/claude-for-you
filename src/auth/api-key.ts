@@ -56,6 +56,11 @@ export const createApiKeyMiddleware = (store: ApiKeyStore): MiddlewareHandler =>
 
     // Live-list each request — picks up store mutations (add/revoke) without
     // restart. The trusted-few key set stays tiny so this is microseconds.
+    //
+    // The loop deliberately does NOT short-circuit on match: a `break` would
+    // leak which key matched via timing (early-match requests finish faster
+    // than late-match ones). Always running through every entry keeps the
+    // total cost equal regardless of where the match lives.
     const entries = store.list();
     let matched: AuthenticatedUser | null = null;
     for (const entry of entries) {

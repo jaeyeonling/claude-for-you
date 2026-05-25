@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ConfigError, UpstreamFailed } from '../lib/errors.js';
+import { redact } from '../lib/redact.js';
 
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
@@ -98,7 +99,9 @@ export const createOAuthManager = async (params: {
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      const reason = `${res.status} ${text}`;
+      // Upstream error body can echo the submitted refresh_token in rare
+      // edge cases. Redact before it travels to alarm sinks / logs.
+      const reason = redact(`${res.status} ${text}`);
       params.onRefreshFail?.(reason);
       // OAuth refresh failure is always an operator / infra issue (expired
       // refresh token, rotated client_id, etc.). Surface as 502, not the

@@ -4,6 +4,7 @@ import type { AccountPool } from '../auth/account-pool.js';
 import type { CanaryController } from '../canary.js';
 import type { PacingEnforcer } from '../pacing.js';
 import type { ClaudeTemplate } from '../template/types.js';
+import type { AlertSink } from '../alerts.js';
 import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
@@ -47,6 +48,9 @@ export interface MessagesDeps {
   readonly accountLearner: AccountLearner;
   readonly pacing: PacingEnforcer;
   readonly drift: DriftAnalyzer;
+  /** Cooldown-wrapped sink. Receives non-fatal usage-write errors so DB
+   * outages alarm once per cooldown window instead of flooding stderr. */
+  readonly usageErrorSink: AlertSink;
 }
 
 export const createMessagesHandler =
@@ -122,7 +126,11 @@ export const createMessagesHandler =
             // so we must not block on the DB write. Worst case on crash: one
             // request's accounting is lost — acceptable for usage counters.
             void deps.tracker.record(user.name, usage).catch((err: unknown) => {
-              console.error('[usage] record failed:', err instanceof Error ? err.message : err);
+              const msg = `[usage] record failed: ${err instanceof Error ? err.message : String(err)}`;
+              // Sink is cooldown-wrapped — DB outage triggers one alarm per
+              // window, not one per request. No console.error here either,
+              // for the same reason.
+              void deps.usageErrorSink(msg);
             });
             deps.billingMonitor.observe(usage.serviceTier, upstream.response.headers);
             if (decision.useCandidate && usage.serviceTier && usage.serviceTier !== 'standard') {

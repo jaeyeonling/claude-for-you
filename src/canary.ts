@@ -19,6 +19,7 @@
  *   5. rollback: delete candidate, redeploy
  */
 
+import { log } from './lib/logger.js';
 import type { ClaudeTemplate } from './template/types.js';
 
 export type CanaryDecision = Readonly<{
@@ -80,7 +81,7 @@ export const createCanaryController = (params: {
       tripped = true;
       trippedAt = Date.now();
       trippedReason = reason;
-      console.warn(`[canary] 🛑 tripped — ${reason}. All traffic stays on stable snapshot.`);
+      log.warn(`[canary] 🛑 tripped — ${reason}. All traffic stays on stable snapshot.`);
     },
 
     reset(): void {

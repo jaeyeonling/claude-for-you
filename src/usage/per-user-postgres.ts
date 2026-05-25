@@ -87,6 +87,10 @@ export const createPostgresUsageTracker = async (
       }
       return Object.freeze(out);
     },
+    async close(): Promise<void> {
+      // 5s grace gives in-flight queries a chance to finish before forcing close.
+      await sql.end({ timeout: 5 });
+    },
   };
   return Object.freeze(tracker);
 };

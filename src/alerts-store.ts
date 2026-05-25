@@ -60,13 +60,16 @@ export const createAlertStore = async (
   params: CreateAlertStoreParams,
 ): Promise<AlertStore> => {
   const fileState = await loadFile(params.filePath);
-  // File overrides env when present — runtime mutations should outlive a
-  // rebuild that re-injects the original env baseline.
+  // File overrides env when present — runtime mutations (including explicit
+  // null = "cleared") should outlive a rebuild that re-injects the original
+  // env baseline. `undefined` (key absent in file) is the only signal to fall
+  // back to env; an explicit `null` is a deliberate operator action.
+  const choose = (fileVal: string | null | undefined, envVal: string | null): string | null =>
+    fileVal === undefined ? normalize(envVal) : normalize(fileVal);
+
   let current: AlertConfig = Object.freeze({
-    discordWebhookUrl:
-      normalize(fileState?.discordWebhookUrl) ?? normalize(params.envDiscord),
-    slackWebhookUrl:
-      normalize(fileState?.slackWebhookUrl) ?? normalize(params.envSlack),
+    discordWebhookUrl: choose(fileState?.discordWebhookUrl, params.envDiscord),
+    slackWebhookUrl: choose(fileState?.slackWebhookUrl, params.envSlack),
   });
 
   const persist = async (next: AlertConfig): Promise<void> => {

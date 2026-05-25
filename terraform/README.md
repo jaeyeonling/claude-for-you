@@ -1,66 +1,100 @@
 # terraform/
 
-EC2 인프라 (t3.micro + EIP + SG). Route53 A 레코드는 선택.
+AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linux 2023), an RDS Postgres instance (t4g.micro), two encrypted SSM Parameter Store entries, an Elastic IP, and a narrowly scoped IAM role.
 
-## 사전
+**No SSH.** Operator access goes through AWS Systems Manager Session Manager — port 22 is not opened on the security group at all.
 
-- AWS 계정 + `aws configure` 또는 SSO 프로파일
-- EC2 키 페어 1개 (AWS 콘솔 EC2 → Key Pairs → 생성. `.pem` 다운로드 후 `chmod 600`)
-- (선택) Route53에 도메인이 있다면 zone ID 메모
+## Prerequisites
 
-## 적용
+- AWS CLI v2 (or v1 via `uv tool install awscli --python python3.13`)
+- `aws configure` with credentials that can manage EC2, RDS, IAM, SSM, and (optionally) Route53
+- `session-manager-plugin` (e.g., `brew install --cask session-manager-plugin`)
+- Terraform ≥ 1.6
+
+## What gets created
+
+| Resource | Notes |
+|---|---|
+| `aws_instance.app` | t3.micro · AL2023 · gp3 root EBS encrypted · IMDSv2 required |
+| `aws_eip.app` | Stable public IP (free while attached) |
+| `aws_security_group.app` | 80/443 inbound only · all egress |
+| `aws_db_instance.app` | Postgres 16 · t4g.micro · 20 GB gp3 · single-AZ · encrypted · 1-day backup |
+| `aws_db_subnet_group.app` + `aws_security_group.db` | Postgres reachable only from the app SG |
+| `random_password.db_master` | 32-char alphanumeric + `_-` (URL-safe) |
+| `aws_iam_role.app` + `aws_iam_instance_profile.app` | EC2 → SSM + Parameter Store read |
+| `aws_iam_role_policy_attachment.ssm_managed_core` | `AmazonSSMManagedInstanceCore` |
+| `aws_iam_role_policy.env_param_read` | Read just `/claude-for-you/env` and `/claude-for-you/database-url` |
+| `aws_ssm_parameter.env` | SecureString — operator-managed (`.env` contents) |
+| `aws_ssm_parameter.database_url` | SecureString — terraform-owned (RDS connection string) |
+| `aws_route53_record.app` | Created only when `domain_zone_id` and `domain_name` are both set |
+
+## Variables (`variables.tf`)
+
+| Variable | Default | Required | Description |
+|---|---|---|---|
+| `region` | `ap-northeast-2` | no | Any AWS region with a default VPC. |
+| `name` | `claude-for-you` | no | Tag prefix for all resources. |
+| `instance_type` | `t3.micro` | no | t3.micro fits trusted-few traffic. |
+| `root_volume_size_gb` | `20` | no | The app keeps OAuth tokens and api-keys.json on the root volume. |
+| `domain_zone_id` | `""` | no | Route53 zone ID. When set with `domain_name`, terraform manages the A record. |
+| `domain_name` | `""` | no | FQDN such as `claude.example.com`. |
+| `git_repo_url` | `""` | no | Public repo cloned by cloud-init on first boot. Empty = clone manually after SSM session. |
+
+## Outputs (`outputs.tf`)
+
+| Output | Use |
+|---|---|
+| `public_ip` | EIP — point an A record here when not using Route53. |
+| `instance_id` | For `aws ssm start-session --target …`. |
+| `ssm_session_command` | One-liner to open a shell on the instance. |
+| `put_env_parameter_command` | One-liner to push the local `.env` into SSM SecureString. |
+| `fetch_env_command` | Helper script the instance runs to materialize `.env` from SSM. |
+| `dns_record` | The created FQDN (or a reminder to point DNS manually). |
+
+## Apply
 
 ```bash
 cd terraform/
+cp terraform.tfvars.example terraform.tfvars  # most users can leave this empty
 
-# 1. 변수 파일 채우기
-cp terraform.tfvars.example terraform.tfvars
-vim terraform.tfvars
-
-# 2. 검토 → 적용
 terraform init
-terraform plan
-terraform apply
-
-# 3. 출력 확인
-terraform output public_ip
-terraform output ssh_command
+terraform plan -out=tfplan
+terraform apply tfplan
 ```
 
-## 그 다음 (수동 단계)
+RDS provisioning is the slow step (~5–7 minutes). EC2 + IAM finish in under 60 seconds.
+
+## After apply
 
 ```bash
-# EC2 접속
-ssh -i ~/.ssh/your-key.pem ec2-user@$(terraform output -raw public_ip)
+# 1. Upload your local .env to SSM SecureString
+aws ssm put-parameter \
+  --name /claude-for-you/env \
+  --value "$(cat ../.env)" \
+  --type SecureString --overwrite \
+  --region ap-northeast-2
 
-# user_data가 docker + git를 깔아둠. 끝났는지 확인:
-test -f /var/log/user-data-done && echo "ready"
+# 2. Open a session on the instance
+aws ssm start-session --target $(terraform output -raw instance_id) --region ap-northeast-2
 
-# 리포 클론 (git_repo_url 변수를 비웠다면 수동)
-cd ~ && git clone <your-fork-url> claude-for-you
-cd claude-for-you
-
-# .env 채우기 (OAuth + API keys + DOMAIN + DISCORD_WEBHOOK_URL)
-cp .env.example .env
-chmod 600 .env
-vim .env
-
-# docker compose up -d --build
-# Caddy가 자동으로 LE 인증서 발급 (DOMAIN env가 EC2 IP로 resolve돼야)
-docker compose up -d --build
-
-# 검증
-curl https://your-domain/healthz
+# Inside the session:
+sudo /usr/local/bin/fetch-env.sh           # writes /home/ec2-user/claude-for-you/.env
+cd /home/ec2-user/claude-for-you           # repo auto-cloned by cloud-init
+sudo docker compose up -d --build
 ```
 
-## 파괴
+## Destroy
 
 ```bash
 terraform destroy
 ```
 
-> ⚠️ `terraform destroy`는 EBS 볼륨까지 지웁니다 → tokens.json도 함께 사라짐. 보존하려면 미리 백업.
+> **Lost when destroyed**: `usage_per_user` table (per-user daily counters), `tokens.json` and `api-keys.json` on the EBS volume.
+> **Preserved**: the local `.env` (untouched), the local `terraform.tfvars` (untouched).
+> **Recovery on next apply**: re-run `aws ssm put-parameter` after the new RDS endpoint is reflected in `aws_ssm_parameter.database_url`. The next `fetch-env.sh` writes the new connection string.
 
-## state 파일
+## State
 
-`terraform.tfstate`는 **민감 정보** (인스턴스 정보, 옵션에 따라 다른 비밀)를 포함합니다. `.gitignore`에서 제외 중. 팀이라면 remote backend (S3 + DynamoDB lock)로 마이그레이션 권장.
+`terraform.tfstate` contains `random_password.db_master.result` and the rendered DATABASE_URL in plaintext. It is gitignored. Back it up out-of-band; losing state means manually importing the AWS resources or destroying them via the console.
+
+For team use, migrate to a remote backend (S3 + DynamoDB lock).

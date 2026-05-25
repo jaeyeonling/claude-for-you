@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import { join } from 'node:path';
 import type { MiddlewareHandler } from 'hono';
+import { log } from './lib/logger.js';
 
 /**
  * Phase 17 capture middleware.
@@ -96,7 +97,7 @@ export const createCaptureMiddleware = (cfg: CaptureConfig): MiddlewareHandler =
       })
       .catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : String(e);
-        console.error(`[capture] write failed: ${msg}`);
+        log.error(`[capture] write failed: ${msg}`);
       });
 
     // Don't await writeQueue — let it flush in the background. The request

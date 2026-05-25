@@ -118,7 +118,7 @@ data "aws_subnets" "default" {
 
 resource "aws_db_subnet_group" "app" {
   name        = "${var.name}-db-subnet"
-  description = "${var.name} RDS — default VPC subnets across AZs"
+  description = "${var.name} RDS - default VPC subnets across AZs"
   subnet_ids  = data.aws_subnets.default.ids
 }
 
