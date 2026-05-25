@@ -80,8 +80,29 @@ aws ssm start-session --target $(terraform output -raw instance_id) --region ap-
 # Inside the session:
 sudo /usr/local/bin/fetch-env.sh           # writes /home/ec2-user/claude-for-you/.env
 cd /home/ec2-user/claude-for-you           # repo auto-cloned by cloud-init
-sudo docker compose up -d --build
+# Build the image with plain `docker build` rather than `compose --build` —
+# the Dockerfile's syntax=docker/dockerfile:1.7 directive needs buildx, and
+# bundled compose builds enforce a stricter buildx version requirement.
+sudo docker build -t claude-for-you:latest .
+sudo docker compose up -d
 ```
+
+### Private-repo support (optional)
+
+When the repo is private, populate the GitHub PAT parameter so cloud-init
+and `scripts/deploy.sh` can authenticate:
+
+```bash
+aws ssm put-parameter \
+  --name /claude-for-you/github-pat \
+  --value "ghp_xxx" \
+  --type SecureString --overwrite \
+  --region ap-northeast-2
+```
+
+A PAT with `repo:read` scope (fine-grained: contents read for this single
+repo) is enough. While the placeholder is intact, cloud-init falls back to
+anonymous clone (only works for public repos).
 
 ## Destroy
 

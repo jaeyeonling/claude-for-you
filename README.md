@@ -89,6 +89,10 @@ Then `curl -H "x-api-key: $YOUR_KEY" -X POST http://127.0.0.1:3456/v1/messages �
 # 1. SSH key pair for SSM is unnecessary — sessions go through AWS Systems Manager
 brew install --cask session-manager-plugin
 
+# (optional) for private-repo deployments, populate the PAT after `terraform apply`:
+#   aws ssm put-parameter --name /claude-for-you/github-pat \
+#     --value "ghp_xxx" --type SecureString --overwrite --region ap-northeast-2
+
 # 2. Customize terraform.tfvars (optional — defaults work for most cases)
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 cd terraform && terraform init && terraform apply
@@ -103,7 +107,7 @@ aws ssm put-parameter \
 # 4. SSM-session into the instance and bring the stack up
 aws ssm start-session --target $(terraform output -raw instance_id) --region ap-northeast-2
 $ sudo /usr/local/bin/fetch-env.sh
-$ cd /home/ec2-user/claude-for-you && sudo docker compose up -d --build
+$ cd /home/ec2-user/claude-for-you && sudo docker build -t claude-for-you:latest . && sudo docker compose up -d
 ```
 
 The terraform module provisions: EC2 (t3.micro, AL2023, IMDSv2 required, SSM-only access — no port 22), RDS Postgres (t4g.micro, single-AZ, encrypted), Elastic IP, IAM role scoped to the two SSM parameters this proxy owns.
@@ -124,6 +128,8 @@ The terraform module provisions: EC2 (t3.micro, AL2023, IMDSv2 required, SSM-onl
 | `DAILY_TOKEN_LIMIT_PER_KEY` | `0` (unlimited) | Per-key cap, UTC reset. |
 | `GLOBAL_SUBSCRIPTION_THRESHOLD_TOKENS` | `0` (off) | Refuse new requests when Anthropic's reported headroom falls below this. |
 | `MAX_CONCURRENT_REQUESTS` | `8` | Application-layer concurrency cap. 429 once exceeded. |
+| `PER_IP_RATE_LIMIT_PER_SECOND` | `0` (off) | Per-IP token bucket on `/v1/messages`. Burst = 2×. Defense-in-depth when behind Caddy without the `rate_limit` module. |
+| `TOKEN_STORE_PATH` | `./data/tokens.json` | Where the OAuth manager persists refreshed tokens. Mount as a volume in containers. |
 | `DISCORD_WEBHOOK_URL` | _(optional)_ | Primary alert channel. |
 | `SLACK_WEBHOOK_URL` | _(optional)_ | Fallback when Discord is unset. |
 | `DOMAIN` | _(required by Caddy)_ | FQDN for ACME, or `:80` for HTTP-only IP-only deployments. |
