@@ -47,7 +47,10 @@
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
-		Referrer-Policy "no-referrer"
+		# `same-origin` (not `no-referrer`) — admin form POSTs need the Referer
+		# header for the CSRF guard's Origin:null fallback path. Cross-origin
+		# navigations still strip Referer, which is what we actually want.
+		Referrer-Policy "same-origin"
 		# CORS is the client's problem — this is a back-end API, not a browser
 		# service. If a browser client ever needs it, add Access-Control-* here.
 	}
