@@ -44,7 +44,15 @@ aws ssm put-parameter \
   --region "$REGION" >/dev/null
 echo "  uploaded ✓"
 
-echo "▸ Running remote setup (git pull, fetch-env, docker compose up)..."
+echo "▸ Running remote setup (git pull, fetch-env, docker build + up)..."
+# The remote script:
+#   1. Resolves the git URL with PAT injection if /github-pat is populated
+#      (private-repo support; falls back to anonymous for public repos).
+#   2. Clones if missing, otherwise fetches + resets to origin/main.
+#   3. Pulls SSM secrets into .env via fetch-env.sh.
+#   4. Builds the docker image with plain `docker build` (NOT `compose --build`)
+#      to sidestep buildx version requirements in compose v5.x bundles.
+#   5. Starts the stack with `docker compose up -d`.
 CMD_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
@@ -52,10 +60,13 @@ CMD_ID=$(aws ssm send-command \
   --region "$REGION" \
   --parameters 'commands=[
     "set -euo pipefail",
-    "if [ ! -d /home/ec2-user/claude-for-you ]; then sudo -u ec2-user git clone https://github.com/jaeyeonling/claude-for-you.git /home/ec2-user/claude-for-you; fi",
-    "cd /home/ec2-user/claude-for-you && sudo -u ec2-user git fetch --depth=1 origin main && sudo -u ec2-user git reset --hard origin/main",
+    "PAT=$(aws ssm get-parameter --name /claude-for-you/github-pat --with-decryption --region '"$REGION"' --query Parameter.Value --output text 2>/dev/null || echo PLACEHOLDER_RUN_PUT_PARAMETER)",
+    "BASE_URL=https://github.com/jaeyeonling/claude-for-you.git",
+    "if [ \"$PAT\" != \"PLACEHOLDER_RUN_PUT_PARAMETER\" ] && [ -n \"$PAT\" ]; then CLONE_URL=$(echo \"$BASE_URL\" | sed \"s#https://github.com/#https://oauth2:$PAT@github.com/#\"); else CLONE_URL=\"$BASE_URL\"; fi",
+    "if [ ! -d /home/ec2-user/claude-for-you ]; then sudo -u ec2-user git clone \"$CLONE_URL\" /home/ec2-user/claude-for-you; fi",
+    "cd /home/ec2-user/claude-for-you && sudo -u ec2-user git remote set-url origin \"$CLONE_URL\" && sudo -u ec2-user git fetch --depth=1 origin main && sudo -u ec2-user git reset --hard origin/main",
     "sudo /usr/local/bin/fetch-env.sh",
-    "cd /home/ec2-user/claude-for-you && docker compose up -d --build"
+    "cd /home/ec2-user/claude-for-you && docker build -t claude-for-you:latest . && docker compose up -d"
   ]' \
   --query 'Command.CommandId' \
   --output text)

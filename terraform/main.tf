@@ -20,8 +20,10 @@ data "aws_caller_identity" "current" {}
 locals {
   env_parameter_name      = "/${var.name}/env"
   database_parameter_name = "/${var.name}/database-url"
+  pat_parameter_name      = "/${var.name}/github-pat"
   env_parameter_arn       = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.env_parameter_name}"
   database_parameter_arn  = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.database_parameter_name}"
+  pat_parameter_arn       = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.pat_parameter_name}"
 }
 
 resource "aws_iam_role" "app" {
@@ -62,6 +64,7 @@ resource "aws_iam_role_policy" "env_param_read" {
         Resource = [
           local.env_parameter_arn,
           local.database_parameter_arn,
+          local.pat_parameter_arn,
         ]
       },
       {
@@ -91,6 +94,23 @@ resource "aws_iam_instance_profile" "app" {
 resource "aws_ssm_parameter" "env" {
   name        = local.env_parameter_name
   description = "claude-for-you .env contents. Populate with aws ssm put-parameter."
+  type        = "SecureString"
+  value       = "PLACEHOLDER_RUN_PUT_PARAMETER"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+# ---------- Parameter Store: GitHub PAT (private repo support) ----------
+# Optional. Operator populates with:
+#   aws ssm put-parameter --name /claude-for-you/github-pat \
+#     --value "ghp_xxx" --type SecureString --overwrite --region <region>
+# When unpopulated (placeholder value), cloud-init and deploy.sh fall back
+# to anonymous git clone (works only if the repo is public).
+resource "aws_ssm_parameter" "github_pat" {
+  name        = local.pat_parameter_name
+  description = "Optional GitHub PAT for private-repo git clone. Populate via aws ssm put-parameter."
   type        = "SecureString"
   value       = "PLACEHOLDER_RUN_PUT_PARAMETER"
 
@@ -155,24 +175,30 @@ resource "random_password" "db_master" {
 }
 
 resource "aws_db_instance" "app" {
-  identifier              = "${var.name}-db"
-  engine                  = "postgres"
-  engine_version          = "16"
-  instance_class          = "db.t4g.micro"
-  allocated_storage       = 20
-  storage_type            = "gp3"
-  storage_encrypted       = true
-  db_name                 = "claude_for_you"
-  username                = "claude"
-  password                = random_password.db_master.result
-  db_subnet_group_name    = aws_db_subnet_group.app.name
-  vpc_security_group_ids  = [aws_security_group.db.id]
-  publicly_accessible     = false
-  multi_az                = false
-  backup_retention_period = 1
-  skip_final_snapshot     = true
-  deletion_protection     = false
-  apply_immediately       = true
+  identifier             = "${var.name}-db"
+  engine                 = "postgres"
+  engine_version         = "16"
+  instance_class         = "db.t4g.micro"
+  allocated_storage      = 20
+  storage_type           = "gp3"
+  storage_encrypted      = true
+  db_name                = "claude_for_you"
+  username               = "claude"
+  password               = random_password.db_master.result
+  db_subnet_group_name   = aws_db_subnet_group.app.name
+  vpc_security_group_ids = [aws_security_group.db.id]
+  publicly_accessible    = false
+  multi_az               = false
+  # 7 daily automated snapshots — survives a week of mistakes. Still cheap
+  # (snapshots are incremental + 100% of allocated storage is free).
+  backup_retention_period = 7
+  # Backup window picked to be UTC off-hours (16:00 UTC = 01:00 KST, low traffic).
+  backup_window = "16:00-17:00"
+  # Maintenance window an hour after backup — keeps both off-peak.
+  maintenance_window  = "thu:17:00-thu:18:00"
+  skip_final_snapshot = true
+  deletion_protection = false
+  apply_immediately   = true
 
   # Lets terraform destroy clean up cleanly.
   delete_automated_backups = true
@@ -182,7 +208,9 @@ resource "aws_ssm_parameter" "database_url" {
   name        = local.database_parameter_name
   description = "Postgres connection string for claude-for-you — terraform-owned (do not edit out-of-band)."
   type        = "SecureString"
-  value       = "postgres://${aws_db_instance.app.username}:${random_password.db_master.result}@${aws_db_instance.app.endpoint}/${aws_db_instance.app.db_name}"
+  # `?sslmode=require` is non-negotiable — RDS rejects unencrypted connections
+  # via the default pg_hba.conf. postgres.js honors the query-string flag.
+  value = "postgres://${aws_db_instance.app.username}:${random_password.db_master.result}@${aws_db_instance.app.endpoint}/${aws_db_instance.app.db_name}?sslmode=require"
 }
 
 # ---------- Security group ----------
@@ -219,30 +247,37 @@ resource "aws_security_group" "app" {
 
 # ---------- EC2 instance ----------
 locals {
+  # Docker Compose v2 — pinned. `releases/latest` once redirected to a wrong
+  # asset (v5.1.4) whose buildx requirement (>=0.17) broke `compose --build`.
+  # Pin to known-good v2.30.x and install buildx alongside.
+  docker_compose_version = "v2.30.3"
+  docker_buildx_version  = "v0.17.1"
+
   user_data = <<-EOT
     #!/bin/bash
     set -e
     dnf update -y
-    dnf install -y docker git
+    dnf install -y docker git jq
 
     systemctl enable --now docker
     usermod -aG docker ec2-user
 
-    # Install docker-compose v2 plugin (Amazon Linux 2023 has no compose by default)
+    # ---- Docker Compose v2 (pinned) ----
     mkdir -p /usr/local/lib/docker/cli-plugins
     ARCH=$(uname -m)
-    curl -sL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$${ARCH}" \
+    curl -sL "https://github.com/docker/compose/releases/download/${local.docker_compose_version}/docker-compose-linux-$${ARCH}" \
       -o /usr/local/lib/docker/cli-plugins/docker-compose
     chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
-    %{if var.git_repo_url != ""~}
-    # Auto-clone for first-boot bootstrap. Operator still has to populate the .env parameter.
-    sudo -u ec2-user bash -c "cd /home/ec2-user && git clone ${var.git_repo_url} claude-for-you"
-    %{endif~}
+    # ---- Docker Buildx (required by Dockerfile syntax=docker/dockerfile:1.7) ----
+    curl -sL "https://github.com/docker/buildx/releases/download/${local.docker_buildx_version}/buildx-${local.docker_buildx_version}.linux-$${ARCH == "x86_64" && "amd64" || "arm64"}" \
+      -o /usr/local/lib/docker/cli-plugins/docker-buildx
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
-    # Helper: pulls both SecureString parameters and writes /home/ec2-user/claude-for-you/.env.
-    # /${var.name}/env       → operator-managed contents (OAuth, API_KEYS, DISCORD_WEBHOOK_URL, etc.)
-    # /${var.name}/database-url → terraform-managed RDS connection string (wins over any local value)
+    # ---- fetch-env.sh writer (runs BEFORE any clone attempt so it's always present) ----
+    # If the SSM /env or /database-url parameters are still placeholders, this
+    # script will write garbage to .env; that's fine — operator populates them
+    # via put-parameter, then re-runs fetch-env.sh.
     cat > /usr/local/bin/fetch-env.sh <<'FETCH'
     #!/bin/bash
     set -euo pipefail
@@ -267,6 +302,25 @@ locals {
     echo "Wrote $${TARGET} (mode 600)"
     FETCH
     chmod +x /usr/local/bin/fetch-env.sh
+
+    # ---- Optional auto-clone — only if git_repo_url is set ----
+    # Uses the GitHub PAT from SSM when populated (private-repo support);
+    # falls back to anonymous (public-repo only) when the placeholder is intact.
+    %{if var.git_repo_url != ""~}
+    PAT=$(aws ssm get-parameter \
+      --name ${local.pat_parameter_name} \
+      --with-decryption \
+      --region ${var.region} \
+      --query 'Parameter.Value' \
+      --output text 2>/dev/null || echo "PLACEHOLDER_RUN_PUT_PARAMETER")
+    CLONE_URL="${var.git_repo_url}"
+    if [ "$${PAT}" != "PLACEHOLDER_RUN_PUT_PARAMETER" ] && [ -n "$${PAT}" ]; then
+      # Inject PAT into HTTPS URL for private-repo support.
+      CLONE_URL=$(echo "${var.git_repo_url}" | sed "s#https://github.com/#https://oauth2:$${PAT}@github.com/#")
+    fi
+    sudo -u ec2-user bash -c "cd /home/ec2-user && git clone $${CLONE_URL} claude-for-you" || \
+      echo "[user-data] git clone failed (private repo without PAT?). Operator can clone manually after SSM-session entry."
+    %{endif~}
 
     echo "user-data finished" > /var/log/user-data-done
   EOT

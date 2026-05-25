@@ -89,6 +89,10 @@ bun run dev
 # 1. SSH 키 페어 불필요 — 세션은 AWS Systems Manager 경유
 brew install --cask session-manager-plugin
 
+# (선택) private repo면 terraform apply 후 PAT 등록:
+#   aws ssm put-parameter --name /claude-for-you/github-pat \
+#     --value "ghp_xxx" --type SecureString --overwrite --region ap-northeast-2
+
 # 2. terraform.tfvars 수정 (선택사항 — 기본값으로도 대부분 OK)
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 cd terraform && terraform init && terraform apply
@@ -103,7 +107,7 @@ aws ssm put-parameter \
 # 4. 인스턴스에 SSM 세션 진입 + 스택 기동
 aws ssm start-session --target $(terraform output -raw instance_id) --region ap-northeast-2
 $ sudo /usr/local/bin/fetch-env.sh
-$ cd /home/ec2-user/claude-for-you && sudo docker compose up -d --build
+$ cd /home/ec2-user/claude-for-you && sudo docker build -t claude-for-you:latest . && sudo docker compose up -d
 ```
 
 terraform 모듈이 프로비저닝하는 것: EC2 (t3.micro, AL2023, IMDSv2 강제, SSM 전용 접근 — 22번 포트 미개방), RDS Postgres (t4g.micro, single-AZ, 암호화), Elastic IP, SSM 파라미터 2개에만 한정된 IAM role.
@@ -124,6 +128,8 @@ terraform 모듈이 프로비저닝하는 것: EC2 (t3.micro, AL2023, IMDSv2 강
 | `DAILY_TOKEN_LIMIT_PER_KEY` | `0` (무제한) | 키별 일일 상한, UTC 리셋. |
 | `GLOBAL_SUBSCRIPTION_THRESHOLD_TOKENS` | `0` (off) | Anthropic의 잔여 토큰이 이 값 아래면 새 요청 거부. |
 | `MAX_CONCURRENT_REQUESTS` | `8` | 어플리케이션 레이어 동시성 캡. 초과 시 429. |
+| `PER_IP_RATE_LIMIT_PER_SECOND` | `0` (off) | `/v1/messages`의 per-IP 토큰 버킷. burst = 2배. Caddy의 `rate_limit` 모듈 없이도 방어. |
+| `TOKEN_STORE_PATH` | `./data/tokens.json` | OAuth 매니저가 refreshed token을 영속화하는 경로. 컨테이너에선 볼륨으로 마운트. |
 | `DISCORD_WEBHOOK_URL` | _(선택)_ | 주 알람 채널. |
 | `SLACK_WEBHOOK_URL` | _(선택)_ | Discord 미설정 시 fallback. |
 | `DOMAIN` | _(Caddy에서 필수)_ | ACME용 FQDN, 또는 IP-only 배포면 `:80`. |
