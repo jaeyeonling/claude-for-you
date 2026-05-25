@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ApiKeyEntry } from '../config.js';
-import { ConfigError, DomainError } from '../lib/errors.js';
+import { ConfigError, Conflict, InvalidRequest } from '../lib/errors.js';
 
 /**
  * Phase 20c — API key store.
@@ -80,7 +80,6 @@ const writeAtomic = async (path: string, file: ApiKeyFile): Promise<void> => {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
   await writeFile(tmp, JSON.stringify(file, null, 2), { mode: 0o600 });
-  const { rename } = await import('node:fs/promises');
   await rename(tmp, path);
 };
 
@@ -113,9 +112,8 @@ export const createApiKeyStore = (params: {
 
   const persist = async (next: ApiKeyFile): Promise<void> => {
     if (!filePath) {
-      throw new DomainError(
+      throw Conflict(
         'api keys file not configured (set API_KEYS_PATH to enable self-serve add/revoke)',
-        409,
         'no_keystore_file',
       );
     }
@@ -123,23 +121,26 @@ export const createApiKeyStore = (params: {
     file = next;
   };
 
+  const assertValidName = (name: string): void => {
+    if (name.length === 0 || /\s|,|:/.test(name)) {
+      throw InvalidRequest(
+        'name must be non-empty and contain no whitespace/colon/comma',
+        'invalid_name',
+      );
+    }
+  };
+
   return Object.freeze({
     list: compose,
     async add(name: string, providedKey?: string): Promise<ApiKeyRecord> {
-      if (name.length === 0 || /\s|,|:/.test(name)) {
-        throw new DomainError(
-          'name must be non-empty and contain no whitespace/colon/comma',
-          400,
-          'invalid_name',
-        );
-      }
+      assertValidName(name);
       const existing = compose().find((e) => e.name === name);
       if (existing) {
-        throw new DomainError(`key "${name}" already exists`, 409, 'key_exists');
+        throw Conflict(`key "${name}" already exists`, 'key_exists');
       }
       const key = providedKey ?? generateKey();
       if (key.length < MIN_KEY_LENGTH) {
-        throw new DomainError(`key must be at least ${MIN_KEY_LENGTH} chars`, 400, 'key_too_short');
+        throw InvalidRequest(`key must be at least ${MIN_KEY_LENGTH} chars`, 'key_too_short');
       }
       const createdAt = new Date().toISOString();
       const next: ApiKeyFile = {
@@ -150,6 +151,9 @@ export const createApiKeyStore = (params: {
       return { name, key, createdAt, source: 'file' };
     },
     async revoke(name: string): Promise<boolean> {
+      // Apply the same validator as add() — rejects malformed names from
+      // the URL param before they touch the file format.
+      assertValidName(name);
       const present = compose().some((e) => e.name === name);
       if (!present) return false;
       // Drop from file.keys if present and add to revoked (covers env-baked keys).

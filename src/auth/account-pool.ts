@@ -120,6 +120,11 @@ export const createAccountPool = (members: readonly PoolMember[]): AccountPool =
       const m = memberByName.get(memberName);
       if (!m) throw ConfigError(`pool member not found: ${memberName}`);
       await m.oauth.replace(state);
+      // Reset headroom estimates. The previous account's tired/exhausted
+      // remaining-tokens would otherwise mis-rank routing decisions on the
+      // first request after rotation.
+      m.remainingTokens = null;
+      m.remainingObservedAt = null;
     },
     observeResponse(memberName: string, responseHeaders: Headers) {
       const m = memberByName.get(memberName);

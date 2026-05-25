@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DomainError } from '../lib/errors.js';
+import { Conflict } from '../lib/errors.js';
 
 /**
  * Phase 20d — snapshot promote/rollback admin endpoints.
@@ -45,11 +45,7 @@ export const createSnapshotHandlers = (): {
   async promote(_c) {
     const cand = candidatePath();
     if (!existsSync(cand)) {
-      throw new DomainError(
-        'no candidate snapshot to promote',
-        409,
-        'no_candidate',
-      );
+      throw Conflict('no candidate snapshot to promote', 'no_candidate');
     }
     await rename(cand, stablePath());
     return Response.json({
@@ -62,11 +58,7 @@ export const createSnapshotHandlers = (): {
   async rollback(_c) {
     const cand = candidatePath();
     if (!existsSync(cand)) {
-      throw new DomainError(
-        'no candidate snapshot to rollback',
-        409,
-        'no_candidate',
-      );
+      throw Conflict('no candidate snapshot to rollback', 'no_candidate');
     }
     await unlink(cand);
     return Response.json({

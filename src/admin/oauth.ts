@@ -38,16 +38,28 @@ const parseFormOrJson = async (c: Context): Promise<Record<string, unknown>> => 
 const asString = (value: unknown): string =>
   typeof value === 'string' ? value.trim() : '';
 
+const REFRESH_PREFIX = 'sk-ant-ort01-';
+const ACCESS_PREFIX = 'sk-ant-oat01-';
+
 const validate = (raw: Record<string, unknown>): ReplacePayload => {
   const refreshToken = asString(raw.refreshToken);
   if (refreshToken.length === 0) {
     throw InvalidRequest('refreshToken is required');
+  }
+  if (!refreshToken.startsWith(REFRESH_PREFIX)) {
+    // Catches the common mistake of pasting an access token into the
+    // refresh field — would otherwise surface as a confusing 502 on the
+    // next /v1/messages call.
+    throw InvalidRequest(`refreshToken must start with "${REFRESH_PREFIX}"`);
   }
   if (refreshToken.length < 32) {
     throw InvalidRequest('refreshToken looks too short (<32 chars)');
   }
   const memberName = asString(raw.memberName) || 'default';
   const accessToken = asString(raw.accessToken);
+  if (accessToken.length > 0 && !accessToken.startsWith(ACCESS_PREFIX)) {
+    throw InvalidRequest(`accessToken must start with "${ACCESS_PREFIX}" if provided`);
+  }
   const expiresAtRaw = asString(raw.expiresAt);
   const expiresAt = expiresAtRaw.length > 0 ? Number(expiresAtRaw) : 0;
   if (!Number.isFinite(expiresAt) || expiresAt < 0) {

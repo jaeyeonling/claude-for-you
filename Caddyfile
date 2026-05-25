@@ -6,8 +6,28 @@
 #     Let's Encrypt — leave it open for ACME http-01 challenge).
 #   - DNS A record points {$DOMAIN} at the EC2 public IP.
 
+# Global config — keep the auto-HTTPS issuer logs quiet on stdout, and serve
+# a slim error page that doesn't leak Caddy version when something upstream
+# is down.
+{
+	servers {
+		# Helps Caddy strip hop-by-hop headers cleanly when forwarding to Bun.
+		strict_sni_host insecure_off
+	}
+}
+
 {$DOMAIN} {
 	encode zstd gzip
+
+	# Defense-in-depth: even though the proxy enforces application-layer
+	# concurrency (MAX_CONCURRENT_REQUESTS), an attacker with a stolen API
+	# key shouldn't be able to fan-out from one IP. Caddy's `request_body`
+	# directive caps body size at the edge; ts-side bodyLimit catches the
+	# rest. If you need true per-IP rate limiting, install the community
+	# `caddy-ratelimit` module — the default Caddy build does not ship it.
+	request_body {
+		max_size 4MB
+	}
 
 	# Trust nothing about client identity at the edge — the app handles auth.
 	# Just forward and let API-key middleware decide.

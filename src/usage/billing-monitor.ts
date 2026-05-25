@@ -1,4 +1,5 @@
 import type { AlertSink } from '../alerts.js';
+import { log } from '../lib/logger.js';
 import type { DriftAnalyzer } from './drift-analyzer.js';
 
 /**
@@ -90,7 +91,7 @@ export const createBillingMonitor = (params: {
         (claim ? ` (representative-claim=${claim})` : '') +
         ` — total non-standard responses: ${nonStandardCount}` +
         rootCause;
-      console.warn(message);
+      log.warn(message);
       void params.sink(message); // fire-and-forget — don't block request path
     },
     snapshot(): BillingMonitorSnapshot {

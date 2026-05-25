@@ -17,6 +17,8 @@ export type AppConfig = Readonly<{
   databaseUrl: string | null;
   globalSubscriptionThresholdTokens: number;
   maxConcurrentRequests: number;
+  /** Per-IP rate limit (requests/sec). 0 = disabled. */
+  perIpRateLimitPerSecond: number;
   pacingMinGapMs: number;
   accountUuidOverride: string | null;
   accountsPath: string;
@@ -83,6 +85,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): AppConfig => {
     databaseUrl: env.DATABASE_URL && env.DATABASE_URL.length > 0 ? env.DATABASE_URL : null,
     globalSubscriptionThresholdTokens: Number(env.GLOBAL_SUBSCRIPTION_THRESHOLD_TOKENS ?? 0),
     maxConcurrentRequests: Number(env.MAX_CONCURRENT_REQUESTS ?? 8),
+    perIpRateLimitPerSecond: Number(env.PER_IP_RATE_LIMIT_PER_SECOND ?? 0),
     pacingMinGapMs: Number(env.PACING_MIN_GAP_MS ?? 0),
     accountUuidOverride:
       env.ACCOUNT_UUID_OVERRIDE && env.ACCOUNT_UUID_OVERRIDE.length > 0

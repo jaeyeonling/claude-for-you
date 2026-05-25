@@ -16,6 +16,9 @@ export type UsageTracker = Readonly<{
   assertCanRequest(userName: string): Promise<void>;
   record(userName: string, usage: SniffedUsage): Promise<void>;
   snapshot(): Promise<UsageSnapshot>;
+  /** Graceful shutdown hook — close DB pools, flush buffers, etc.
+   *  In-memory variants leave undefined. */
+  close?(): Promise<void>;
 }>;
 
 export const createUsageTracker = (params: {

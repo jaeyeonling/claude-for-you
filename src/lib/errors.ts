@@ -24,5 +24,17 @@ export const UpstreamFailed = (msg: string, status = 502): DomainError =>
 export const ConfigError = (msg: string): DomainError =>
   new DomainError(msg, 500, 'config_error');
 
-export const InvalidRequest = (msg: string): DomainError =>
-  new DomainError(msg, 400, 'invalid_request');
+export const InvalidRequest = (msg: string, code = 'invalid_request'): DomainError =>
+  new DomainError(msg, 400, code);
+
+export const NotFound = (msg: string, code = 'not_found'): DomainError =>
+  new DomainError(msg, 404, code);
+
+export const Conflict = (msg: string, code = 'conflict'): DomainError =>
+  new DomainError(msg, 409, code);
+
+export const TooManyRequests = (msg: string): DomainError =>
+  new DomainError(msg, 429, 'too_many_requests');
+
+export const CsrfFailed = (msg: string): DomainError =>
+  new DomainError(msg, 403, 'csrf_failed');

@@ -17,6 +17,22 @@ export interface UpstreamResult {
   readonly servedBy: string;
 }
 
+// 5xx retry: small fixed budget with full jitter so a flapping upstream
+// doesn't pin one pool member or burst-retry into the same outage window.
+const FIVE_XX_MAX_ATTEMPTS = 2; // total attempts including the first
+const FIVE_XX_BASE_DELAY_MS = 250;
+const FIVE_XX_MAX_DELAY_MS = 2_000;
+
+const isTransient5xx = (status: number): boolean =>
+  status === 502 || status === 503 || status === 504;
+
+const fullJitterDelay = (attempt: number): number => {
+  const upper = Math.min(FIVE_XX_BASE_DELAY_MS * 2 ** attempt, FIVE_XX_MAX_DELAY_MS);
+  return Math.floor(Math.random() * upper);
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 const fetchOnce = async (
   clientBody: unknown,
   clientHeaders: Headers | undefined,
@@ -24,19 +40,43 @@ const fetchOnce = async (
   template: ClaudeTemplate,
   pacing: PacingEnforcer,
 ): Promise<Response> => {
-  const outbound = await template.apply({ clientBody, accessToken, clientHeaders });
-  // Pace by the session-id we're about to send (CC's view of "same session").
-  await pacing.await(outbound.headers['x-claude-code-session-id']);
-  try {
-    return await fetch(outbound.url, {
-      method: outbound.method,
-      headers: outbound.headers,
-      body: outbound.body,
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-    });
-  } catch (e) {
-    throw UpstreamFailed(`upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+  // Transparent retry on transient upstream 5xx. Auth-related statuses
+  // (401/429) are handled by the outer caller because they require a
+  // different token / different pool member.
+  let lastNetworkError: unknown = null;
+  let lastResponse: Response | null = null;
+
+  for (let attempt = 0; attempt < FIVE_XX_MAX_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await sleep(fullJitterDelay(attempt - 1));
+    const outbound = await template.apply({ clientBody, accessToken, clientHeaders });
+    // Pace by the session-id we're about to send (CC's view of "same session").
+    await pacing.await(outbound.headers['x-claude-code-session-id']);
+    try {
+      const res = await fetch(outbound.url, {
+        method: outbound.method,
+        headers: outbound.headers,
+        body: outbound.body,
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      });
+      if (isTransient5xx(res.status) && attempt < FIVE_XX_MAX_ATTEMPTS - 1) {
+        // Consume the body so the connection can be reused.
+        await res.body?.cancel().catch(() => undefined);
+        lastResponse = res;
+        continue;
+      }
+      return res;
+    } catch (e) {
+      lastNetworkError = e;
+      // Network errors (timeout, DNS, connection reset) — retry like 5xx.
+      if (attempt < FIVE_XX_MAX_ATTEMPTS - 1) continue;
+      throw UpstreamFailed(`upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
+
+  if (lastResponse) return lastResponse;
+  throw UpstreamFailed(
+    `upstream fetch failed: ${lastNetworkError instanceof Error ? lastNetworkError.message : String(lastNetworkError)}`,
+  );
 };
 
 /**

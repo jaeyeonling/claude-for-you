@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AccountLearner } from '../account-learner.js';
 import { ConfigError } from '../lib/errors.js';
+import { log } from '../lib/logger.js';
 import type { ApplyInput, ClaudeTemplate, OutboundRequest } from './types.js';
 
 const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
@@ -182,7 +183,7 @@ const reorderBody = (snapshot: SnapshotV2, clientBody: unknown): unknown => {
 const warnIfStale = (snapshot: SnapshotV2, label: string): void => {
   const ageDays = Math.floor((Date.now() - new Date(snapshot.extractedAt).getTime()) / 86_400_000);
   if (ageDays > SNAPSHOT_AGE_WARN_DAYS) {
-    console.warn(
+    log.warn(
       `[template] WARNING: ${label} snapshot is ${ageDays} days old. ` +
         `Re-capture with CAPTURE_MODE then \`bun run synthesize-snapshot\`.`,
     );

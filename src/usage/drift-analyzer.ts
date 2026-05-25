@@ -82,12 +82,12 @@ export const createDriftAnalyzer = (): DriftAnalyzer => {
         for (const fp of slice) for (const v of pick(fp)) s.add(v);
         return s;
       };
-      const collectVal = (slice: RequestFingerprint[], pick: (fp: RequestFingerprint) => string): Set<string> => {
+      const collectVal = (
+        slice: RequestFingerprint[],
+        pick: (fp: RequestFingerprint) => string,
+      ): Set<string> => {
         const s = new Set<string>();
         for (const fp of slice) {
-          if (fp[pick.name as keyof RequestFingerprint] !== undefined) {
-            // not needed — use the picker directly
-          }
           const v = pick(fp);
           if (v) s.add(v);
         }

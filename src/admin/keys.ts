@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
 import type { ApiKeyStore } from '../auth/api-key-store.js';
-import { DomainError } from '../lib/errors.js';
+import { InvalidRequest, NotFound } from '../lib/errors.js';
 
 /**
  * Phase 20c — admin key management.
@@ -38,7 +38,7 @@ export const createKeysHandlers = (store: ApiKeyStore): {
       | { name?: unknown; key?: unknown }
       | null;
     if (!body || typeof body.name !== 'string') {
-      throw new DomainError('body must be { name: string, key?: string }', 400, 'invalid_request');
+      throw InvalidRequest('body must be { name: string, key?: string }');
     }
     const providedKey = typeof body.key === 'string' ? body.key : undefined;
     const created = await store.add(body.name, providedKey);
@@ -54,11 +54,11 @@ export const createKeysHandlers = (store: ApiKeyStore): {
   async revoke(c) {
     const name = c.req.param('name');
     if (!name) {
-      throw new DomainError('missing name path parameter', 400, 'invalid_request');
+      throw InvalidRequest('missing name path parameter');
     }
     const ok = await store.revoke(name);
     if (!ok) {
-      throw new DomainError(`key "${name}" not found`, 404, 'not_found');
+      throw NotFound(`key "${name}" not found`);
     }
     return c.json({ revoked: name });
   },
