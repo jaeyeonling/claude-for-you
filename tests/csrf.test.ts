@@ -58,4 +58,37 @@ describe('csrfGuard', () => {
     });
     expect(res.status).toBe(200);
   });
+
+  test('Origin: null allowed when Referer matches expected host', async () => {
+    // Some browsers (Safari, strict-privacy mode, sandbox iframes) send
+    // a literal "null" Origin even on same-origin POSTs. We fall back to
+    // Referer — same-origin Referer is forgery-resistant.
+    const res = await buildApp().request('http://proxy.example.com/admin/x', {
+      method: 'POST',
+      headers: {
+        Origin: 'null',
+        Referer: 'http://proxy.example.com/admin',
+      },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('Origin: null with no Referer is rejected', async () => {
+    const res = await buildApp().request('http://proxy.example.com/admin/x', {
+      method: 'POST',
+      headers: { Origin: 'null' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('Origin: null with cross-origin Referer is rejected', async () => {
+    const res = await buildApp().request('http://proxy.example.com/admin/x', {
+      method: 'POST',
+      headers: {
+        Origin: 'null',
+        Referer: 'https://evil.example.com/attack',
+      },
+    });
+    expect(res.status).toBe(403);
+  });
 });
