@@ -15,7 +15,46 @@ const buildApp = (): Hono => {
   return app;
 };
 
-describe('csrfGuard', () => {
+describe('csrfGuard — Sec-Fetch-Site (primary defense)', () => {
+  test('Sec-Fetch-Site: same-origin → allowed (even with hostile Origin spoof attempt)', async () => {
+    // Browsers forbid JS from setting Sec-Fetch-Site, so a same-origin
+    // value here is authoritative — overrides any Origin/Referer noise.
+    const res = await buildApp().request('/admin/x', {
+      method: 'POST',
+      headers: {
+        'Sec-Fetch-Site': 'same-origin',
+        Origin: 'null',
+      },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('Sec-Fetch-Site: none → allowed (direct navigation / bookmark)', async () => {
+    const res = await buildApp().request('/admin/x', {
+      method: 'POST',
+      headers: { 'Sec-Fetch-Site': 'none' },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('Sec-Fetch-Site: cross-site → rejected (attacker page)', async () => {
+    const res = await buildApp().request('/admin/x', {
+      method: 'POST',
+      headers: { 'Sec-Fetch-Site': 'cross-site' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('Sec-Fetch-Site: same-site → rejected (different subdomain)', async () => {
+    const res = await buildApp().request('/admin/x', {
+      method: 'POST',
+      headers: { 'Sec-Fetch-Site': 'same-site' },
+    });
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('csrfGuard — Origin/Referer fallback (older browsers / CLI)', () => {
   test('allows GET requests regardless of Origin', async () => {
     const res = await buildApp().request('/admin/x', {
       method: 'GET',
