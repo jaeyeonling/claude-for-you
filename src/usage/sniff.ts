@@ -6,7 +6,7 @@ export type SniffedUsage = Readonly<{
 
 const SSE_EVENT_DELIM = '\n\n';
 
-const safeParseJson = (text: string): unknown => {
+export const safeParseJson = (text: string): unknown => {
   try {
     return JSON.parse(text);
   } catch {
@@ -14,7 +14,7 @@ const safeParseJson = (text: string): unknown => {
   }
 };
 
-const extractUsage = (
+export const extractUsage = (
   parsed: unknown,
 ): {
   input: number | undefined;
