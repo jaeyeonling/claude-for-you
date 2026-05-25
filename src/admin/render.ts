@@ -105,7 +105,18 @@ form.stack button{align-self:flex-start;margin-top:.2rem}
 code{background:oklch(28% 0 0 / 0.5);padding:.05rem .35rem;border-radius:2px;font-size:.78rem;word-break:break-all}
 `;
 
-export const renderAdminHtml = (s: AdminPageSnapshot): string => {
+const webhookStatus = (url: string | null): string =>
+  url
+    ? `<span class="badge b-good">configured</span> <span class="tag">(${esc(url.length)} chars)</span>`
+    : `<span class="badge b-mute">not set</span>`;
+
+/**
+ * Renders only the auto-updating sections (everything except the input forms).
+ * Exported so the SSE handler can stream just these on each tick — the
+ * `<div id="live-region" style="display:contents">` wrapper in the full page
+ * gets its children replaced with this output, preserving form input state.
+ */
+export const renderLiveSections = (s: AdminPageSnapshot): string => {
   const lastObs = s.billingSnap.lastObservation;
   const canaryBadge = !s.canarySnap.active
     ? '<span class="badge b-mute">inactive</span>'
@@ -139,31 +150,7 @@ export const renderAdminHtml = (s: AdminPageSnapshot): string => {
       `<button type="submit" class="logout">rollback (delete candidate)</button></form>`
     : `<span class="badge b-mute">no candidate snapshot present</span>`;
 
-  const memberOptions = s.poolSnap.members
-    .map(
-      (m, i) =>
-        `<option value="${esc(m.name)}"${i === 0 ? ' selected' : ''}>${esc(m.name)}</option>`,
-    )
-    .join('');
-
-  const webhookStatus = (url: string | null): string =>
-    url
-      ? `<span class="badge b-good">configured</span> <span class="tag">(${esc(url.length)} chars)</span>`
-      : `<span class="badge b-mute">not set</span>`;
-
-  return `<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta http-equiv="refresh" content="5">
-<title>claude-for-you · admin</title>
-<style>${STYLE}</style>
-</head><body>
-<header>
-  <h1>claude-for-you · admin</h1>
-  <span class="tag">bun ${esc(s.bunVersion)} · uptime ${esc(fmtDur(s.uptimeSec))}</span>
-  <span class="tag" style="flex:1">${esc(s.templateDescription)}</span>
-</header>
-<main>
+  return `
   <section>
     <h2>billing health</h2>
     <dl class="kv">
@@ -224,6 +211,25 @@ export const renderAdminHtml = (s: AdminPageSnapshot): string => {
     <p class="tag">${snapshotControls}</p>
     <p class="tag" style="margin-top:.7rem">⚠️ Both actions require <code>docker compose restart app</code> to take effect.</p>
   </section>
+  <section style="grid-column: 1 / -1">
+    <h2>per-user usage (UTC today)</h2>
+    <dl class="kv">${usageRows}</dl>
+  </section>`;
+};
+
+/**
+ * Renders only the input-form sections. These never get touched by SSE
+ * updates — preserves the operator's in-progress paste / type.
+ */
+const renderFormSections = (s: AdminPageSnapshot): string => {
+  const memberOptions = s.poolSnap.members
+    .map(
+      (m, i) =>
+        `<option value="${esc(m.name)}"${i === 0 ? ' selected' : ''}>${esc(m.name)}</option>`,
+    )
+    .join('');
+
+  return `
   <section>
     <h2>oauth token rotation</h2>
     <p class="tag">Paste a fresh refresh token. The next request triggers a refresh and writes a new access token to disk.</p>
@@ -253,15 +259,66 @@ export const renderAdminHtml = (s: AdminPageSnapshot): string => {
       <input id="slack-url" type="url" name="url" placeholder="https://hooks.slack.com/services/...">
       <button type="submit">update slack</button>
     </form>
-  </section>
-  <section style="grid-column: 1 / -1">
-    <h2>per-user usage (UTC today)</h2>
-    <dl class="kv">${usageRows}</dl>
-  </section>
+  </section>`;
+};
+
+// Inline JS — connects to /admin/events SSE, swaps the live region's children
+// on each push without touching the form sections. Uses DOMParser (which
+// produces an inert document — no script execution from parsed HTML) so the
+// payload is treated as data, not as code. All dynamic values were escaped
+// server-side via esc() before reaching this layer.
+const LIVE_SCRIPT = `
+(() => {
+  const region = document.getElementById('live-region');
+  const pip = document.getElementById('live-status');
+  if (!region || !pip) return;
+  const setStatus = (text, cls) => {
+    pip.textContent = text;
+    pip.className = 'badge ' + cls;
+  };
+  setStatus('connecting…', 'b-mute');
+  const es = new EventSource('/admin/events');
+  es.onopen = () => setStatus('live', 'b-good');
+  es.onerror = () => setStatus('reconnecting…', 'b-warn');
+  es.onmessage = (ev) => {
+    let payload;
+    try { payload = JSON.parse(ev.data); }
+    catch (_) { return; }
+    if (typeof payload.html !== 'string') return;
+    // DOMParser parses HTML inertly — <script> elements in the parsed
+    // document are not executed. Combined with server-side esc(), this is
+    // safe even though we control both ends.
+    const parsed = new DOMParser().parseFromString(
+      '<div>' + payload.html + '</div>',
+      'text/html',
+    );
+    const wrapper = parsed.body.firstElementChild;
+    if (!wrapper) return;
+    region.replaceChildren(...wrapper.children);
+  };
+})();
+`;
+
+export const renderAdminHtml = (s: AdminPageSnapshot): string => {
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>claude-for-you · admin</title>
+<style>${STYLE}</style>
+</head><body>
+<header>
+  <h1>claude-for-you · admin</h1>
+  <span class="tag">bun ${esc(s.bunVersion)} · uptime ${esc(fmtDur(s.uptimeSec))}</span>
+  <span class="tag" style="flex:1">${esc(s.templateDescription)}</span>
+</header>
+<main>
+  <div id="live-region" style="display:contents">${renderLiveSections(s)}</div>
+  ${renderFormSections(s)}
 </main>
 <footer>
-  <span>auto-refresh 5s</span>
+  <span><span id="live-status" class="badge b-mute">connecting…</span></span>
   <span>${esc(s.now.toLocaleTimeString())}</span>
 </footer>
+<script>${LIVE_SCRIPT}</script>
 </body></html>`;
 };

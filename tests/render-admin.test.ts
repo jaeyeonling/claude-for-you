@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { renderAdminHtml, type AdminPageSnapshot } from '../src/admin/render.js';
+import {
+  renderAdminHtml,
+  renderLiveSections,
+  type AdminPageSnapshot,
+} from '../src/admin/render.js';
 
 const baseSnap = (overrides: Partial<AdminPageSnapshot> = {}): AdminPageSnapshot => ({
   poolSnap: {
@@ -130,5 +134,46 @@ describe('renderAdminHtml', () => {
     );
     expect(html).toContain('b-bad">priority');
     expect(html).toContain('non-standard count</dt><dd>7');
+  });
+});
+
+describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
+  test('live sections never contain text-input form fields', () => {
+    const live = renderLiveSections(baseSnap());
+    // The text fields the operator might be typing into must NOT be in the
+    // live region — they live in the form sections that the SSE update path
+    // never touches.
+    expect(live).not.toContain('name="refreshToken"');
+    expect(live).not.toContain('name="accessToken"');
+    expect(live).not.toContain('name="url"');
+  });
+
+  test('live sections do contain auto-updating data (billing/pool/usage)', () => {
+    const live = renderLiveSections(baseSnap());
+    expect(live).toContain('billing health');
+    expect(live).toContain('account pool');
+    expect(live).toContain('per-user usage');
+    expect(live).toContain('snapshot promote/rollback');
+  });
+
+  test('full page wraps live sections in display:contents container', () => {
+    const html = renderAdminHtml(baseSnap());
+    expect(html).toContain('id="live-region"');
+    expect(html).toContain('style="display:contents"');
+  });
+
+  test('full page includes EventSource client + status pip', () => {
+    const html = renderAdminHtml(baseSnap());
+    expect(html).toContain('id="live-status"');
+    expect(html).toContain("new EventSource('/admin/events')");
+    // Old meta-refresh must not coexist with SSE flow.
+    expect(html).not.toContain('http-equiv="refresh"');
+  });
+
+  test('full page includes both live and form sections', () => {
+    const html = renderAdminHtml(baseSnap());
+    expect(html).toContain('billing health'); // live
+    expect(html).toContain('oauth token rotation'); // form
+    expect(html).toContain('alert webhooks'); // form
   });
 });
