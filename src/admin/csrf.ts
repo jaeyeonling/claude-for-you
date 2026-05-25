@@ -12,36 +12,45 @@ import { CsrfFailed } from '../lib/errors.js';
  * Decision table:
  *   Origin present + matches expected → ALLOW
  *   Origin present + mismatches       → DENY
- *   Origin == "null" (sandbox / strict
- *     privacy / opaque origin) → check Referer; allow if matches expected
+ *   Origin == "null" (sandbox / strict privacy / opaque origin)
+ *     → check Referer; allow if its HOSTNAME matches expected (ignoring
+ *       scheme + port to survive Caddy proxy hops, HSTS upgrades, etc.)
  *   Origin absent (non-browser CLI)   → ALLOW (no browser → no CSRF surface)
  *
- * The Origin: null path matters because some browsers / privacy modes send
- * a literal "null" string for plain-HTTP same-origin form submissions or for
- * sandbox-embedded contexts. The Referer fallback lets legitimate operator
- * sessions through while still blocking attacker pages (which can't forge
- * Referer to match the proxy host).
+ * Why hostname-only on the Origin-null fallback path:
+ *   - An attacker page on https://evil.example.com can set neither Origin
+ *     nor Referer to point at the proxy's hostname.
+ *   - Same-origin form submissions in browsers that send Origin: null
+ *     (Safari, sandbox iframes, some privacy modes) reliably send a
+ *     Referer with the page hostname — but scheme/port may differ from
+ *     what the server computes (Caddy → Bun internal hop, HSTS cache
+ *     upgrades, etc.).
  *
  * Behind Caddy/any reverse proxy the effective public host comes from
  * X-Forwarded-Host. Without that header we fall back to the request URL.
  */
 const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-const computeExpectedOrigin = (c: Context): string => {
+const computeExpected = (c: Context): { origin: string; hostname: string } => {
   const xfProto = c.req.header('x-forwarded-proto');
   const xfHost = c.req.header('x-forwarded-host') ?? c.req.header('host');
   const url = new URL(c.req.url);
-  return xfHost !== undefined
-    ? `${xfProto ?? url.protocol.replace(':', '')}://${xfHost}`
-    : `${url.protocol}//${url.host}`;
+  const origin =
+    xfHost !== undefined
+      ? `${xfProto ?? url.protocol.replace(':', '')}://${xfHost}`
+      : `${url.protocol}//${url.host}`;
+  // Hostname only — used for the Referer-fallback path so we tolerate
+  // Caddy ↔ Bun internal hop scheme/port quirks and stale HSTS upgrades.
+  const hostname = (xfHost ?? url.host).split(':')[0] ?? '';
+  return { origin, hostname };
 };
 
-const refererMatches = (referer: string | undefined, expected: string): boolean => {
-  if (!referer) return false;
+const refererHostname = (referer: string | undefined): string | null => {
+  if (!referer) return null;
   try {
-    return new URL(referer).origin === expected;
+    return new URL(referer).hostname;
   } catch {
-    return false;
+    return null;
   }
 };
 
@@ -60,23 +69,26 @@ export const csrfGuard = async (c: Context, next: Next): Promise<Response | void
     return;
   }
 
-  const expectedOrigin = computeExpectedOrigin(c);
+  const expected = computeExpected(c);
 
   if (origin === 'null') {
-    // Sandbox / opaque origin / strict-privacy browser. Fall back to
-    // Referer — an attacker page cannot forge Referer to match our host.
+    // Sandbox / opaque origin / strict-privacy browser. Fall back to a
+    // Referer HOSTNAME match — attacker pages can't forge Referer to the
+    // proxy's hostname. Scheme + port deliberately ignored so we survive
+    // Caddy → Bun internal hops, HSTS quirks, and downgrade redirects.
     const referer = c.req.header('referer');
-    if (refererMatches(referer, expectedOrigin)) {
+    const refHost = refererHostname(referer);
+    if (refHost !== null && refHost === expected.hostname) {
       await next();
       return;
     }
     throw CsrfFailed(
-      `csrf check failed: Origin null with non-matching Referer (expected ${expectedOrigin})`,
+      `csrf check failed: Origin=null, Referer=${referer ?? '<none>'} (expected hostname ${expected.hostname})`,
     );
   }
 
-  if (origin !== expectedOrigin) {
-    throw CsrfFailed(`csrf check failed: Origin ${origin} ≠ expected ${expectedOrigin}`);
+  if (origin !== expected.origin) {
+    throw CsrfFailed(`csrf check failed: Origin ${origin} ≠ expected ${expected.origin}`);
   }
   await next();
 };
