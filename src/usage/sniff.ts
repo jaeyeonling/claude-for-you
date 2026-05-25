@@ -67,11 +67,24 @@ export const sniffUsage = (
   let inputTokens = 0;
   let outputTokens = 0;
   let serviceTier: string | undefined;
+  // `downstreamOpen` guards against the race where the consumer (HTTP server
+  // → client socket) finishes reading or closes before the source upstream
+  // body is fully drained. In Bun this surfaces as
+  // "Invalid state: Controller is already closed" thrown by enqueue/close.
+  // We accumulate usage data regardless so onComplete still fires for
+  // accounting + billing-monitor + canary trip.
+  let downstreamOpen = true;
 
   return input.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
-        controller.enqueue(chunk);
+        if (downstreamOpen) {
+          try {
+            controller.enqueue(chunk);
+          } catch {
+            downstreamOpen = false;
+          }
+        }
         buffer += decoder.decode(chunk, { stream: true });
         if (!isStream) return;
         while (true) {
@@ -96,7 +109,12 @@ export const sniffUsage = (
             if (u.tier !== undefined) serviceTier = u.tier;
           }
         }
-        onComplete({ inputTokens, outputTokens, serviceTier });
+        try {
+          onComplete({ inputTokens, outputTokens, serviceTier });
+        } catch {
+          // onComplete is best-effort accounting — never let it surface as
+          // an unhandled stream error that masks the upstream success.
+        }
       },
     }),
   );
