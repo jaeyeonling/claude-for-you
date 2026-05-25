@@ -269,6 +269,12 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     }
     const msg = redact(`[unhandled] ${err instanceof Error ? err.message : String(err)}`);
     log.error(msg);
+    // Stack trace helps locate the throw site. Names only — function /
+    // file frames don't carry response bodies, but redact still scrubs
+    // any incidental token-shaped string.
+    if (err instanceof Error && err.stack) {
+      log.error(redact(err.stack));
+    }
     void serverErrorSink(msg);
     return c.json({ error: { type: 'internal_error', message: 'internal error' } }, 500);
   });
