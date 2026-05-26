@@ -10,6 +10,7 @@ import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { extractUsage, safeParseJson, sniffUsage } from '../usage/sniff.js';
+import { log } from '../lib/logger.js';
 import { callUpstream } from './upstream.js';
 
 /**
@@ -151,7 +152,26 @@ export const createMessagesHandler =
     // new Response. Bun's small-body optimization can leave the body stream
     // in a "used" state that throws synchronously when re-wrapped, while
     // `response.text()` always works because it owns the internal buffer.
-    const bodyText = await upstream.response.text().catch(() => '');
+    //
+    // Failure mode worth seeing: silently swallowing the .text() error used
+    // to make 429 responses show up at the client with EMPTY bodies, which
+    // hid the upstream's "rate_limit_error" detail and broke self-test
+    // diagnostics. We now log the actual failure reason instead.
+    const bodyText = await upstream.response.text().catch((err: unknown) => {
+      log.error(
+        `[proxy] body read failed (status=${upstream.response.status}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return '';
+    });
+    if (upstream.response.status >= 400 && bodyText.length === 0) {
+      log.warn(
+        `[proxy] empty body on ${upstream.response.status} — ` +
+          `ct=${upstream.response.headers.get('content-type') ?? '?'} ` +
+          `cl=${upstream.response.headers.get('content-length') ?? '?'} ` +
+          `te=${upstream.response.headers.get('transfer-encoding') ?? '?'} ` +
+          `ce=${upstream.response.headers.get('content-encoding') ?? '?'}`,
+      );
+    }
     const usage = extractUsage(safeParseJson(bodyText));
     if (usage) {
       onUsage({
