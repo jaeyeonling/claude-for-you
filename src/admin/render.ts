@@ -258,6 +258,7 @@ export const renderLiveSections = (s: AdminPageSnapshot): string => {
       ${renderTestResult('oauth refresh', s.testResults['oauth-probe'])}
       ${renderTestResult('self-ping', s.testResults['self-ping'])}
       ${renderTestResult('key invoke', s.testResults['key-invoke'])}
+      ${renderTestResult('upstream direct', s.testResults['upstream-direct'])}
     </dl>
   </section>
   <section style="grid-column: 1 / -1">
@@ -311,6 +312,11 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     </form>`
         : '<p class="tag" style="margin-top:.5rem">No keys to invoke — add one via <code>/admin/keys</code> first.</p>'
     }
+    <form class="stack" action="/admin/test/upstream-direct" method="post">
+      <label for="direct-model">upstream direct <span class="tag">(bypasses proxy template — minimal headers)</span></label>
+      <input id="direct-model" type="text" name="model" placeholder="claude-sonnet-4-6" value="claude-sonnet-4-6">
+      <button type="submit">call api.anthropic.com</button>
+    </form>
   </section>
   <section>
     <h2>oauth token rotation</h2>

@@ -18,7 +18,7 @@ import { InvalidRequest, NotFound } from '../lib/errors.js';
  * diagnostics, not telemetry.
  */
 
-export type TestKind = 'oauth-probe' | 'self-ping' | 'key-invoke';
+export type TestKind = 'oauth-probe' | 'self-ping' | 'key-invoke' | 'upstream-direct';
 
 export interface TestResult {
   readonly kind: TestKind;
@@ -41,6 +41,7 @@ export const createTestResultStore = (): TestResultStore => {
     'oauth-probe': null,
     'self-ping': null,
     'key-invoke': null,
+    'upstream-direct': null,
   };
   return {
     record(result) {
@@ -345,6 +346,79 @@ export const createKeyInvokeHandler =
 
     const res = await runLoopbackPing(fetcher(), entry.key, model);
     const result = recordPingResult(store, 'key-invoke', `key=${entry.name}`, res);
+    return respond(c, result);
+  };
+
+// ---------- Upstream direct (bypass proxy/template) ----------
+
+/**
+ * Calls api.anthropic.com directly with the bare minimum: Authorization
+ * Bearer + content-type. NO Claude Code headers, NO anthropic-beta flags,
+ * NO x-stainless-*. Compared with self-ping (which goes through the full
+ * proxy template), this isolates whether a 429 originates upstream-of-template
+ * (account/quota) or template-of-upstream (header drift).
+ */
+const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com/v1/messages';
+
+export const createUpstreamDirectHandler =
+  (pool: AccountPool, store: TestResultStore) =>
+  async (c: Context): Promise<Response> => {
+    const raw = await parseFormOrJson(c).catch(() => null);
+    const model = asString(raw?.model) || DEFAULT_MODEL;
+
+    const startedAt = Date.now();
+    let result: TestResult;
+    try {
+      const { token, name: servedBy } = await pool.getAccessToken(undefined);
+      const res = await fetch(ANTHROPIC_DIRECT_URL, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          // Beta flag REQUIRED for Claude.ai OAuth-issued tokens — without it
+          // the upstream rejects the call regardless of model. This is the
+          // smallest set; everything else (x-stainless-*, claude-code-* beta
+          // flags, user-agent) is omitted to isolate whether THAT extra set
+          // is what's tripping sonnet/opus.
+          'anthropic-beta': 'oauth-2025-04-20',
+        },
+        body: PING_BODY(model),
+        signal: AbortSignal.timeout(20_000),
+      });
+      const bodyText = await res.text();
+      const latencyMs = Date.now() - startedAt;
+      let bodySummary: string;
+      try {
+        bodySummary = summarizeMessageBody(JSON.parse(bodyText));
+      } catch {
+        bodySummary = excerpt(bodyText, 80);
+      }
+      const diag = captureDiagHeaders(res.headers);
+      const headersBlock =
+        diag.length > 0 ? `\n--- response headers ---\n${diag}` : '';
+      const bodyBlock =
+        bodyText.length > 0 ? `\n--- body ---\n${excerpt(bodyText, 600)}` : '';
+      result = {
+        kind: 'upstream-direct',
+        ok: res.ok && res.status === 200,
+        at: Date.now(),
+        latencyMs,
+        summary: `${res.status} · ${latencyMs}ms · model=${model} (member=${servedBy}, no template) · ${bodySummary}`,
+        detail: `status=${res.status} latency=${latencyMs}ms${headersBlock}${bodyBlock}`,
+      };
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      result = {
+        kind: 'upstream-direct',
+        ok: false,
+        at: Date.now(),
+        latencyMs: Date.now() - startedAt,
+        summary: `NET · ${excerpt(reason, 80)}`,
+        detail: reason,
+      };
+    }
+    store.record(result);
     return respond(c, result);
   };
 

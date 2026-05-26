@@ -15,6 +15,7 @@ import {
   createOAuthProbeHandler,
   createSelfPingHandler,
   createTestResultStore,
+  createUpstreamDirectHandler,
   honoLoopback,
 } from './admin/test-runners.js';
 import { createDynamicSink, withCooldown } from './alerts.js';
@@ -252,6 +253,10 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   app.post(
     '/admin/test/key-invoke',
     createKeyInvokeHandler(apiKeyStore, loopbackFetcher, testResultStore),
+  );
+  app.post(
+    '/admin/test/upstream-direct',
+    createUpstreamDirectHandler(pool, testResultStore),
   );
 
   const keysH = createKeysHandlers(apiKeyStore);

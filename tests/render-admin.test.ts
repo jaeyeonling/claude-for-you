@@ -50,6 +50,7 @@ const baseSnap = (overrides: Partial<AdminPageSnapshot> = {}): AdminPageSnapshot
     'oauth-probe': null,
     'self-ping': null,
     'key-invoke': null,
+    'upstream-direct': null,
   },
   ...overrides,
 });
