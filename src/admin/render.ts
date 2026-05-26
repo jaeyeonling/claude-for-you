@@ -384,7 +384,35 @@ const LIVE_SCRIPT = `
 
   // ---------- test form interceptor ----------
   // Match by action prefix so adding a new /admin/test/* route picks this up
-  // automatically.
+  // automatically. Result is rendered INLINE under the form so the operator
+  // never has to hunt across the page after a click — the live card on the
+  // right is just history.
+  const ensureInlineSlot = (form) => {
+    let slot = form.querySelector('.test-inline-result');
+    if (!slot) {
+      slot = document.createElement('div');
+      slot.className = 'test-inline-result';
+      slot.style.cssText =
+        'margin-top:.5rem;padding:.4rem .55rem;border-radius:3px;font-size:.75rem;line-height:1.4;word-break:break-word';
+      form.appendChild(slot);
+    }
+    return slot;
+  };
+  const paintResult = (slot, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      slot.style.background = 'oklch(40% 0 0 / 0.25)';
+      slot.style.color = 'var(--muted)';
+      slot.textContent = 'no response body';
+      return;
+    }
+    const ok = payload.ok === true;
+    slot.style.background = ok
+      ? 'oklch(72% 0.16 145 / 0.18)'
+      : 'oklch(70% 0.22 25 / 0.2)';
+    slot.style.color = ok ? 'var(--good)' : 'var(--bad)';
+    slot.textContent =
+      (ok ? '✓ ' : '✗ ') + (payload.summary || JSON.stringify(payload));
+  };
   document.addEventListener('submit', (ev) => {
     const form = ev.target;
     if (!(form instanceof HTMLFormElement)) return;
@@ -394,17 +422,32 @@ const LIVE_SCRIPT = `
     const btn = form.querySelector('button[type=submit]');
     const originalLabel = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'running…'; }
+    const slot = ensureInlineSlot(form);
+    slot.style.background = 'oklch(28% 0 0 / 0.5)';
+    slot.style.color = 'var(--muted)';
+    slot.textContent = 'running…';
 
     fetch(form.action, {
       method: 'POST',
+      headers: { accept: 'application/json' },
       body: new FormData(form),
-      // 302 → /admin would otherwise prompt the browser to navigate the
-      // current document. We only care about \"did the POST land\" — the
-      // result card flows in via the next SSE tick.
-      redirect: 'manual',
       credentials: 'same-origin',
     })
-      .catch(() => { /* surfaces in SSE next tick (no result recorded) */ })
+      .then(async (res) => {
+        if (!res.ok && res.status !== 200) {
+          slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
+          slot.style.color = 'var(--bad)';
+          slot.textContent = '✗ http ' + res.status;
+          return;
+        }
+        const body = await res.json().catch(() => null);
+        paintResult(slot, body);
+      })
+      .catch((err) => {
+        slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
+        slot.style.color = 'var(--bad)';
+        slot.textContent = '✗ ' + (err && err.message ? err.message : String(err));
+      })
       .finally(() => {
         if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
       });

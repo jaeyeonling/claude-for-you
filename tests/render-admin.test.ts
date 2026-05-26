@@ -190,9 +190,12 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     // route picks this up automatically.
     expect(html).toContain("form.action.includes('/admin/test/')");
     expect(html).toContain('ev.preventDefault()');
-    // Submit handlers respond with 302 → /admin as a no-JS fallback. The
-    // fetch() interceptor must NOT follow that redirect (would reload the doc).
-    expect(html).toContain("redirect: 'manual'");
+    // Fetch sends Accept: application/json so the handler returns a TestResult
+    // JSON body (the no-JS form fallback gets a 302 redirect instead).
+    expect(html).toContain("accept: 'application/json'");
+    // Inline result slot must be rendered next to the submit button, not in
+    // some far-off card the operator has to scroll to find.
+    expect(html).toContain('test-inline-result');
   });
 
   test('full page includes both live and form sections', () => {

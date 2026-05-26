@@ -71,6 +71,21 @@ const asString = (value: unknown): string =>
 const excerpt = (s: string, n = 240): string =>
   s.length <= n ? s : `${s.slice(0, n)}… (+${s.length - n} chars)`;
 
+const wantsJson = (c: Context): boolean =>
+  (c.req.header('accept') ?? '').includes('application/json');
+
+const respond = (c: Context, result: TestResult): Response => {
+  // Fetch interceptor sends Accept: application/json so it can render the
+  // result inline next to the submit button — no page reload, no scrolling
+  // to find which live card just changed.
+  if (wantsJson(c)) {
+    return c.json(result);
+  }
+  // Native form-submit fallback (JS disabled): the live region still picks
+  // the result up on the next SSE tick after the redirect renders /admin.
+  return c.redirect('/admin');
+};
+
 /**
  * Pulls the first text content block out of an Anthropic /v1/messages
  * response. Kept narrow on purpose — we want the smoke check to surface
@@ -116,30 +131,32 @@ export const createOAuthProbeHandler =
     const memberName = asString(raw.memberName) || 'default';
 
     const startedAt = Date.now();
+    let result: TestResult;
     try {
       const token = await pool.forceRefresh(memberName);
       const latencyMs = Date.now() - startedAt;
       const suffix = token.length >= 4 ? token.slice(-4) : token;
-      store.record({
+      result = {
         kind: 'oauth-probe',
         ok: true,
         at: Date.now(),
         latencyMs,
         summary: `refreshed · ${memberName} · ${latencyMs}ms · …${suffix}`,
         detail: `member="${memberName}" new access token suffix=…${suffix}`,
-      });
+      };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
-      store.record({
+      result = {
         kind: 'oauth-probe',
         ok: false,
         at: Date.now(),
         latencyMs: Date.now() - startedAt,
         summary: `failed · ${memberName} · ${excerpt(reason, 60)}`,
         detail: reason,
-      });
+      };
     }
-    return c.redirect('/admin');
+    store.record(result);
+    return respond(c, result);
   };
 
 // ---------- Self-ping (loopback through this proxy) ----------
@@ -189,7 +206,7 @@ const recordPingResult = (
   kind: TestKind,
   label: string,
   res: { ok: boolean; status: number; latencyMs: number; bodyText: string },
-): void => {
+): TestResult => {
   let bodySummary: string;
   let parsed: unknown = null;
   try {
@@ -199,14 +216,16 @@ const recordPingResult = (
     bodySummary = excerpt(res.bodyText, 80);
   }
   const ok = res.ok && res.status === 200;
-  store.record({
+  const result: TestResult = {
     kind,
     ok,
     at: Date.now(),
     latencyMs: res.latencyMs,
     summary: `${res.status || 'NET'} · ${res.latencyMs}ms · ${label} · ${bodySummary}`,
     detail: `status=${res.status} latency=${res.latencyMs}ms\n${excerpt(res.bodyText, 600)}`,
-  });
+  };
+  store.record(result);
+  return result;
 };
 
 const pickFirstKey = (apiKeyStore: ApiKeyStore): string | null => {
@@ -225,19 +244,20 @@ export const createSelfPingHandler =
     const model = asString(raw?.model) || DEFAULT_MODEL;
     const key = pickFirstKey(apiKeyStore);
     if (!key) {
-      store.record({
+      const result: TestResult = {
         kind: 'self-ping',
         ok: false,
         at: Date.now(),
         latencyMs: 0,
         summary: 'failed · no api keys configured',
         detail: 'apiKeyStore is empty — cannot self-authenticate.',
-      });
-      return c.redirect('/admin');
+      };
+      store.record(result);
+      return respond(c, result);
     }
     const res = await runLoopbackPing(fetcher(), key, model);
-    recordPingResult(store, 'self-ping', `model=${model}`, res);
-    return c.redirect('/admin');
+    const result = recordPingResult(store, 'self-ping', `model=${model}`, res);
+    return respond(c, result);
   };
 
 // ---------- Per-key invoke ----------
@@ -258,21 +278,22 @@ export const createKeyInvokeHandler =
     const entry = apiKeyStore.list().find((e) => e.name === name);
     if (!entry) {
       // Operator picked a name no longer in the store (e.g., just revoked).
-      // Record it as a result so they see *why* the dropdown was stale.
-      store.record({
+      // Record it so the next render makes the staleness obvious, then 404.
+      const result: TestResult = {
         kind: 'key-invoke',
         ok: false,
         at: Date.now(),
         latencyMs: 0,
         summary: `failed · key "${name}" not found`,
         detail: `apiKeyStore has no entry named "${name}" (revoked or removed).`,
-      });
+      };
+      store.record(result);
       throw NotFound(`api key "${name}" not found`);
     }
 
     const res = await runLoopbackPing(fetcher(), entry.key, model);
-    recordPingResult(store, 'key-invoke', `key=${entry.name}`, res);
-    return c.redirect('/admin');
+    const result = recordPingResult(store, 'key-invoke', `key=${entry.name}`, res);
+    return respond(c, result);
   };
 
 // ---------- helper for app.ts ----------
