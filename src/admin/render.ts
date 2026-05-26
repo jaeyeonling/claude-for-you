@@ -4,6 +4,7 @@ import type { AlertConfig } from '../alerts-store.js';
 import type { UsageSnapshot } from '../usage/per-user.js';
 import type { BillingMonitorSnapshot } from '../usage/billing-monitor.js';
 import type { GlobalGuardSnapshot } from '../usage/global.js';
+import type { TestKind, TestResult } from './test-runners.js';
 
 /**
  * Pure renderer for the /admin dashboard.
@@ -35,6 +36,7 @@ export interface AdminPageSnapshot {
   readonly bunVersion: string;
   readonly uptimeSec: number;
   readonly now: Date;
+  readonly testResults: Readonly<Record<TestKind, TestResult | null>>;
 }
 
 const esc = (s: unknown): string => {
@@ -150,6 +152,40 @@ export const renderLiveSections = (s: AdminPageSnapshot): string => {
       `<button type="submit" class="logout">rollback (delete candidate)</button></form>`
     : `<span class="badge b-mute">no candidate snapshot present</span>`;
 
+  const fmtExpiresAt = (epochMs: number): string => {
+    if (epochMs <= 0) return '<span class="badge b-warn">force on next call</span>';
+    const remainingSec = Math.floor((epochMs - Date.now()) / 1000);
+    if (remainingSec <= 0) return `<span class="badge b-bad">expired ${fmtDur(-remainingSec)} ago</span>`;
+    return `<span class="badge b-good">${esc(fmtDur(remainingSec))} left</span>`;
+  };
+
+  const tokenRows = s.poolSnap.members
+    .map((m) => {
+      const meta = m.tokenMeta;
+      const accessSuffix = meta.accessTokenSuffix
+        ? `…${esc(meta.accessTokenSuffix)}`
+        : '<span class="badge b-mute">not minted</span>';
+      return (
+        `<dt>${esc(m.name)}</dt>` +
+        `<dd>rt: …${esc(meta.refreshTokenSuffix)} · at: ${accessSuffix} ` +
+        `<span class="tag">${fmtExpiresAt(meta.accessTokenExpiresAt)}</span></dd>`
+      );
+    })
+    .join('');
+
+  const renderTestResult = (label: string, r: TestResult | null): string => {
+    if (!r) return `<dt>${esc(label)}</dt><dd><span class="badge b-mute">not run</span></dd>`;
+    const badge = r.ok
+      ? `<span class="badge b-good">ok</span>`
+      : `<span class="badge b-bad">fail</span>`;
+    return (
+      `<dt>${esc(label)}</dt>` +
+      `<dd>${badge} <span class="tag">${esc(fmtAgo(r.at))}</span><br>` +
+      `<code>${esc(r.summary)}</code><br>` +
+      `<details><summary class="tag">detail</summary><pre style="white-space:pre-wrap;margin:.4rem 0 0 0;font-size:.72rem">${esc(r.detail)}</pre></details></dd>`
+    );
+  };
+
   return `
   <section>
     <h2>billing health</h2>
@@ -211,6 +247,19 @@ export const renderLiveSections = (s: AdminPageSnapshot): string => {
     <p class="tag">${snapshotControls}</p>
     <p class="tag" style="margin-top:.7rem">⚠️ Both actions require <code>docker compose restart app</code> to take effect.</p>
   </section>
+  <section>
+    <h2>token store</h2>
+    <dl class="kv">${tokenRows}</dl>
+    <p class="tag" style="margin-top:.7rem">Suffix-only — paste a fresh RT via the rotation form below if a row looks stale.</p>
+  </section>
+  <section>
+    <h2>self-test results</h2>
+    <dl class="kv">
+      ${renderTestResult('oauth refresh', s.testResults['oauth-probe'])}
+      ${renderTestResult('self-ping', s.testResults['self-ping'])}
+      ${renderTestResult('key invoke', s.testResults['key-invoke'])}
+    </dl>
+  </section>
   <section style="grid-column: 1 / -1">
     <h2>per-user usage (UTC today)</h2>
     <dl class="kv">${usageRows}</dl>
@@ -229,7 +278,40 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     )
     .join('');
 
+  const keyOptions = s.apiKeyRows
+    .map(
+      (k, i) =>
+        `<option value="${esc(k.name)}"${i === 0 ? ' selected' : ''}>${esc(k.name)}</option>`,
+    )
+    .join('');
+  const selectStyle =
+    'font-family:inherit;font-size:.8rem;padding:.4rem .55rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px';
+
   return `
+  <section>
+    <h2>self-test</h2>
+    <p class="tag">Operator-triggered probes. Results appear in the live region above.</p>
+    <form class="stack" action="/admin/test/oauth-probe" method="post">
+      <label for="probe-member">oauth refresh probe</label>
+      <select id="probe-member" name="memberName" style="${selectStyle}">${memberOptions}</select>
+      <button type="submit">forceRefresh</button>
+    </form>
+    <form class="stack" action="/admin/test/self-ping" method="post">
+      <label for="ping-model">self-ping <span class="tag">(loops through this proxy)</span></label>
+      <input id="ping-model" type="text" name="model" placeholder="claude-sonnet-4-5" value="claude-sonnet-4-5">
+      <button type="submit">send pong</button>
+    </form>
+    ${
+      keyOptions.length > 0
+        ? `<form class="stack" action="/admin/test/key-invoke" method="post">
+      <label for="invoke-key">key invoke <span class="tag">(authenticates as the chosen key)</span></label>
+      <select id="invoke-key" name="keyName" style="${selectStyle}">${keyOptions}</select>
+      <input id="invoke-model" type="text" name="model" placeholder="claude-sonnet-4-5" value="claude-sonnet-4-5">
+      <button type="submit">invoke as key</button>
+    </form>`
+        : '<p class="tag" style="margin-top:.5rem">No keys to invoke — add one via <code>/admin/keys</code> first.</p>'
+    }
+  </section>
   <section>
     <h2>oauth token rotation</h2>
     <p class="tag">Paste a fresh refresh token. The next request triggers a refresh and writes a new access token to disk.</p>

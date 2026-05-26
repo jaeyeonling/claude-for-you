@@ -1,0 +1,301 @@
+import type { Context, Hono } from 'hono';
+import type { AccountPool } from '../auth/account-pool.js';
+import type { ApiKeyStore } from '../auth/api-key-store.js';
+import { InvalidRequest, NotFound } from '../lib/errors.js';
+
+/**
+ * Phase 21 — admin self-test panel.
+ *
+ * Four operator-triggered probes, results held in-memory (last one per kind).
+ *
+ *   POST /admin/test/oauth-probe   — forceRefresh on a pool member
+ *   POST /admin/test/self-ping     — loop /v1/messages through this proxy
+ *   POST /admin/test/key-invoke    — same as self-ping but with a chosen key
+ *   (Token store inspector is render-only — see render.ts)
+ *
+ * Results live in `TestResultStore` and bleed into the admin live region on
+ * the next SSE tick. Nothing persists across restarts — these are interactive
+ * diagnostics, not telemetry.
+ */
+
+export type TestKind = 'oauth-probe' | 'self-ping' | 'key-invoke';
+
+export interface TestResult {
+  readonly kind: TestKind;
+  readonly ok: boolean;
+  readonly at: number;
+  readonly latencyMs: number;
+  /** One-line operator-readable summary (e.g., "200 OK · 142ms · alice"). */
+  readonly summary: string;
+  /** Raw detail — error message, status code line, body excerpt. */
+  readonly detail: string;
+}
+
+export interface TestResultStore {
+  record(result: TestResult): void;
+  latest(): Readonly<Record<TestKind, TestResult | null>>;
+}
+
+export const createTestResultStore = (): TestResultStore => {
+  const latest: Record<TestKind, TestResult | null> = {
+    'oauth-probe': null,
+    'self-ping': null,
+    'key-invoke': null,
+  };
+  return {
+    record(result) {
+      latest[result.kind] = result;
+    },
+    latest() {
+      return { ...latest };
+    },
+  };
+};
+
+const parseFormOrJson = async (c: Context): Promise<Record<string, unknown>> => {
+  const contentType = c.req.header('content-type') ?? '';
+  if (contentType.includes('application/json')) {
+    return (await c.req.json()) as Record<string, unknown>;
+  }
+  const form = await c.req.formData();
+  const out: Record<string, unknown> = {};
+  form.forEach((value, key) => {
+    out[key] = typeof value === 'string' ? value : '';
+  });
+  return out;
+};
+
+const asString = (value: unknown): string =>
+  typeof value === 'string' ? value.trim() : '';
+
+const excerpt = (s: string, n = 240): string =>
+  s.length <= n ? s : `${s.slice(0, n)}… (+${s.length - n} chars)`;
+
+/**
+ * Pulls the first text content block out of an Anthropic /v1/messages
+ * response. Kept narrow on purpose — we want the smoke check to surface
+ * "model actually replied with text" without dragging in the full schema.
+ */
+const summarizeMessageBody = (body: unknown): string => {
+  if (!body || typeof body !== 'object') return '<non-object body>';
+  const obj = body as Record<string, unknown>;
+  if (typeof obj.error === 'object' && obj.error !== null) {
+    const err = obj.error as Record<string, unknown>;
+    return `error: ${asString(err.type) || '?'} — ${asString(err.message) || '?'}`;
+  }
+  const content = obj.content;
+  if (Array.isArray(content)) {
+    const firstText = content.find(
+      (b): b is { type: 'text'; text: string } =>
+        b !== null &&
+        typeof b === 'object' &&
+        (b as Record<string, unknown>).type === 'text' &&
+        typeof (b as Record<string, unknown>).text === 'string',
+    );
+    if (firstText) return `text: ${excerpt(firstText.text, 80)}`;
+  }
+  return excerpt(JSON.stringify(obj), 120);
+};
+
+const PING_BODY = (model: string): string =>
+  JSON.stringify({
+    model,
+    max_tokens: 16,
+    messages: [{ role: 'user', content: 'reply with the single word: pong' }],
+  });
+
+const DEFAULT_MODEL = 'claude-sonnet-4-5';
+
+// ---------- OAuth refresh probe ----------
+
+export const createOAuthProbeHandler =
+  (pool: AccountPool, store: TestResultStore) =>
+  async (c: Context): Promise<Response> => {
+    const raw = await parseFormOrJson(c).catch(() => null);
+    if (!raw) throw InvalidRequest('invalid request body');
+    const memberName = asString(raw.memberName) || 'default';
+
+    const startedAt = Date.now();
+    try {
+      const token = await pool.forceRefresh(memberName);
+      const latencyMs = Date.now() - startedAt;
+      const suffix = token.length >= 4 ? token.slice(-4) : token;
+      store.record({
+        kind: 'oauth-probe',
+        ok: true,
+        at: Date.now(),
+        latencyMs,
+        summary: `refreshed · ${memberName} · ${latencyMs}ms · …${suffix}`,
+        detail: `member="${memberName}" new access token suffix=…${suffix}`,
+      });
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      store.record({
+        kind: 'oauth-probe',
+        ok: false,
+        at: Date.now(),
+        latencyMs: Date.now() - startedAt,
+        summary: `failed · ${memberName} · ${excerpt(reason, 60)}`,
+        detail: reason,
+      });
+    }
+    return c.redirect('/admin');
+  };
+
+// ---------- Self-ping (loopback through this proxy) ----------
+
+export interface LoopbackFetcher {
+  /** Hono.fetch — same signature as global fetch but routes to in-process app. */
+  (input: Request | URL | string, init?: RequestInit): Promise<Response>;
+}
+
+const runLoopbackPing = async (
+  fetcher: LoopbackFetcher,
+  apiKey: string,
+  model: string,
+): Promise<{ ok: boolean; status: number; latencyMs: number; bodyText: string }> => {
+  const startedAt = Date.now();
+  try {
+    const res = await fetcher('http://internal/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: PING_BODY(model),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const bodyText = await res.text();
+    return {
+      ok: res.ok,
+      status: res.status,
+      latencyMs: Date.now() - startedAt,
+      bodyText,
+    };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      status: 0,
+      latencyMs: Date.now() - startedAt,
+      bodyText: `<transport error> ${reason}`,
+    };
+  }
+};
+
+const recordPingResult = (
+  store: TestResultStore,
+  kind: TestKind,
+  label: string,
+  res: { ok: boolean; status: number; latencyMs: number; bodyText: string },
+): void => {
+  let bodySummary: string;
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(res.bodyText);
+    bodySummary = summarizeMessageBody(parsed);
+  } catch {
+    bodySummary = excerpt(res.bodyText, 80);
+  }
+  const ok = res.ok && res.status === 200;
+  store.record({
+    kind,
+    ok,
+    at: Date.now(),
+    latencyMs: res.latencyMs,
+    summary: `${res.status || 'NET'} · ${res.latencyMs}ms · ${label} · ${bodySummary}`,
+    detail: `status=${res.status} latency=${res.latencyMs}ms\n${excerpt(res.bodyText, 600)}`,
+  });
+};
+
+const pickFirstKey = (apiKeyStore: ApiKeyStore): string | null => {
+  const entries = apiKeyStore.list();
+  return entries.length > 0 ? entries[0]!.key : null;
+};
+
+export const createSelfPingHandler =
+  (
+    apiKeyStore: ApiKeyStore,
+    fetcher: () => LoopbackFetcher,
+    store: TestResultStore,
+  ) =>
+  async (c: Context): Promise<Response> => {
+    const raw = await parseFormOrJson(c).catch(() => null);
+    const model = asString(raw?.model) || DEFAULT_MODEL;
+    const key = pickFirstKey(apiKeyStore);
+    if (!key) {
+      store.record({
+        kind: 'self-ping',
+        ok: false,
+        at: Date.now(),
+        latencyMs: 0,
+        summary: 'failed · no api keys configured',
+        detail: 'apiKeyStore is empty — cannot self-authenticate.',
+      });
+      return c.redirect('/admin');
+    }
+    const res = await runLoopbackPing(fetcher(), key, model);
+    recordPingResult(store, 'self-ping', `model=${model}`, res);
+    return c.redirect('/admin');
+  };
+
+// ---------- Per-key invoke ----------
+
+export const createKeyInvokeHandler =
+  (
+    apiKeyStore: ApiKeyStore,
+    fetcher: () => LoopbackFetcher,
+    store: TestResultStore,
+  ) =>
+  async (c: Context): Promise<Response> => {
+    const raw = await parseFormOrJson(c).catch(() => null);
+    if (!raw) throw InvalidRequest('invalid request body');
+    const name = asString(raw.keyName);
+    if (name.length === 0) throw InvalidRequest('keyName is required');
+    const model = asString(raw.model) || DEFAULT_MODEL;
+
+    const entry = apiKeyStore.list().find((e) => e.name === name);
+    if (!entry) {
+      // Operator picked a name no longer in the store (e.g., just revoked).
+      // Record it as a result so they see *why* the dropdown was stale.
+      store.record({
+        kind: 'key-invoke',
+        ok: false,
+        at: Date.now(),
+        latencyMs: 0,
+        summary: `failed · key "${name}" not found`,
+        detail: `apiKeyStore has no entry named "${name}" (revoked or removed).`,
+      });
+      throw NotFound(`api key "${name}" not found`);
+    }
+
+    const res = await runLoopbackPing(fetcher(), entry.key, model);
+    recordPingResult(store, 'key-invoke', `key=${entry.name}`, res);
+    return c.redirect('/admin');
+  };
+
+// ---------- helper for app.ts ----------
+
+/**
+ * Wrap a Hono app's `fetch` into a LoopbackFetcher. Lazy so handlers can be
+ * created before the app object is final — we resolve the closure at call time.
+ */
+export const honoLoopback =
+  (appRef: { current: Hono | null }): (() => LoopbackFetcher) =>
+  () => {
+    const app = appRef.current;
+    if (!app) {
+      throw new Error('loopback fetcher used before app was bound');
+    }
+    return async (input, init) => {
+      const url =
+        input instanceof URL
+          ? input.toString()
+          : typeof input === 'string'
+            ? input
+            : input.url;
+      const req = new Request(url, init);
+      return await app.fetch(req);
+    };
+  };

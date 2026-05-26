@@ -29,10 +29,20 @@ export type { TokenState };
  * from the bare OAuthManager — every request gets the same account.
  */
 
+export interface TokenMetaSnapshot {
+  /** Last 4 chars of the refresh token — enough to recognize, useless to abuse. */
+  readonly refreshTokenSuffix: string;
+  /** Last 4 chars of the access token, or null if never minted. */
+  readonly accessTokenSuffix: string | null;
+  /** Epoch ms when the current access token expires. 0 means "force on next call". */
+  readonly accessTokenExpiresAt: number;
+}
+
 export interface PoolMemberSnapshot {
   readonly name: string;
   readonly remainingTokens: number | null;
   readonly remainingObservedAt: number | null;
+  readonly tokenMeta: TokenMetaSnapshot;
 }
 
 export interface AccountPoolSnapshot {
@@ -140,11 +150,20 @@ export const createAccountPool = (members: readonly PoolMember[]): AccountPool =
     },
     snapshot() {
       return {
-        members: members.map((m) => ({
-          name: m.name,
-          remainingTokens: m.remainingTokens,
-          remainingObservedAt: m.remainingObservedAt,
-        })),
+        members: members.map((m) => {
+          const t = m.oauth.snapshot();
+          const suffix = (s: string): string => (s.length >= 4 ? s.slice(-4) : s);
+          return {
+            name: m.name,
+            remainingTokens: m.remainingTokens,
+            remainingObservedAt: m.remainingObservedAt,
+            tokenMeta: {
+              refreshTokenSuffix: suffix(t.refreshToken),
+              accessTokenSuffix: t.accessToken.length > 0 ? suffix(t.accessToken) : null,
+              accessTokenExpiresAt: t.expiresAt,
+            },
+          };
+        }),
         sessionAssignments: Object.fromEntries(sessionAssignments),
       };
     },

@@ -8,7 +8,16 @@ import {
 const baseSnap = (overrides: Partial<AdminPageSnapshot> = {}): AdminPageSnapshot => ({
   poolSnap: {
     members: [
-      { name: 'default', remainingTokens: 50_000, remainingObservedAt: Date.now() - 30_000 },
+      {
+        name: 'default',
+        remainingTokens: 50_000,
+        remainingObservedAt: Date.now() - 30_000,
+        tokenMeta: {
+          refreshTokenSuffix: 'abcd',
+          accessTokenSuffix: 'wxyz',
+          accessTokenExpiresAt: Date.now() + 60_000,
+        },
+      },
     ],
     sessionAssignments: {},
   },
@@ -37,6 +46,11 @@ const baseSnap = (overrides: Partial<AdminPageSnapshot> = {}): AdminPageSnapshot
   bunVersion: '1.3.13',
   uptimeSec: 90,
   now: new Date('2026-05-22T12:00:00Z'),
+  testResults: {
+    'oauth-probe': null,
+    'self-ping': null,
+    'key-invoke': null,
+  },
   ...overrides,
 });
 

@@ -12,6 +12,7 @@ import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { renderLiveSections } from './render.js';
+import type { TestResultStore } from './test-runners.js';
 
 /**
  * GET /admin/events — Server-Sent Events stream that pushes a fresh
@@ -48,6 +49,7 @@ export interface AdminEventsDeps {
   readonly candidateDescription: string | null;
   readonly startedAt: number;
   readonly templateDescription: string;
+  readonly testResultStore: TestResultStore;
 }
 
 export const createAdminEventsHandler =
@@ -76,6 +78,7 @@ export const createAdminEventsHandler =
           bunVersion: Bun.version,
           uptimeSec,
           now: new Date(),
+          testResults: deps.testResultStore.latest(),
         };
         const html = renderLiveSections(snapshot);
         await stream.writeSSE({ data: JSON.stringify({ html }) });

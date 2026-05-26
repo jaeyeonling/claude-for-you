@@ -11,6 +11,7 @@ import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { renderAdminHtml } from './render.js';
+import type { TestResultStore } from './test-runners.js';
 
 const CANDIDATE_SNAPSHOT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -31,6 +32,7 @@ export interface AdminPageDeps {
   readonly candidateDescription: string | null;
   readonly startedAt: number;
   readonly templateDescription: string;
+  readonly testResultStore: TestResultStore;
 }
 
 /**
@@ -62,6 +64,7 @@ export const createAdminPageHandler =
       bunVersion: Bun.version,
       uptimeSec,
       now: new Date(),
+      testResults: deps.testResultStore.latest(),
     });
     return c.html(html);
   };

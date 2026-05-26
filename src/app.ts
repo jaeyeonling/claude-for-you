@@ -10,6 +10,13 @@ import { createOAuthReplaceHandler } from './admin/oauth.js';
 import { createAdminPageHandler } from './admin/page.js';
 import { createSnapshotHandlers } from './admin/snapshot.js';
 import { createStatsHandler } from './admin/stats.js';
+import {
+  createKeyInvokeHandler,
+  createOAuthProbeHandler,
+  createSelfPingHandler,
+  createTestResultStore,
+  honoLoopback,
+} from './admin/test-runners.js';
 import { createDynamicSink, withCooldown } from './alerts.js';
 import { createAlertStore } from './alerts-store.js';
 import { singleAccountPool, tryLoadAccountPool } from './auth/account-pool.js';
@@ -207,6 +214,13 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     }),
   );
 
+  const testResultStore = createTestResultStore();
+  // Loopback fetcher resolves to `app.fetch` at call time — keeps the
+  // self-ping handler usable even though it's wired *before* the app object
+  // is fully populated with routes.
+  const appRef: { current: Hono | null } = { current: null };
+  const loopbackFetcher = honoLoopback(appRef);
+
   const adminDeps = {
     pool,
     tracker,
@@ -217,6 +231,7 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     candidateDescription: candidateTemplate?.description ?? null,
     startedAt,
     templateDescription: template.description,
+    testResultStore,
   };
   app.use('/admin/*', createApiKeyMiddleware(apiKeyStore));
   app.use('/admin/*', csrfGuard);
@@ -227,6 +242,16 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   app.get(
     '/admin/events',
     createAdminEventsHandler({ ...adminDeps, apiKeyStore, alertStore }),
+  );
+
+  app.post('/admin/test/oauth-probe', createOAuthProbeHandler(pool, testResultStore));
+  app.post(
+    '/admin/test/self-ping',
+    createSelfPingHandler(apiKeyStore, loopbackFetcher, testResultStore),
+  );
+  app.post(
+    '/admin/test/key-invoke',
+    createKeyInvokeHandler(apiKeyStore, loopbackFetcher, testResultStore),
   );
 
   const keysH = createKeysHandlers(apiKeyStore);
@@ -324,6 +349,10 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
       );
     }
   };
+
+  // Bind loopback after every route is registered, so self-ping → /v1/messages
+  // resolves through the same router any external client would hit.
+  appRef.current = app;
 
   return Object.freeze({
     app,
