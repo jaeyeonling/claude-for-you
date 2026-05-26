@@ -119,7 +119,7 @@ const PING_BODY = (model: string): string =>
     messages: [{ role: 'user', content: 'reply with the single word: pong' }],
   });
 
-const DEFAULT_MODEL = 'claude-sonnet-4-5';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 // ---------- OAuth refresh probe ----------
 

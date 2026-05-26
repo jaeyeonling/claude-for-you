@@ -298,7 +298,7 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     </form>
     <form class="stack" action="/admin/test/self-ping" method="post">
       <label for="ping-model">self-ping <span class="tag">(loops through this proxy)</span></label>
-      <input id="ping-model" type="text" name="model" placeholder="claude-sonnet-4-5" value="claude-sonnet-4-5">
+      <input id="ping-model" type="text" name="model" placeholder="claude-sonnet-4-6" value="claude-sonnet-4-6">
       <button type="submit">send pong</button>
     </form>
     ${
@@ -306,7 +306,7 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
         ? `<form class="stack" action="/admin/test/key-invoke" method="post">
       <label for="invoke-key">key invoke <span class="tag">(authenticates as the chosen key)</span></label>
       <select id="invoke-key" name="keyName" style="${selectStyle}">${keyOptions}</select>
-      <input id="invoke-model" type="text" name="model" placeholder="claude-sonnet-4-5" value="claude-sonnet-4-5">
+      <input id="invoke-model" type="text" name="model" placeholder="claude-sonnet-4-6" value="claude-sonnet-4-6">
       <button type="submit">invoke as key</button>
     </form>`
         : '<p class="tag" style="margin-top:.5rem">No keys to invoke — add one via <code>/admin/keys</code> first.</p>'
