@@ -106,10 +106,11 @@ export const callUpstream = async (
     return { response: firstRes, servedBy: first.name };
   }
 
-  await firstRes.body?.cancel().catch(() => undefined);
-
   if (firstRes.status === 401) {
-    // OAuth refresh path — same account, new token.
+    // OAuth refresh path — same account, new token. Body of the 401 is
+    // never surfaced to the client (we're about to retry), so cancel to
+    // free the underlying connection.
+    await firstRes.body?.cancel().catch(() => undefined);
     const freshToken = await deps.pool.forceRefresh(first.name);
     const retryRes = await fetchOnce(
       clientBody,
@@ -121,13 +122,17 @@ export const callUpstream = async (
     return { response: retryRes, servedBy: first.name };
   }
 
-  // 429 — failover to another pool member if available.
+  // 429 — try failover to another pool member if one exists.
   const failover = await deps.pool.getAccessTokenExcluding(sessionId, first.name);
   if (failover === null) {
-    // Single-account pool or all members rate-limited — return the original
-    // 429 to the client. They can back off naturally.
+    // Single-account pool (or all members rate-limited): we're about to
+    // surface this exact 429 to the client. DO NOT cancel the body — the
+    // upstream's error JSON (e.g. {"type":"rate_limit_error",...}) lives
+    // there and downstream needs to read it via .text(). Cancelling here
+    // used to silently emit an empty body to the client.
     return { response: firstRes, servedBy: first.name };
   }
+  await firstRes.body?.cancel().catch(() => undefined);
   const retryRes = await fetchOnce(
     clientBody,
     clientHeaders,
