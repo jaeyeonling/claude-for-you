@@ -184,6 +184,17 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     expect(html).not.toContain('http-equiv="refresh"');
   });
 
+  test('test forms are intercepted client-side (no full-page reload)', () => {
+    const html = renderAdminHtml(baseSnap());
+    // The interceptor matches by action prefix — adding a new /admin/test/*
+    // route picks this up automatically.
+    expect(html).toContain("form.action.includes('/admin/test/')");
+    expect(html).toContain('ev.preventDefault()');
+    // Submit handlers respond with 302 → /admin as a no-JS fallback. The
+    // fetch() interceptor must NOT follow that redirect (would reload the doc).
+    expect(html).toContain("redirect: 'manual'");
+  });
+
   test('full page includes both live and form sections', () => {
     const html = renderAdminHtml(baseSnap());
     expect(html).toContain('billing health'); // live

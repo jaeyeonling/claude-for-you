@@ -344,11 +344,14 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
   </section>`;
 };
 
-// Inline JS — connects to /admin/events SSE, swaps the live region's children
-// on each push without touching the form sections. Uses DOMParser (which
-// produces an inert document — no script execution from parsed HTML) so the
-// payload is treated as data, not as code. All dynamic values were escaped
-// server-side via esc() before reaching this layer.
+// Inline JS — two responsibilities:
+//   1. SSE live region updates (DOMParser-based inert swap)
+//   2. Intercept /admin/test/* form submits with fetch() so the page doesn't
+//      navigate — preserves in-progress paste in the OAuth/webhook forms, and
+//      avoids re-tearing the SSE connection on every probe.
+//
+// Forms degrade gracefully: with JS disabled, the native submit still works
+// because handlers respond with 302 → /admin.
 const LIVE_SCRIPT = `
 (() => {
   const region = document.getElementById('live-region');
@@ -378,6 +381,34 @@ const LIVE_SCRIPT = `
     if (!wrapper) return;
     region.replaceChildren(...wrapper.children);
   };
+
+  // ---------- test form interceptor ----------
+  // Match by action prefix so adding a new /admin/test/* route picks this up
+  // automatically.
+  document.addEventListener('submit', (ev) => {
+    const form = ev.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    if (!form.action.includes('/admin/test/')) return;
+    ev.preventDefault();
+
+    const btn = form.querySelector('button[type=submit]');
+    const originalLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'running…'; }
+
+    fetch(form.action, {
+      method: 'POST',
+      body: new FormData(form),
+      // 302 → /admin would otherwise prompt the browser to navigate the
+      // current document. We only care about \"did the POST land\" — the
+      // result card flows in via the next SSE tick.
+      redirect: 'manual',
+      credentials: 'same-origin',
+    })
+      .catch(() => { /* surfaces in SSE next tick (no result recorded) */ })
+      .finally(() => {
+        if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+      });
+  });
 })();
 `;
 
