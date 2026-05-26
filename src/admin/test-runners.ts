@@ -166,11 +166,51 @@ export interface LoopbackFetcher {
   (input: Request | URL | string, init?: RequestInit): Promise<Response>;
 }
 
+// Headers we ALWAYS want to see in self-ping detail. Each gives a signal:
+//   retry-after, x-should-retry → rate-limit shape vs abuse cooldown
+//   anthropic-ratelimit-*       → which quota was hit + when it resets
+//   request-id, cf-ray          → traceable reference for support tickets
+//   x-envoy-upstream-service-time → backend latency vs network latency split
+//   anthropic-organization-id   → confirms which account the upstream saw
+// Authorization, x-api-key, cookie, set-cookie are NEVER captured — they
+// could carry token material on the request side or stale auth on response.
+const DIAG_HEADERS = [
+  'retry-after',
+  'x-should-retry',
+  'request-id',
+  'cf-ray',
+  'cf-cache-status',
+  'x-envoy-upstream-service-time',
+  'anthropic-organization-id',
+  'content-length',
+  'content-type',
+];
+
+const captureDiagHeaders = (headers: Headers): string => {
+  const lines: string[] = [];
+  for (const key of DIAG_HEADERS) {
+    const v = headers.get(key);
+    if (v !== null) lines.push(`${key}: ${v}`);
+  }
+  headers.forEach((value, name) => {
+    if (name.toLowerCase().startsWith('anthropic-ratelimit-')) {
+      lines.push(`${name}: ${value}`);
+    }
+  });
+  return lines.join('\n');
+};
+
 const runLoopbackPing = async (
   fetcher: LoopbackFetcher,
   apiKey: string,
   model: string,
-): Promise<{ ok: boolean; status: number; latencyMs: number; bodyText: string }> => {
+): Promise<{
+  ok: boolean;
+  status: number;
+  latencyMs: number;
+  bodyText: string;
+  diagHeaders: string;
+}> => {
   const startedAt = Date.now();
   try {
     const res = await fetcher('http://internal/v1/messages', {
@@ -189,6 +229,7 @@ const runLoopbackPing = async (
       status: res.status,
       latencyMs: Date.now() - startedAt,
       bodyText,
+      diagHeaders: captureDiagHeaders(res.headers),
     };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
@@ -197,6 +238,7 @@ const runLoopbackPing = async (
       status: 0,
       latencyMs: Date.now() - startedAt,
       bodyText: `<transport error> ${reason}`,
+      diagHeaders: '',
     };
   }
 };
@@ -205,7 +247,13 @@ const recordPingResult = (
   store: TestResultStore,
   kind: TestKind,
   label: string,
-  res: { ok: boolean; status: number; latencyMs: number; bodyText: string },
+  res: {
+    ok: boolean;
+    status: number;
+    latencyMs: number;
+    bodyText: string;
+    diagHeaders: string;
+  },
 ): TestResult => {
   let bodySummary: string;
   let parsed: unknown = null;
@@ -216,13 +264,17 @@ const recordPingResult = (
     bodySummary = excerpt(res.bodyText, 80);
   }
   const ok = res.ok && res.status === 200;
+  const headersBlock =
+    res.diagHeaders.length > 0 ? `\n--- response headers ---\n${res.diagHeaders}` : '';
+  const bodyBlock =
+    res.bodyText.length > 0 ? `\n--- body ---\n${excerpt(res.bodyText, 600)}` : '';
   const result: TestResult = {
     kind,
     ok,
     at: Date.now(),
     latencyMs: res.latencyMs,
     summary: `${res.status || 'NET'} · ${res.latencyMs}ms · ${label} · ${bodySummary}`,
-    detail: `status=${res.status} latency=${res.latencyMs}ms\n${excerpt(res.bodyText, 600)}`,
+    detail: `status=${res.status} latency=${res.latencyMs}ms${headersBlock}${bodyBlock}`,
   };
   store.record(result);
   return result;
