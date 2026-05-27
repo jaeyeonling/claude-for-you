@@ -140,6 +140,26 @@ terraform 모듈이 프로비저닝하는 것: EC2 (t3.micro, AL2023, IMDSv2 강
 | `CAPTURE_MODE` | `false` | 모든 인증된 요청을 `CAPTURE_DIR`에 dump. 운영에선 절대 켜지 말 것. |
 | `CAPTURE_DIR` | `./captures` | 캡처 dump 저장 경로. gitignored. |
 
+## 다른 사람한테 사용 권한 주기
+
+키 발급 후 사용자 가이드 링크와 함께 두 정보를 전달.
+
+```bash
+# 운영자 — 새 키 발급
+curl -sS -u admin:<운영자-키> http://<프록시-호스트>/admin/keys \
+  -H 'content-type: application/json' \
+  -d '{"name":"bob"}'
+# 응답에 키 값 포함 — 발급 시 한 번만 표시됨.
+```
+
+사용자에게 보낼 메시지:
+
+> 프록시 URL: `http://<프록시-호스트>`
+> API 키: `<위 응답의 값>`
+> 설정 방법: [`docs/user-guide.ko.md`](./docs/user-guide.ko.md) — 옵션 A 또는 B 중 선택.
+
+사용자 가이드에는 `apiKeyHelper` vs `--bare`, 배너로 인증 모드 확인, 401/429 흔한 함정이 정리되어 있음. 영문판: [`docs/user-guide.md`](./docs/user-guide.md).
+
 ## Admin 엔드포인트
 
 모든 `/admin/*`은 API-key 인증 (프록시의 authorized keys — 아무거나 하나). CSRF 가드가 cross-origin 브라우저 POST를 거부.

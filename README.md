@@ -140,6 +140,26 @@ The terraform module provisions: EC2 (t3.micro, AL2023, IMDSv2 required, SSM-onl
 | `CAPTURE_MODE` | `false` | Dump every authenticated request to `CAPTURE_DIR`. Never enable in production. |
 | `CAPTURE_DIR` | `./captures` | Where capture dumps go. Gitignored. |
 
+## Giving someone access
+
+You issue them a key, then send them two things plus a link to the user guide.
+
+```bash
+# operator side — issue a new key
+curl -sS -u admin:<your-key> http://<proxy-host>/admin/keys \
+  -H 'content-type: application/json' \
+  -d '{"name":"bob"}'
+# response includes the key value — shown once, never again.
+```
+
+Message you send them:
+
+> Proxy URL: `http://<proxy-host>`
+> API key: `<value from the response above>`
+> Setup: [`docs/user-guide.md`](./docs/user-guide.md) — pick Option A or B.
+
+The user guide covers `apiKeyHelper` vs `--bare`, the `API Usage Billing` banner check, and the usual 401 / 429 traps. Korean translation at [`docs/user-guide.ko.md`](./docs/user-guide.ko.md).
+
 ## Admin endpoints
 
 All `/admin/*` routes require API-key auth (the proxy's authorized keys list — pick any key). CSRF guard rejects cross-origin browser POSTs.
