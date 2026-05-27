@@ -10,7 +10,7 @@ Two pieces of information — keep the second one private.
 
 | Item | Example | Notes |
 |---|---|---|
-| Proxy URL | `http://43.202.105.69` | Public address of the proxy. Safe to share. |
+| Proxy URL | `http://<host-your-operator-sent-you>` | The IP or hostname your operator gave you. |
 | API key | 64-char hex string (example shape: `9f1a…c3e7`) | **Treat as a password.** Anyone with this can spend the operator's Claude.ai quota. |
 
 > The key is not your personal Anthropic API key — it's a per-user credential the operator issued specifically for you. It only works against this proxy.

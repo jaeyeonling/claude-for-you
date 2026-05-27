@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PUBLIC_IP="${PUBLIC_IP:-43.202.105.69}"
+PUBLIC_IP="${PUBLIC_IP:?set PUBLIC_IP=<your-proxy-host> (avoid committing real address to the repo)}"
 KEY="$(grep '^API_KEYS=' "$ROOT/.env" | sed 's/^API_KEYS=//' | cut -d',' -f1 | cut -d':' -f2-)"
 MODEL="${MODEL:-claude-sonnet-4-5}"
 ENDPOINT="http://$PUBLIC_IP/v1/messages"
