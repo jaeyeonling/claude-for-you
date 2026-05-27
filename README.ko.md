@@ -166,9 +166,9 @@ curl -sS -u admin:<운영자-키> http://<프록시-호스트>/admin/keys \
 
 > 프록시 URL: `http://<프록시-호스트>`
 > API 키: `<위 응답의 값>`
-> 설정 방법: [`docs/user-guide.ko.md`](./docs/user-guide.ko.md) — 옵션 A 또는 B 중 선택.
+> 설정 방법: [`docs/user-guide.ko.md`](./docs/user-guide.ko.md) — **권장 설정**을 따른다.
 
-사용자 가이드에는 `apiKeyHelper` vs `--bare`, 배너로 인증 모드 확인, 401/429 흔한 함정이 정리되어 있음. 영문판: [`docs/user-guide.md`](./docs/user-guide.md).
+사용자 가이드에는 권장 설정(Keychain + `apiKeyHelper`), 배너로 인증 모드 확인, 401/429 흔한 함정, 그리고 본인 Claude Max를 같은 머신에서 병행 사용하는 사용자를 위한 대안 설정이 정리되어 있음. 영문판: [`docs/user-guide.md`](./docs/user-guide.md).
 
 ## Admin 엔드포인트
 

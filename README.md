@@ -166,9 +166,9 @@ Message you send them:
 
 > Proxy URL: `http://<proxy-host>`
 > API key: `<value from the response above>`
-> Setup: [`docs/user-guide.md`](./docs/user-guide.md) — pick Option A or B.
+> Setup: [`docs/user-guide.md`](./docs/user-guide.md) — follow the **Recommended setup**.
 
-The user guide covers `apiKeyHelper` vs `--bare`, the `API Usage Billing` banner check, and the usual 401 / 429 traps. Korean translation at [`docs/user-guide.ko.md`](./docs/user-guide.ko.md).
+The user guide covers the Recommended setup (Keychain + `apiKeyHelper`), the `API Usage Billing` banner check, the usual 401 / 429 traps, and an Alternative for users who keep their personal Claude Max on the same machine. Korean translation at [`docs/user-guide.ko.md`](./docs/user-guide.ko.md).
 
 ## Admin endpoints
 
