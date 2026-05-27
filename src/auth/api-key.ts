@@ -1,10 +1,11 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { Context, MiddlewareHandler } from 'hono';
 import { Unauthorized } from '../lib/errors.js';
-import type { ApiKeyStore } from './api-key-store.js';
+import type { ApiKeyRole, ApiKeyStore } from './api-key-store.js';
 
 export type AuthenticatedUser = Readonly<{
   name: string;
+  role: ApiKeyRole;
   /** Mirrors ApiKeyEntry.allowedModels — undefined/empty means no restriction. */
   allowedModels?: readonly string[];
 }>;
@@ -70,8 +71,8 @@ export const createApiKeyMiddleware = (store: ApiKeyStore): MiddlewareHandler =>
     for (const entry of entries) {
       if (safeEqual(presented, entry.key)) {
         matched = entry.allowedModels
-          ? { name: entry.name, allowedModels: entry.allowedModels }
-          : { name: entry.name };
+          ? { name: entry.name, role: entry.role, allowedModels: entry.allowedModels }
+          : { name: entry.name, role: entry.role };
       }
     }
     if (matched === null) throw Unauthorized('invalid api key');

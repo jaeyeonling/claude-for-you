@@ -126,4 +126,27 @@ describe('createApiKeyStore', () => {
     const alice = store.list().find((e) => e.name === 'alice');
     expect(alice?.allowedModels).toBeUndefined();
   });
+
+  test('env-baked keys get role=admin, file-added keys get role=user', async () => {
+    const store = createApiKeyStore({
+      envKeys: [{ name: 'operator', key: longerKey }],
+      filePath: join(workdir, 'api-keys.json'),
+    });
+    const issued = await store.add('bob');
+    expect(issued.role).toBe('user');
+
+    const list = store.list();
+    expect(list.find((e) => e.name === 'operator')?.role).toBe('admin');
+    expect(list.find((e) => e.name === 'bob')?.role).toBe('user');
+  });
+
+  test('persisted file keys come back as role=user on next list()', async () => {
+    const path = join(workdir, 'api-keys.json');
+    const a = createApiKeyStore({ envKeys: [], filePath: path });
+    await a.add('carol');
+
+    // New store instance, same file — simulates restart.
+    const b = createApiKeyStore({ envKeys: [], filePath: path });
+    expect(b.list().find((e) => e.name === 'carol')?.role).toBe('user');
+  });
 });
