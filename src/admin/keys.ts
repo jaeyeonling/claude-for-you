@@ -35,31 +35,54 @@ export const createKeysHandlers = (store: ApiKeyStore): {
   },
 
   async create(c) {
-    const body = (await c.req.json().catch(() => null)) as
-      | { name?: unknown; key?: unknown; allowedModels?: unknown }
-      | null;
-    if (!body || typeof body.name !== 'string') {
-      throw InvalidRequest(
-        'body must be { name: string, key?: string, allowedModels?: string[] }',
-      );
-    }
-    const providedKey = typeof body.key === 'string' ? body.key : undefined;
+    // Accept JSON (programmatic / curl) and form-urlencoded (admin UI form).
+    // For form input, allowedModels arrives as a single comma-or-whitespace
+    // separated string: "claude-haiku-*, claude-sonnet-4-6".
+    const contentType = c.req.header('content-type') ?? '';
+    let name: unknown;
+    let providedKey: string | undefined;
     let allowedModels: readonly string[] | undefined;
-    if (Array.isArray(body.allowedModels)) {
-      const bad = body.allowedModels.find((m) => typeof m !== 'string');
-      if (bad !== undefined) {
-        throw InvalidRequest('allowedModels must be an array of strings');
+
+    if (contentType.includes('application/json')) {
+      const body = (await c.req.json().catch(() => null)) as
+        | { name?: unknown; key?: unknown; allowedModels?: unknown }
+        | null;
+      if (!body) throw InvalidRequest('body must be JSON');
+      name = body.name;
+      providedKey = typeof body.key === 'string' ? body.key : undefined;
+      if (Array.isArray(body.allowedModels)) {
+        const bad = body.allowedModels.find((m) => typeof m !== 'string');
+        if (bad !== undefined) {
+          throw InvalidRequest('allowedModels must be an array of strings');
+        }
+        allowedModels = body.allowedModels.length > 0
+          ? (body.allowedModels as readonly string[])
+          : undefined;
       }
-      // Empty array = "explicitly no models allowed" would lock the key out,
-      // which is almost never the intent. Treat empty same as omitted.
-      allowedModels = body.allowedModels.length > 0
-        ? (body.allowedModels as readonly string[])
-        : undefined;
+    } else {
+      const form = await c.req.formData();
+      name = form.get('name');
+      const keyRaw = form.get('key');
+      providedKey = typeof keyRaw === 'string' && keyRaw.length > 0 ? keyRaw : undefined;
+      const modelsRaw = form.get('allowedModels');
+      if (typeof modelsRaw === 'string' && modelsRaw.trim().length > 0) {
+        const parsed = modelsRaw
+          .split(/[\s,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (parsed.length > 0) allowedModels = parsed;
+      }
+    }
+
+    if (typeof name !== 'string') {
+      throw InvalidRequest(
+        'body must be { name: string, key?: string, allowedModels?: string[] | "a,b" }',
+      );
     }
     const opts: { providedKey?: string; allowedModels?: readonly string[] } = {};
     if (providedKey !== undefined) opts.providedKey = providedKey;
     if (allowedModels !== undefined) opts.allowedModels = allowedModels;
-    const created = await store.add(body.name, opts);
+    const created = await store.add(name, opts);
     // Return the full key ONCE so the operator can hand it to the user.
     return c.json({
       name: created.name,

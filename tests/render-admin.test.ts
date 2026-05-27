@@ -187,9 +187,9 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
 
   test('test forms are intercepted client-side (no full-page reload)', () => {
     const html = renderAdminHtml(baseSnap());
-    // The interceptor matches by action prefix — adding a new /admin/test/*
-    // route picks this up automatically.
-    expect(html).toContain("form.action.includes('/admin/test/')");
+    // The interceptor matches /admin/test/* and /admin/keys via shouldIntercept.
+    expect(html).toContain("action.includes('/admin/test/')");
+    expect(html).toContain("'/admin/keys'");
     expect(html).toContain('ev.preventDefault()');
     // Fetch sends Accept: application/json so the handler returns a TestResult
     // JSON body (the no-JS form fallback gets a 302 redirect instead).
@@ -204,5 +204,13 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     expect(html).toContain('billing health'); // live
     expect(html).toContain('oauth token rotation'); // form
     expect(html).toContain('alert webhooks'); // form
+  });
+
+  test('issue-api-key form is present with name + allowedModels inputs', () => {
+    const html = renderAdminHtml(baseSnap());
+    expect(html).toContain('issue api key');
+    expect(html).toContain('action="/admin/keys" method="post"');
+    expect(html).toContain('name="name"');
+    expect(html).toContain('name="allowedModels"');
   });
 });

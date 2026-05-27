@@ -326,6 +326,17 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     </form>
   </section>
   <section>
+    <h2>issue api key</h2>
+    <p class="tag">Server-generated key shown ONCE on success — copy it to the user before the panel re-renders.</p>
+    <form class="stack" action="/admin/keys" method="post">
+      <label for="newkey-name">name <span class="tag">(no spaces/colons/commas)</span></label>
+      <input id="newkey-name" type="text" name="name" required minlength="1" autocomplete="off">
+      <label for="newkey-models">allowedModels <span class="tag">(optional, comma-separated; empty = no restriction)</span></label>
+      <input id="newkey-models" type="text" name="allowedModels" placeholder="claude-haiku-*, claude-sonnet-4-6" autocomplete="off">
+      <button type="submit">issue key</button>
+    </form>
+  </section>
+  <section>
     <h2>oauth token rotation</h2>
     <p class="tag">Paste a fresh refresh token. The next request triggers a refresh and writes a new access token to disk.</p>
     <form class="stack" action="/admin/oauth/replace" method="post">
@@ -418,6 +429,33 @@ const LIVE_SCRIPT = `
       slot.textContent = 'no response body';
       return;
     }
+    // Key-issuance response: { name, key, createdAt, allowedModels, note }
+    if (typeof payload.key === 'string' && typeof payload.name === 'string') {
+      slot.style.background = 'oklch(72% 0.16 145 / 0.18)';
+      slot.style.color = 'var(--good)';
+      const head = document.createElement('div');
+      head.textContent = '✓ key for "' + payload.name + '" (shown once — copy now)';
+      const code = document.createElement('div');
+      code.style.cssText = 'margin-top:.4rem;padding:.4rem .55rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;font-size:.72rem;word-break:break-all;user-select:all';
+      code.textContent = payload.key;
+      const children = [head, code];
+      if (payload.allowedModels && payload.allowedModels.length) {
+        const meta = document.createElement('div');
+        meta.style.cssText = 'margin-top:.3rem;font-size:.7rem;color:var(--muted)';
+        meta.textContent = 'allowedModels: ' + payload.allowedModels.join(', ');
+        children.push(meta);
+      }
+      slot.replaceChildren(...children);
+      return;
+    }
+    // Error response: { error: { type, message } }
+    if (payload.error && typeof payload.error === 'object') {
+      slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
+      slot.style.color = 'var(--bad)';
+      slot.textContent = '✗ ' + (payload.error.type || 'error') + ': ' + (payload.error.message || '');
+      return;
+    }
+    // Test-result response: { ok, summary, ... }
     const ok = payload.ok === true;
     slot.style.background = ok
       ? 'oklch(72% 0.16 145 / 0.18)'
@@ -426,10 +464,18 @@ const LIVE_SCRIPT = `
     slot.textContent =
       (ok ? '✓ ' : '✗ ') + (payload.summary || JSON.stringify(payload));
   };
+  const shouldIntercept = (action) => {
+    if (action.includes('/admin/test/')) return true;
+    try {
+      return new URL(action, location.href).pathname === '/admin/keys';
+    } catch (_) {
+      return false;
+    }
+  };
   document.addEventListener('submit', (ev) => {
     const form = ev.target;
     if (!(form instanceof HTMLFormElement)) return;
-    if (!form.action.includes('/admin/test/')) return;
+    if (!shouldIntercept(form.action)) return;
     ev.preventDefault();
 
     const btn = form.querySelector('button[type=submit]');
