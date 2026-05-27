@@ -19,6 +19,7 @@ export interface ApiKeyRow {
   readonly source: 'env' | 'file';
   readonly key: string;
   readonly createdAt: string;
+  readonly allowedModels?: readonly string[];
 }
 
 export interface AdminPageSnapshot {
@@ -136,13 +137,19 @@ export const renderLiveSections = (s: AdminPageSnapshot): string => {
 
   const keyRows =
     s.apiKeyRows
-      .map(
-        (k) =>
+      .map((k) => {
+        const modelsBadge =
+          k.allowedModels && k.allowedModels.length > 0
+            ? ` <span class="badge b-warn" title="${esc(k.allowedModels.join(', '))}">models: ${esc(k.allowedModels.join(', '))}</span>`
+            : ' <span class="badge b-mute">any model</span>';
+        return (
           `<dt>${esc(k.name)} <span class="badge b-mute">${esc(k.source)}</span></dt>` +
-          `<dd>${esc(k.key.slice(0, 4))}…${esc(k.key.slice(-4))} <span class="tag">${esc(k.createdAt)}</span> ` +
-          `<form action="/admin/keys/${esc(k.name)}/revoke" method="post" style="display:inline;margin-left:.5rem">` +
-          `<button class="logout" type="submit">revoke</button></form></dd>`,
-      )
+          `<dd>${esc(k.key.slice(0, 4))}…${esc(k.key.slice(-4))} <span class="tag">${esc(k.createdAt)}</span>` +
+          modelsBadge +
+          ` <form action="/admin/keys/${esc(k.name)}/revoke" method="post" style="display:inline;margin-left:.5rem">` +
+          `<button class="logout" type="submit">revoke</button></form></dd>`
+        );
+      })
       .join('') || `<dt class="tag" style="grid-column:span 2">no keys configured</dt><dd></dd>`;
 
   const snapshotControls = s.candidateSnapshotPresent

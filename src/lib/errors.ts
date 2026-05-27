@@ -12,8 +12,8 @@ export class DomainError extends Error {
 export const Unauthorized = (msg = 'invalid_api_key'): DomainError =>
   new DomainError(msg, 401, 'unauthorized');
 
-export const Forbidden = (msg = 'forbidden'): DomainError =>
-  new DomainError(msg, 403, 'forbidden');
+export const Forbidden = (msg = 'forbidden', code = 'forbidden'): DomainError =>
+  new DomainError(msg, 403, code);
 
 export const QuotaExceeded = (msg = 'quota_exceeded'): DomainError =>
   new DomainError(msg, 429, 'quota_exceeded');

@@ -1,0 +1,44 @@
+/**
+ * Per-key model allowlist matching.
+ *
+ * Patterns are either:
+ *   - Exact:  `"claude-haiku-4-5-20251001"`
+ *   - Prefix: `"claude-haiku-*"` — the trailing `*` is dropped and the
+ *             remainder is `startsWith`-matched.
+ *
+ * No infix or multi-wildcard support — operationally we restrict by model
+ * family (the prefix shape Anthropic uses), and avoiding glob complexity
+ * keeps the rule trivially auditable.
+ *
+ * An empty / missing pattern list means "no restriction" — every model is
+ * allowed. This preserves backward compatibility with keystores that pre-date
+ * the feature.
+ */
+export const isModelAllowed = (
+  model: string,
+  patterns: readonly string[] | undefined,
+): boolean => {
+  if (!patterns || patterns.length === 0) return true;
+  return patterns.some((p) => {
+    if (p.endsWith('*')) return model.startsWith(p.slice(0, -1));
+    return model === p;
+  });
+};
+
+/**
+ * Validate a pattern shape before persisting it. Catches stray internal `*`
+ * or empty strings at write time so we never store an unmatchable rule that
+ * silently locks the user out.
+ */
+export const assertValidModelPattern = (p: string): void => {
+  if (p.length === 0) {
+    throw new Error('model pattern must be non-empty');
+  }
+  const starCount = (p.match(/\*/g) ?? []).length;
+  if (starCount > 1) {
+    throw new Error(`model pattern "${p}" has more than one wildcard`);
+  }
+  if (starCount === 1 && !p.endsWith('*')) {
+    throw new Error(`model pattern "${p}" — wildcard only allowed as trailing suffix`);
+  }
+};

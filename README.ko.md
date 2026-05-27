@@ -150,6 +150,16 @@ curl -sS -u admin:<운영자-키> http://<프록시-호스트>/admin/keys \
   -H 'content-type: application/json' \
   -d '{"name":"bob"}'
 # 응답에 키 값 포함 — 발급 시 한 번만 표시됨.
+
+# 모델 family 단위 제한 (예: 일반 사용자에게 haiku만 허용)
+curl -sS -u admin:<운영자-키> http://<프록시-호스트>/admin/keys \
+  -H 'content-type: application/json' \
+  -d '{"name":"carol", "allowedModels": ["claude-haiku-*"]}'
+# 제한된 키는 거부된 모델 요청 시 403 model_not_allowed 반환.
+# `allowedModels`를 생략 (또는 []) 하면 제한 없음. 패턴은 정확 id
+# ("claude-haiku-4-5-20251001") 또는 끝-와일드카드 family
+# ("claude-sonnet-*") 만 허용. env-baked 키(API_KEYS=…)는 allowedModels
+# 못 가짐 — 제한된 사용자는 api-keys.json 사용.
 ```
 
 사용자에게 보낼 메시지:
@@ -168,7 +178,7 @@ curl -sS -u admin:<운영자-키> http://<프록시-호스트>/admin/keys \
 |---|---|---|
 | `GET /admin` | — | 운영자 대시보드. billing health, account pool headroom, canary 상태, per-user usage, 아래 폼들. |
 | `GET /admin/stats` | — | 같은 데이터를 JSON으로. |
-| `POST /admin/keys` | JSON | Self-serve 추가 — `{ name, key? }`. `API_KEYS_PATH` 필요. |
+| `POST /admin/keys` | JSON | Self-serve 추가 — `{ name, key?, allowedModels? }`. `API_KEYS_PATH` 필요. `allowedModels`는 정확 id 또는 `family-*` wildcard. |
 | `DELETE /admin/keys/:name` | — | 키 회수. 폼 미러: `POST /admin/keys/:name/revoke`. |
 | `POST /admin/oauth/replace` | form/JSON | Fresh refresh token paste. 다음 요청이 새 access token을 mint. single-account 모드는 `memberName=default`. |
 | `POST /admin/alerts/discord` | form | Discord webhook URL 회전. 빈 `url`은 클리어. |

@@ -99,6 +99,10 @@ claude --bare -p "reply with the single word: pong" --model claude-sonnet-4-6
 - `claude --bare`로 전환 (옵션 B).
 - 옵션 A 사용 중이면 `~/.claude/settings.json`이 유효한 JSON인지 확인 + `apiKeyHelper`가 키 값만 공백 없이 출력하는지 확인 (`echo -n <KEY>` 또는 그냥 `echo <KEY>`).
 
+### `403 model_not_allowed`
+
+본인 키에 모델 allowlist 가 걸려있고 그 외의 모델 요청했음. 응답 본문에 허용된 모델 목록이 있음. 운영자에게 allowlist 확장 요청하거나, 표시된 모델만 사용 (대부분의 casual 사용자는 `claude-haiku-*` 만).
+
 ### sonnet/opus만 `429 rate_limit_error`, haiku는 잘 됨
 
 프록시가 자동으로 처리해야 함 — 본사가 Claude.ai OAuth 토큰 + premium 모델 조합에 요구하는 default `system` 필드를 프록시가 inject. 그래도 보이면:

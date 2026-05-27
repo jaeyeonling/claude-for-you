@@ -9,6 +9,8 @@ import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { UsageTracker } from '../usage/per-user.js';
+import { isModelAllowed } from '../auth/model-allow.js';
+import { Forbidden } from '../lib/errors.js';
 import { extractUsage, safeParseJson, sniffUsage } from '../usage/sniff.js';
 import { log } from '../lib/logger.js';
 import { callUpstream } from './upstream.js';
@@ -86,6 +88,21 @@ export const createMessagesHandler =
       return { ...b, system: "You are Claude Code, Anthropic's official CLI for Claude." };
     };
     const clientBody = ensureSystem(rawBody as Record<string, unknown>);
+
+    // Per-key allowlist gate. Empty/missing allowlist = no restriction
+    // (env-baked keys always fall through here). Body must declare a model
+    // string for the gate to evaluate; absent or non-string falls through
+    // too — upstream will return its own 400 for malformed bodies.
+    const requestedModel = clientBody.model;
+    if (typeof requestedModel === 'string' && user.allowedModels) {
+      if (!isModelAllowed(requestedModel, user.allowedModels)) {
+        throw Forbidden(
+          `model "${requestedModel}" not allowed for key "${user.name}" ` +
+            `(permitted: ${user.allowedModels.join(', ')})`,
+          'model_not_allowed',
+        );
+      }
+    }
 
     // Record a thin fingerprint for drift root-cause analysis. Memory-only ring.
     const reqHeaders = c.req.raw.headers;

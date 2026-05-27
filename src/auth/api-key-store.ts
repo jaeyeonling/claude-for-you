@@ -4,6 +4,7 @@ import { rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ApiKeyEntry } from '../config.js';
 import { ConfigError, Conflict, InvalidRequest } from '../lib/errors.js';
+import { assertValidModelPattern } from './model-allow.js';
 
 /**
  * Phase 20c — API key store.
@@ -39,13 +40,17 @@ interface ApiKeyFile {
     readonly name: string;
     readonly key: string;
     readonly createdAt: string;
+    readonly allowedModels?: readonly string[];
   }>;
   readonly revoked: readonly string[];
 }
 
 export interface ApiKeyStore {
   list(): readonly ApiKeyRecord[];
-  add(name: string, providedKey?: string): Promise<ApiKeyRecord>;
+  add(
+    name: string,
+    options?: { providedKey?: string; allowedModels?: readonly string[] },
+  ): Promise<ApiKeyRecord>;
   revoke(name: string): Promise<boolean>;
   /** True if `name` is in the revoke set — caller can short-circuit. */
   isRevoked(name: string): boolean;
@@ -99,6 +104,9 @@ export const createApiKeyStore = (params: {
       if (revoked.has(entry.name)) continue;
       if (seen.has(entry.name)) continue;
       seen.add(entry.name);
+      // Env-baked keys carry no allowedModels (the env format has no slot)
+      // so they're effectively unrestricted. Operators wanting per-key
+      // restriction must use api-keys.json.
       out.push({ name: entry.name, key: entry.key, createdAt: '(env)', source: 'env' });
     }
     for (const entry of file.keys) {
@@ -132,23 +140,41 @@ export const createApiKeyStore = (params: {
 
   return Object.freeze({
     list: compose,
-    async add(name: string, providedKey?: string): Promise<ApiKeyRecord> {
+    async add(
+      name: string,
+      options?: { providedKey?: string; allowedModels?: readonly string[] },
+    ): Promise<ApiKeyRecord> {
       assertValidName(name);
       const existing = compose().find((e) => e.name === name);
       if (existing) {
         throw Conflict(`key "${name}" already exists`, 'key_exists');
       }
-      const key = providedKey ?? generateKey();
+      const key = options?.providedKey ?? generateKey();
       if (key.length < MIN_KEY_LENGTH) {
         throw InvalidRequest(`key must be at least ${MIN_KEY_LENGTH} chars`, 'key_too_short');
       }
+      const allowedModels = options?.allowedModels;
+      if (allowedModels) {
+        try {
+          for (const p of allowedModels) assertValidModelPattern(p);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw InvalidRequest(msg, 'invalid_model_pattern');
+        }
+      }
       const createdAt = new Date().toISOString();
+      const fileEntry: ApiKeyFile['keys'][number] = allowedModels
+        ? { name, key, createdAt, allowedModels }
+        : { name, key, createdAt };
       const next: ApiKeyFile = {
-        keys: [...file.keys, { name, key, createdAt }],
+        keys: [...file.keys, fileEntry],
         revoked: file.revoked.filter((r) => r !== name),
       };
       await persist(next);
-      return { name, key, createdAt, source: 'file' };
+      const record: ApiKeyRecord = allowedModels
+        ? { name, key, createdAt, source: 'file', allowedModels }
+        : { name, key, createdAt, source: 'file' };
+      return record;
     },
     async revoke(name: string): Promise<boolean> {
       // Apply the same validator as add() — rejects malformed names from

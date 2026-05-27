@@ -93,4 +93,37 @@ describe('createApiKeyStore', () => {
     });
     expect(store.add('alice')).rejects.toThrow(/already exists/);
   });
+
+  test('add() with allowedModels persists and exposes them on list()', async () => {
+    const store = createApiKeyStore({
+      envKeys: [],
+      filePath: join(workdir, 'api-keys.json'),
+    });
+    const created = await store.add('bob', {
+      allowedModels: ['claude-haiku-*', 'claude-sonnet-4-6'],
+    });
+    expect(created.allowedModels).toEqual(['claude-haiku-*', 'claude-sonnet-4-6']);
+    const fromList = store.list().find((e) => e.name === 'bob');
+    expect(fromList?.allowedModels).toEqual(['claude-haiku-*', 'claude-sonnet-4-6']);
+  });
+
+  test('add() rejects malformed model patterns at write time', async () => {
+    const store = createApiKeyStore({
+      envKeys: [],
+      filePath: join(workdir, 'api-keys.json'),
+    });
+    // Multi-wildcard pattern would silently never match — reject early.
+    expect(
+      store.add('carol', { allowedModels: ['claude-*-opus-*'] }),
+    ).rejects.toThrow(/more than one/);
+  });
+
+  test('env-baked keys carry no allowedModels (env format has no slot)', () => {
+    const store = createApiKeyStore({
+      envKeys: [{ name: 'alice', key: longerKey }],
+      filePath: null,
+    });
+    const alice = store.list().find((e) => e.name === 'alice');
+    expect(alice?.allowedModels).toBeUndefined();
+  });
 });

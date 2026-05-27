@@ -99,6 +99,13 @@ The proxy key isn't being applied to outbound calls. Two fixes:
 - Switch to `claude --bare` (Option B).
 - If you used Option A, make sure `~/.claude/settings.json` is valid JSON and `apiKeyHelper` returns exactly the key with no extra whitespace: `echo -n <KEY>` (or just `echo <KEY>`).
 
+### `403 model_not_allowed`
+
+Your key has a per-key model allowlist and you requested something outside it.
+The response body names which models *are* allowed for your key. Ask your
+operator to widen the allowlist (or stick to the listed models — for many
+casual users that means `claude-haiku-*` only).
+
 ### `429 rate_limit_error` on sonnet/opus, but haiku works
 
 The proxy itself should handle this transparently — it injects a default `system` field that Anthropic's backend requires for premium models on Claude.ai OAuth tokens. If you see it anyway:

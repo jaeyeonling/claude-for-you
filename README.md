@@ -150,6 +150,16 @@ curl -sS -u admin:<your-key> http://<proxy-host>/admin/keys \
   -H 'content-type: application/json' \
   -d '{"name":"bob"}'
 # response includes the key value — shown once, never again.
+
+# Restrict by model family (haiku-only for a casual user)
+curl -sS -u admin:<your-key> http://<proxy-host>/admin/keys \
+  -H 'content-type: application/json' \
+  -d '{"name":"carol", "allowedModels": ["claude-haiku-*"]}'
+# Restricted users hit 403 model_not_allowed if they request a denied model.
+# Omit `allowedModels` (or pass []) for no restriction. Patterns accept exact
+# ids ("claude-haiku-4-5-20251001") or trailing-wildcard families
+# ("claude-sonnet-*"). Env-baked keys (API_KEYS=…) cannot carry allowedModels —
+# use api-keys.json for restricted users.
 ```
 
 Message you send them:
@@ -168,7 +178,7 @@ All `/admin/*` routes require API-key auth (the proxy's authorized keys list —
 |---|---|---|
 | `GET /admin` | — | Operator dashboard. Billing health, account pool headroom, canary state, per-user usage, forms below. |
 | `GET /admin/stats` | — | Same data as JSON. |
-| `POST /admin/keys` | JSON | Self-serve add — `{ name, key? }`. Requires `API_KEYS_PATH`. |
+| `POST /admin/keys` | JSON | Self-serve add — `{ name, key?, allowedModels? }`. Requires `API_KEYS_PATH`. `allowedModels` entries accept exact ids or `family-*` wildcards. |
 | `DELETE /admin/keys/:name` | — | Revoke a key. Form mirror at `POST /admin/keys/:name/revoke`. |
 | `POST /admin/oauth/replace` | form/JSON | Paste a fresh refresh token. Next request mints a new access token. `memberName=default` for single-account mode. |
 | `POST /admin/alerts/discord` | form | Rotate Discord webhook URL. Empty `url` clears it. |

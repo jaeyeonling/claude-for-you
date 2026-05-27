@@ -3,7 +3,11 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { Unauthorized } from '../lib/errors.js';
 import type { ApiKeyStore } from './api-key-store.js';
 
-export type AuthenticatedUser = Readonly<{ name: string }>;
+export type AuthenticatedUser = Readonly<{
+  name: string;
+  /** Mirrors ApiKeyEntry.allowedModels — undefined/empty means no restriction. */
+  allowedModels?: readonly string[];
+}>;
 
 declare module 'hono' {
   interface ContextVariableMap {
@@ -64,7 +68,11 @@ export const createApiKeyMiddleware = (store: ApiKeyStore): MiddlewareHandler =>
     const entries = store.list();
     let matched: AuthenticatedUser | null = null;
     for (const entry of entries) {
-      if (safeEqual(presented, entry.key)) matched = { name: entry.name };
+      if (safeEqual(presented, entry.key)) {
+        matched = entry.allowedModels
+          ? { name: entry.name, allowedModels: entry.allowedModels }
+          : { name: entry.name };
+      }
     }
     if (matched === null) throw Unauthorized('invalid api key');
 

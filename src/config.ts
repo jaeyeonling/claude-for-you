@@ -1,6 +1,19 @@
 import { ConfigError } from './lib/errors.js';
 
-export type ApiKeyEntry = Readonly<{ name: string; key: string }>;
+export type ApiKeyEntry = Readonly<{
+  name: string;
+  key: string;
+  /**
+   * Optional allowlist of model patterns this key may invoke. Each entry is
+   * either an exact model id (`claude-haiku-4-5-20251001`) or a prefix with
+   * trailing wildcard (`claude-haiku-*`). When omitted or empty the key has
+   * no restriction — backward compatible with existing keystores.
+   *
+   * Env-baked keys (`API_KEYS=name:key,…`) cannot carry this — the env
+   * format has no room. Use api-keys.json for restricted users.
+   */
+  allowedModels?: readonly string[];
+}>;
 
 export type AppConfig = Readonly<{
   port: number;

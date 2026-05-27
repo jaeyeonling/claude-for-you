@@ -65,12 +65,12 @@ export const createAdminEventsHandler =
           usageSnap: await deps.tracker.snapshot(),
           canarySnap: deps.canary.snapshot(),
           alertConfig: deps.alertStore.get(),
-          apiKeyRows: deps.apiKeyStore.list().map((e) => ({
-            name: e.name,
-            source: e.source,
-            key: e.key,
-            createdAt: e.createdAt,
-          })),
+          apiKeyRows: deps.apiKeyStore.list().map((e) => {
+            const row: import('./render.js').ApiKeyRow = e.allowedModels
+              ? { name: e.name, source: e.source, key: e.key, createdAt: e.createdAt, allowedModels: e.allowedModels }
+              : { name: e.name, source: e.source, key: e.key, createdAt: e.createdAt };
+            return row;
+          }),
           orgId: deps.accountLearner.current(),
           candidateDescription: deps.candidateDescription,
           candidateSnapshotPresent: existsSync(CANDIDATE_SNAPSHOT_PATH),
