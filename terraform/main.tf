@@ -352,8 +352,14 @@ resource "aws_instance" "app" {
   }
 
   lifecycle {
-    # user_data changes shouldn't recreate the instance after first deploy.
-    ignore_changes = [user_data]
+    # `user_data` changes are routine (deploy.sh re-templates it); never let
+    # them recreate the instance.
+    # `ami` drift is silent and unwanted: `data.aws_ami.al2023` follows
+    # most_recent so a new Amazon Linux build would force-replace the
+    # instance and erase /data, OAuth tokens, docker layer cache. Pin the
+    # AMI here; upgrade is then an explicit operator decision (taint or
+    # bump the data filter), not a side effect of `terraform plan`.
+    ignore_changes = [user_data, ami]
   }
 }
 
