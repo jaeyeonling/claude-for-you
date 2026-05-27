@@ -84,4 +84,43 @@ describe('createApiKeyMiddleware', () => {
     });
     expect(res.status).toBe(401);
   });
+
+  test('rejects OAuth access token shape with 400 (Phase 4 safeguard)', async () => {
+    const app = buildApp(stubStore([{ name: 'alice', key: VALID }]));
+    const res = await app.request('/v1/whoami', {
+      headers: { 'x-api-key': 'sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaa' },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe('oauth_token_rejected');
+  });
+
+  test('rejects OAuth refresh token shape with 400 (Phase 4 safeguard)', async () => {
+    const app = buildApp(stubStore([{ name: 'alice', key: VALID }]));
+    const res = await app.request('/v1/whoami', {
+      headers: { 'x-api-key': 'sk-ant-ort01-bbbbbbbbbbbbbbbbbbbbbbbb' },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe('oauth_token_rejected');
+  });
+
+  test('does NOT reject other sk-ant prefixes — Console API keys reach the store', async () => {
+    // Anthropic Console keys (sk-ant-api03-*) and any future non-OAuth prefix
+    // must not be misclassified as OAuth. They still fail the store match
+    // (401) because they aren't registered, but the failure mode is the
+    // ordinary "unknown key" path — not the OAuth safeguard.
+    const app = buildApp(stubStore([{ name: 'alice', key: VALID }]));
+    const res = await app.request('/v1/whoami', {
+      headers: { 'x-api-key': 'sk-ant-api03-cccccccccccccccccccccccc' },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test('OAuth shape rejected via Authorization: Bearer too', async () => {
+    const app = buildApp(stubStore([{ name: 'alice', key: VALID }]));
+    const res = await app.request('/v1/whoami', {
+      headers: { Authorization: 'Bearer sk-ant-oat01-dddddddddddddddddddddddd' },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe('oauth_token_rejected');
+  });
 });
