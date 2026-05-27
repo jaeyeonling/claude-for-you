@@ -28,6 +28,12 @@ if (captureModeEnabled) {
     fetch: app.fetch,
     port: config.port,
     hostname: config.host,
+    // Disable per-connection idle timeout. Bun.serve's default (10s) can cut
+    // SSE responses when Claude's upstream pauses between chunks (thinking
+    // blocks, slow first-token). Abuse defense already lives in earlier
+    // layers — Caddy edge limits + createIpRateLimiter + createConcurrencyLimiter
+    // — so removing the runtime idle clamp is safe.
+    idleTimeout: 0,
   });
   banner(server.hostname ?? config.host, server.port ?? config.port, 'Bun.serve');
 }
