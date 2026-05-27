@@ -30,9 +30,21 @@ import { assertValidModelPattern } from './model-allow.js';
 
 const MIN_KEY_LENGTH = 16;
 
+/**
+ * `role` is derived from `source`, not stored in the file:
+ *   - env-baked keys  → 'admin' (the operator who deployed the proxy)
+ *   - file-added keys → 'user'  (issued via /admin/keys for regular consumers)
+ *
+ * Keeping it computed means there's no migration step for existing
+ * api-keys.json files, and there's no way to accidentally elevate a
+ * file-issued key by editing the JSON.
+ */
+export type ApiKeyRole = 'admin' | 'user';
+
 export interface ApiKeyRecord extends ApiKeyEntry {
   readonly createdAt: string;
   readonly source: 'env' | 'file';
+  readonly role: ApiKeyRole;
 }
 
 interface ApiKeyFile {
@@ -107,13 +119,19 @@ export const createApiKeyStore = (params: {
       // Env-baked keys carry no allowedModels (the env format has no slot)
       // so they're effectively unrestricted. Operators wanting per-key
       // restriction must use api-keys.json.
-      out.push({ name: entry.name, key: entry.key, createdAt: '(env)', source: 'env' });
+      out.push({
+        name: entry.name,
+        key: entry.key,
+        createdAt: '(env)',
+        source: 'env',
+        role: 'admin',
+      });
     }
     for (const entry of file.keys) {
       if (revoked.has(entry.name)) continue;
       if (seen.has(entry.name)) continue;
       seen.add(entry.name);
-      out.push({ ...entry, source: 'file' });
+      out.push({ ...entry, source: 'file', role: 'user' });
     }
     return out;
   };
@@ -172,8 +190,8 @@ export const createApiKeyStore = (params: {
       };
       await persist(next);
       const record: ApiKeyRecord = allowedModels
-        ? { name, key, createdAt, source: 'file', allowedModels }
-        : { name, key, createdAt, source: 'file' };
+        ? { name, key, createdAt, source: 'file', role: 'user', allowedModels }
+        : { name, key, createdAt, source: 'file', role: 'user' };
       return record;
     },
     async revoke(name: string): Promise<boolean> {

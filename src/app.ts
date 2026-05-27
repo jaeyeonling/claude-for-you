@@ -25,6 +25,7 @@ import type { AccountPool } from './auth/account-pool.js';
 import { createApiKeyMiddleware } from './auth/api-key.js';
 import { createApiKeyStore } from './auth/api-key-store.js';
 import { createOAuthManager } from './auth/oauth.js';
+import { requireAdmin } from './auth/require-admin.js';
 import { createCanaryController } from './canary.js';
 import { createCaptureMiddleware, loadCaptureConfig } from './capture.js';
 import type { AppConfig } from './config.js';
@@ -235,6 +236,7 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     testResultStore,
   };
   app.use('/admin/*', createApiKeyMiddleware(apiKeyStore));
+  app.use('/admin/*', requireAdmin);
   app.use('/admin/*', csrfGuard);
   app.get('/admin/stats', createStatsHandler(adminDeps));
   app.get('/admin', createAdminPageHandler({ ...adminDeps, apiKeyStore, alertStore }));

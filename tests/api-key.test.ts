@@ -10,6 +10,7 @@ const stubStore = (entries: Array<{ name: string; key: string }>): ApiKeyStore =
       ...e,
       createdAt: '2026-01-01T00:00:00.000Z',
       source: 'env' as const,
+      role: 'admin' as const,
     })),
   add: async () => {
     throw new Error('not used in middleware tests');
@@ -21,7 +22,10 @@ const stubStore = (entries: Array<{ name: string; key: string }>): ApiKeyStore =
 const buildApp = (store: ApiKeyStore): Hono => {
   const app = new Hono();
   app.use('/v1/*', createApiKeyMiddleware(store));
-  app.get('/v1/whoami', (c) => c.json({ name: c.get('user').name }));
+  app.get('/v1/whoami', (c) => {
+    const u = c.get('user');
+    return c.json({ name: u.name, role: u.role });
+  });
   app.onError((err, c) => {
     if (err instanceof DomainError) return c.text(err.code, err.status as 401);
     return c.text('boom', 500);
@@ -39,7 +43,7 @@ describe('createApiKeyMiddleware', () => {
       headers: { 'x-api-key': VALID },
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ name: 'alice' });
+    expect(await res.json()).toEqual({ name: 'alice', role: 'admin' });
   });
 
   test('accepts Authorization: Bearer', async () => {
