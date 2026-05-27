@@ -29,17 +29,18 @@
 
 **원인**: 본인 머신 Keychain에 OAuth 토큰이 있으면 CC가 그걸 우선 사용. `ANTHROPIC_API_KEY` env가 있어도 우리 프록시로 안 감.
 
-**해결**:
-- **별도 머신 / VM / 다른 user account**에서 검증. 가장 깨끗.
-- 또는 임시 HOME 격리 + macOS Keychain 다이얼로그 "Don't Allow":
+**해결** (위에서부터 권장):
+- **본인 머신을 영구적으로 프록시 클라이언트로 전환** — [`docs/user-guide.md`](./user-guide.md)의 **권장 설정**(Keychain 정리 → 프록시 키를 별도 Keychain 항목으로 → `apiKeyHelper` 절대경로). 본인이 운영자 겸 사용자라면 이게 정답. 함정 #11 참고.
+- 본인 OAuth를 유지해야 하면 **별도 머신 / VM / 다른 user account**에서 검증.
+- 1회성 검증만 필요하면 임시 HOME 격리:
   ```bash
   TMPHOME=$(mktemp -d -t cc-test-XXXX)
   HOME="$TMPHOME" ANTHROPIC_BASE_URL=https://our-domain ANTHROPIC_API_KEY=xxx claude
   rm -rf "$TMPHOME"
   ```
-- 가장 빠른 검증은 curl/SDK 직호출 (CC 자체 사용 X).
+- 가장 빠른 1회성 검증은 curl/SDK 직호출 (CC 자체 사용 X).
 
-**원칙**: 우리 프록시는 **본인 토큰이 없는 다른 사람의 머신**용 도구. 본인 머신 검증은 의미가 작아요.
+**원칙**: 본인이 운영자이면서 동시에 사용자라면 — 본인 머신도 "다른 사람의 머신"과 같은 셋업(권장 설정)을 따라야 한다. 그게 본인 OAuth를 풀에서 분리하고 충돌 위험을 0으로 만드는 유일한 방법.
 
 ---
 
@@ -157,6 +158,45 @@ docker run --rm -v claude-for-you_tokens:/d -v $PWD:/b alpine \
 
 ---
 
+## 11. 운영자 본인이 같은 OAuth로 프록시도 굴리고 로컬에서도 쓰는 경우 — RT rotation 충돌
+
+**증상**: 본인 머신에서 `Please run /login`이 반복적으로 뜸. `/logout` 한 적 없고 (함정 #1 아님), Anthropic 측 자동 revoke도 아님(함정 #10 아님). 프록시 서버 로그에는 `oauth refresh failed:` (`src/auth/oauth.ts:109`)가 간헐적으로 찍힘.
+
+**원인**: Anthropic OAuth는 refresh token rotation을 **single-holder**로 강제. 본인이 같은 RT를 EC2 프록시와 로컬 머신 **두 곳에** 갖고 있으면 한쪽이 refresh → 새 RT 발급 → 다른 쪽의 RT는 stale → 다음 호출이 stale RT 사용 → server가 stale RT 재사용을 탈취 시도로 간주하고 chain 통째로 revoke → 양쪽 다 401.
+
+함정 #1·#10과 다른 점: 본인의 명시적 행위가 없는데 일어남. **공존 자체가 원인**.
+
+**자가 진단 체크리스트** (위에서부터 검사):
+
+- [ ] 최근 본인 머신에서 `claude /logout` 한 적 있는가? → **있으면 #1** (이 함정 아님)
+- [ ] 본인 머신 keychain에 OAuth 항목이 살아 있는가?
+  ```bash
+  security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 \
+    && echo "OAuth present (suspect #11)" \
+    || echo "OAuth absent (likely not #11)"
+  ```
+- [ ] 본인 머신의 `~/.claude/settings.json`이 `apiKeyHelper`로 프록시 키를 가리키는 상태인가?
+  ```bash
+  grep -E "apiKeyHelper|ANTHROPIC_BASE_URL" ~/.claude/settings.json 2>/dev/null
+  ```
+
+OAuth가 살아 있으면서 `apiKeyHelper`/`ANTHROPIC_BASE_URL`도 프록시를 가리키는 상태 = #11 시나리오. 본인이 두 holder 역할을 동시에 하고 있는 것.
+
+**복구**:
+1. EC2 프록시 로그에서 사고 규모 확인:
+   ```bash
+   # on the proxy host
+   docker compose logs --since 24h app | grep -i "oauth refresh failed"
+   ```
+2. 본인 머신을 [`docs/user-guide.md`](./user-guide.md)의 **권장 설정**으로 전환 (Keychain OAuth 제거 → 프록시 키만 사용)
+3. 함정 #1의 복구 절차로 프록시 측 OAuth 재발급 (`security find-generic-password` → `.env` 갱신 → `docker compose restart app`)
+
+**예방**: 본인 로컬 = **OAuth 없는 클라이언트**, 본인 OAuth = **프록시 account-pool에만 존재**. 그렇게 분리되면 같은 chain의 holder가 한 명이 되어 충돌 자체가 불가능. 1년 뒤 본인이 무의식적으로 `claude /login`을 누르는 사고를 막으려면 user-guide의 권장 설정을 본인 머신에 commit 수준으로 박아둘 것 (`~/.claude/settings.json` 백업 등).
+
+**관련**: 함정 #1(`/logout` server-side revoke), 함정 #10(자동 revoke)과 같은 카테고리 — 모두 "같은 OAuth를 두 곳에 두면 안 됨"의 변종. #11은 그중 가장 빈번하지만 가장 안 보이는 사고.
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```
@@ -170,6 +210,8 @@ Discord에 [billing] ALARM 알람 옴
   │     ├─ 일시적이면 무시 (Anthropic이 자동 회복)
   │     └─ 지속되면 multi-account pool 또는 사용자 quota 강화
   │
-  └─ [oauth] refresh failed?  → 토큰 revoke됨 (#1 또는 #10)
+  └─ [oauth] refresh failed?  → 토큰 revoke됨 (#1, #10, 또는 #11)
+        → 본인이 logout한 적 있으면 #1, 무관하게 갑자기면 #10,
+          본인 로컬에서 같은 OAuth 쓰는 중이면 #11
         → 재로그인 + 갱신 절차
 ```
