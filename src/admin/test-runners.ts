@@ -113,10 +113,16 @@ const summarizeMessageBody = (body: unknown): string => {
   return excerpt(JSON.stringify(obj), 120);
 };
 
+// `system` is required by upstream for sonnet/opus when the OAuth token was
+// issued via Claude.ai (CC flow). Without it: rate_limit_error. haiku passes
+// without. See proxy/messages.ts:ensureSystem for the same fix on the proxy
+// path; we duplicate it here so direct-upstream test (`upstream-direct`)
+// also sends a valid body.
 const PING_BODY = (model: string): string =>
   JSON.stringify({
     model,
     max_tokens: 16,
+    system: "You are Claude Code, Anthropic's official CLI for Claude.",
     messages: [{ role: 'user', content: 'reply with the single word: pong' }],
   });
 

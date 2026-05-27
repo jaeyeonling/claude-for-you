@@ -64,13 +64,28 @@ export const createMessagesHandler =
     deps.globalGuard.assertSubscriptionHealthy();
     await deps.tracker.assertCanRequest(user.name);
 
-    const clientBody = await c.req.json().catch(() => null);
-    if (clientBody === null || typeof clientBody !== 'object') {
+    const rawBody = await c.req.json().catch(() => null);
+    if (rawBody === null || typeof rawBody !== 'object') {
       return c.json(
         { error: { type: 'invalid_request', message: 'request body must be JSON object' } },
         400,
       );
     }
+    // Upstream rejects Claude.ai-OAuth calls that omit `system` for premium
+    // models (sonnet/opus) with rate_limit_error — even though the API schema
+    // marks system as optional. haiku is exempt. Confirmed 2026-05-27 by
+    // wire-level A/B (same OAuth token, body w/ vs w/o system → 429 vs 200).
+    // The proxy is transparent on every other field; only synthesize a
+    // minimal system when the client truly didn't send one.
+    const ensureSystem = (b: Record<string, unknown>): Record<string, unknown> => {
+      const sys = b.system;
+      const present =
+        (typeof sys === 'string' && sys.length > 0) ||
+        (Array.isArray(sys) && sys.length > 0);
+      if (present) return b;
+      return { ...b, system: "You are Claude Code, Anthropic's official CLI for Claude." };
+    };
+    const clientBody = ensureSystem(rawBody as Record<string, unknown>);
 
     // Record a thin fingerprint for drift root-cause analysis. Memory-only ring.
     const reqHeaders = c.req.raw.headers;
