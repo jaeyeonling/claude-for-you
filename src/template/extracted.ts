@@ -86,13 +86,50 @@ const loadSnapshot = (path: string): SnapshotV2 => {
   return parsed;
 };
 
-const mergeAnthropicBeta = (baseValue: string, clientHeaders: Headers | undefined): string => {
-  const clientRaw = clientHeaders?.get('anthropic-beta') ?? '';
-  if (clientRaw.length === 0) return baseValue;
+// Beta flags the gateway cannot honor because upstream auth is Claude.ai OAuth
+// (subscription), not a Console API key. Long-context (1M) is the canonical
+// case — OAuth has no entitlement for it, so Anthropic returns HTTP 429
+// "Usage credits are required for long context requests" (deterministic, not
+// rate-limit). We strip silently so requests downgrade to the standard 200K
+// window instead of failing. Oversized prompts still surface a clear
+// "input too long" from upstream. See docs/operational-pitfalls.md #12.
+const OAUTH_INCOMPATIBLE_BETA_PREFIXES: readonly string[] = ['context-1m-'];
+
+const isOAuthIncompatibleBeta = (flag: string): boolean =>
+  OAUTH_INCOMPATIBLE_BETA_PREFIXES.some((p) => flag.startsWith(p));
+
+/**
+ * Pure merge+filter used by `mergeAnthropicBeta`. Exported for tests so the
+ * strip rule can be exercised without loading a snapshot.
+ */
+export const mergeAndFilterAnthropicBeta = (
+  baseValue: string,
+  clientValue: string,
+): { value: string; stripped: readonly string[] } => {
   const flags = new Set<string>();
   for (const f of baseValue.split(',').map((s) => s.trim())) if (f) flags.add(f);
-  for (const f of clientRaw.split(',').map((s) => s.trim())) if (f) flags.add(f);
-  return [...flags].join(',');
+  for (const f of clientValue.split(',').map((s) => s.trim())) if (f) flags.add(f);
+
+  const stripped: string[] = [];
+  for (const f of [...flags]) {
+    if (isOAuthIncompatibleBeta(f)) {
+      flags.delete(f);
+      stripped.push(f);
+    }
+  }
+  return { value: [...flags].join(','), stripped };
+};
+
+const mergeAnthropicBeta = (baseValue: string, clientHeaders: Headers | undefined): string => {
+  const clientRaw = clientHeaders?.get('anthropic-beta') ?? '';
+  const { value, stripped } = mergeAndFilterAnthropicBeta(baseValue, clientRaw);
+  if (stripped.length > 0) {
+    log.info(
+      `[template] stripped OAuth-incompatible anthropic-beta flag(s): ${stripped.join(',')} ` +
+        `(gateway has no Console-API entitlement; request downgraded to 200K window)`,
+    );
+  }
+  return value;
 };
 
 const buildHeaders = (

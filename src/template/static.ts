@@ -68,6 +68,13 @@ export const staticTemplate: ClaudeTemplate = {
   source: 'static',
   description: 'cc-snapshot/2026-05-27 (CC v2.1.142 mitmproxy-captured)',
 
+  // `clientHeaders` is intentionally NOT destructured — this template is a
+  // pure replay of the captured CC v2.1.142 wire shape, so client-supplied
+  // `anthropic-beta` is dropped wholesale (not merged). That means the
+  // OAuth-incompatible strip done in extracted.ts is structurally automatic
+  // here: `context-1m-*` can never reach upstream via this template. If you
+  // ever extend static to forward client beta flags, route through
+  // `mergeAndFilterAnthropicBeta` first — see pitfalls #12.
   apply: async ({ clientBody, accessToken }: ApplyInput): Promise<OutboundRequest> => {
     const body = JSON.stringify(clientBody);
     return {

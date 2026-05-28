@@ -197,6 +197,26 @@ OAuth가 살아 있으면서 `apiKeyHelper`/`ANTHROPIC_BASE_URL`도 프록시를
 
 ---
 
+## 12. 1M context는 게이트웨이로 못 씀 — `context-1m`은 자동 strip
+
+**증상**: 클라이언트가 `claude-opus-4-7[1m]` 같이 1M 컨텍스트 변종으로 요청하면 직결에서는 통과하지만 우리 프록시 통해 가면 HTTP 429 `"Usage credits are required for long context requests"` 로 거부.
+
+**원인**: 게이트웨이의 업스트림은 Claude.ai OAuth(구독)다. 1M context 베타(`context-1m-*`)는 **Console API key + tier-4 usage credit 전용 기능** — 구독 OAuth에는 엔타이틀먼트 자체가 없음. Anthropic이 토큰 종류를 보고 결정론적으로 거부 (rate-limit 아님, 권한 게이트).
+
+**현재 동작 (`a59a8f1` 이후 — 이건 그 후속 commit)**: `src/template/extracted.ts`의 `mergeAndFilterAnthropicBeta`가 클라이언트가 보낸 `context-1m-*` 플래그를 **머지 후에 silent strip**. 요청은 200K 윈도우로 우아하게 강등되어 그대로 통과. 입력이 진짜로 200K를 넘으면 그때 upstream이 "input too long"으로 명확히 거부.
+
+**확인 방법 (운영자)**: 프록시 로그에서 `[template] stripped OAuth-incompatible anthropic-beta flag(s): context-1m-...` 라인 검색. 라인이 보이면 그 요청은 강등됐다는 뜻.
+
+**부수 효과 — 프롬프트 캐시 미스**: Anthropic의 prompt cache key는 `anthropic-beta` 플래그 집합도 포함한다. 클라이언트가 `context-1m-*`를 켜고 보내면 캐시 쓰기/읽기는 strip된 베타 셋 기준으로 이뤄지므로 — 클라이언트는 캐시 히트를 기대했는데 실제로는 미스. 비용/지연이 살짝 늘 수 있고, "원인 모를 cache-miss 증가"로 보이면 strip 로그 빈도와 상관관계부터 확인할 것.
+
+**1M이 진짜로 필요한 사용자**: 게이트웨이를 우회하고 **Console API key로 직결** 사용. 구독 OAuth로는 구조적으로 불가능 — 회피책 없음.
+
+**확장**: 미래에 OAuth로 못 쓰는 다른 베타가 추가되면 `OAUTH_INCOMPATIBLE_BETA_PREFIXES` 배열에 prefix만 추가하면 자동 strip. 테스트는 `tests/template-extracted.test.ts`에 prefix-match 케이스 포함.
+
+**관련**: 함정 #2(본인 머신 검증)와 같은 "게이트웨이 모델의 자연스러운 trade-off" 카테고리 — 구독 1개를 여럿이 공유한다는 비용 절감 모델은 곧 API-tier 전용 기능을 못 쓴다는 의미.
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```

@@ -207,6 +207,18 @@ The proxy itself should handle this transparently — it injects a default `syst
 - Your client may be sending an explicit empty `system` (`"system": ""`). Either remove the field or use a non-empty string.
 - Ask your operator to confirm the proxy is on a recent commit.
 
+### `[1m]` models / 1M context — silently downgraded to 200K
+
+The proxy's upstream is a Claude.ai OAuth subscription, which has no entitlement for the 1M context window beta. Anthropic deterministically rejects those requests with a 429 `"Usage credits are required for long context requests."`
+
+To keep your client unchanged, the proxy strips the `context-1m-*` beta flag before forwarding — your request succeeds with the standard 200K window. You won't see a 429 anymore, but you also won't actually have 1M available.
+
+What to expect:
+- `[1m]` model requests succeed but will hit "input too long" from upstream once your prompt crosses the 200K boundary.
+- Prompt cache may show unexpected misses — Anthropic's cache key includes the beta-flag set, and your client's set no longer matches what reaches upstream.
+
+**If you genuinely need 1M context:** bypass the gateway and talk to `api.anthropic.com` directly using a Console API key (usage-based billing). There is no workaround within the gateway — the 1M entitlement is account-scoped on Anthropic's side and the gateway's subscription token cannot grant it.
+
 ### `Please run /login` on every restart
 
 If you're on the Recommended setup, this usually means `~/.claude/settings.json` got reverted or has a typo. Run `cat ~/.claude/settings.json` and confirm `apiKeyHelper` is an absolute path and `env.ANTHROPIC_BASE_URL` is set.
