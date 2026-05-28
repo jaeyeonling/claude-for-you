@@ -203,7 +203,13 @@ OAuth가 살아 있으면서 `apiKeyHelper`/`ANTHROPIC_BASE_URL`도 프록시를
 
 **원인**: 게이트웨이의 업스트림은 Claude.ai OAuth(구독)다. 1M context 베타(`context-1m-*`)는 **Console API key + tier-4 usage credit 전용 기능** — 구독 OAuth에는 엔타이틀먼트 자체가 없음. Anthropic이 토큰 종류를 보고 결정론적으로 거부 (rate-limit 아님, 권한 게이트).
 
-**현재 동작 (`a59a8f1` 이후 — 이건 그 후속 commit)**: `src/template/extracted.ts`의 `mergeAndFilterAnthropicBeta`가 클라이언트가 보낸 `context-1m-*` 플래그를 **머지 후에 silent strip**. 요청은 200K 윈도우로 우아하게 강등되어 그대로 통과. 입력이 진짜로 200K를 넘으면 그때 upstream이 "input too long"으로 명확히 거부.
+**현재 동작 — 두 단계 게이트**:
+
+1. **헤더 strip (`src/template/extracted.ts`)**: `mergeAndFilterAnthropicBeta`가 클라이언트가 보낸 `context-1m-*` 플래그를 머지 후 silent strip. *명시적* 1M 활성화 경로 차단.
+
+2. **본문 사이즈 게이트 (`src/proxy/messages.ts`, `OAUTH_PAYLOAD_LIMIT_BYTES = 1MB`)**: 클라이언트가 헤더 없이도 본문을 200K 토큰 넘게 채워 보내는 *암묵적* 경로 차단. content-length > 1MB이면 사전 413 `context_too_large_for_oauth` 반환. 메시지에 "Use Console API key directly"가 들어가 있어 사용자가 즉시 알 수 있음.
+
+**왜 두 단계인가**: CC `[1m]` 모델 변종은 실측 결과 `context-1m-*` 베타 헤더를 *보내지 않고*, 본문 크기 자체를 200K 토큰 너머로 키워서 1M을 활용한다. 헤더 strip만으로는 부족 — 본사가 토큰 카운트로 직접 게이트하므로 게이트웨이도 본문 사이즈로 사전 차단해야 함. 1MB 임계는 영문 ~250K, 한국어 ~150K 토큰. 1MB~2MB 사이 본문은 본사 429로 fallback (false negative 허용).
 
 **확인 방법 (운영자)**: 프록시 로그에서 `[template] stripped OAuth-incompatible anthropic-beta flag(s): context-1m-...` 라인 검색. 라인이 보이면 그 요청은 강등됐다는 뜻.
 

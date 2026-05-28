@@ -217,6 +217,12 @@ claude -p "reply with the single word: pong" --model claude-sonnet-4-6
 - `[1m]` 모델 요청은 통과하지만 프롬프트가 200K 경계를 넘으면 upstream의 "input too long"으로 명확히 거부됨.
 - 프롬프트 캐시 미스가 예상보다 많을 수 있음 — Anthropic의 캐시 키에 베타 플래그 셋이 포함되는데, 클라이언트가 보낸 셋과 실제 upstream에 도달하는 셋이 다름.
 
+### `413 context_too_large_for_oauth`
+
+별도 게이트. CC `[1m]` 모델 변종은 실제로는 `context-1m-*` 베타 헤더를 보내지 않고 본문 자체를 200K 토큰 너머로 키워서 1M을 활용한다 — 그래서 위 헤더 strip만으론 못 잡음. 요청 본문이 ~1MB(영문 ~250K / 한국어 ~150K 토큰)를 넘으면 게이트웨이가 사전 413으로 거부해서, upstream 429로 튕기기 전에 명확한 신호를 받게 됨.
+
+해결: 클라이언트 모델을 `[1m]` 없는 일반 변종으로 전환 (Claude Code 안에서 `/model`).
+
 **진짜로 1M 컨텍스트가 필요하다면**: 게이트웨이 우회해서 `api.anthropic.com`에 Console API key(종량제)로 직결. 게이트웨이 안에서는 회피책 없음 — 1M 엔타이틀먼트가 본사 계정 단위라 게이트웨이의 구독 토큰으로는 부여 불가.
 
 ### 재시작할 때마다 `Please run /login`

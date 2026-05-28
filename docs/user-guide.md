@@ -217,6 +217,12 @@ What to expect:
 - `[1m]` model requests succeed but will hit "input too long" from upstream once your prompt crosses the 200K boundary.
 - Prompt cache may show unexpected misses — Anthropic's cache key includes the beta-flag set, and your client's set no longer matches what reaches upstream.
 
+### `413 context_too_large_for_oauth`
+
+A separate gate. The CC `[1m]` model variant tends to grow prompts past 200K tokens *without* setting the `context-1m-*` beta header — so the strip above can't catch it. Once the request body crosses ~1MB (≈250K English / ~150K CJK tokens), the gateway rejects locally with HTTP 413 so you get an actionable signal instead of bouncing off the upstream 429.
+
+Switch your client model to a non-`[1m]` variant (`/model` inside Claude Code) and your prompts will fit.
+
 **If you genuinely need 1M context:** bypass the gateway and talk to `api.anthropic.com` directly using a Console API key (usage-based billing). There is no workaround within the gateway — the 1M entitlement is account-scoped on Anthropic's side and the gateway's subscription token cannot grant it.
 
 ### `Please run /login` on every restart

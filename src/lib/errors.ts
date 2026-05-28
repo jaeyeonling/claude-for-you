@@ -36,5 +36,8 @@ export const Conflict = (msg: string, code = 'conflict'): DomainError =>
 export const TooManyRequests = (msg: string): DomainError =>
   new DomainError(msg, 429, 'too_many_requests');
 
+export const PayloadTooLarge = (msg: string, code = 'payload_too_large'): DomainError =>
+  new DomainError(msg, 413, code);
+
 export const CsrfFailed = (msg: string): DomainError =>
   new DomainError(msg, 403, 'csrf_failed');

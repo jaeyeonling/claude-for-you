@@ -10,7 +10,23 @@ import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { isModelAllowed } from '../auth/model-allow.js';
-import { Forbidden } from '../lib/errors.js';
+import { Forbidden, PayloadTooLarge } from '../lib/errors.js';
+
+// Gateway upstream is Claude.ai OAuth (subscription) which caps prompt input
+// at ~200K tokens. Anthropic returns HTTP 429 (looks like a quota error) when
+// a request exceeds it — even WITHOUT the `context-1m-*` beta header, because
+// the cap is on the token count itself. CC's [1m] model variant triggers this
+// path: it grows the prompt past 200K tokens without flipping the beta flag.
+//
+// We can't tokenize cheaply, so use bytes as a proxy. 200K English tokens is
+// roughly 800KB; CJK can run hotter (fewer chars per token) so 1MB is a
+// reasonable upper bound that still catches >1M-variant traffic (which sits
+// around 2MB in observed logs). False negatives in the 1MB–2MB window still
+// bounce off the upstream 429, but at least the bulk of 1M-variant overage
+// gets a clear local 413 with an actionable message.
+//
+// Adjust if false positives appear in operator logs. See pitfalls #12.
+const OAUTH_PAYLOAD_LIMIT_BYTES = 1_000_000;
 import { extractUsage, safeParseJson, sniffUsage } from '../usage/sniff.js';
 import { log } from '../lib/logger.js';
 import { callUpstream } from './upstream.js';
@@ -66,6 +82,22 @@ export const createMessagesHandler =
     deps.globalGuard.assertSubscriptionHealthy();
     await deps.tracker.assertCanRequest(user.name);
 
+    const reqHeaders = c.req.raw.headers;
+
+    // Payload-size gate (see OAUTH_PAYLOAD_LIMIT_BYTES rationale above). We
+    // read content-length BEFORE parsing the body — cheaper, and a bogus
+    // multi-MB body shouldn't even reach JSON.parse. Missing/non-numeric
+    // header falls through to upstream; standard clients always send it.
+    const contentLength = Number(reqHeaders.get('content-length') ?? '0');
+    if (contentLength > OAUTH_PAYLOAD_LIMIT_BYTES) {
+      throw PayloadTooLarge(
+        `request body is ${contentLength} bytes — gateway max is ${OAUTH_PAYLOAD_LIMIT_BYTES} ` +
+          `(Claude.ai OAuth subscription has no >200K-token entitlement). ` +
+          `Use Console API key directly for 1M context. See pitfalls #12.`,
+        'context_too_large_for_oauth',
+      );
+    }
+
     const rawBody = await c.req.json().catch(() => null);
     if (rawBody === null || typeof rawBody !== 'object') {
       return c.json(
@@ -105,7 +137,6 @@ export const createMessagesHandler =
     }
 
     // Record a thin fingerprint for drift root-cause analysis. Memory-only ring.
-    const reqHeaders = c.req.raw.headers;
     const headerNames: string[] = [];
     reqHeaders.forEach((_v, k) => headerNames.push(k.toLowerCase()));
     const bodyKeys =
