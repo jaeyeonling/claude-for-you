@@ -1,6 +1,7 @@
 import type { Context, Hono } from 'hono';
 import type { AccountPool } from '../auth/account-pool.js';
 import type { ApiKeyStore } from '../auth/api-key-store.js';
+import type { ClaudeTemplate } from '../template/types.js';
 import { InvalidRequest, NotFound } from '../lib/errors.js';
 
 /**
@@ -173,18 +174,35 @@ const generateFiller = (bytes: number): string => {
   return chunks.join('').slice(0, bytes);
 };
 
-const buildProbeBody = (model: string, padBytes: number): string => {
-  if (padBytes <= 0) return PING_BODY(model);
+const buildProbeBodyObj = (model: string, padBytes: number): Record<string, unknown> => {
   // Filler first, then a short trailer that gives the model a clear
   // instruction. Trailer position matters: instruction at the end is
   // far more reliable than at the start when context is huge.
-  const userContent = `${generateFiller(padBytes)}\n\n---\n\nreply with the single word: pong`;
-  return JSON.stringify({
+  const userContent =
+    padBytes > 0
+      ? `${generateFiller(padBytes)}\n\n---\n\nreply with the single word: pong`
+      : 'reply with the single word: pong';
+  return {
     model,
     max_tokens: 16,
     system: "You are Claude Code, Anthropic's official CLI for Claude.",
     messages: [{ role: 'user', content: userContent }],
-  });
+  };
+};
+
+const buildProbeBody = (model: string, padBytes: number): string => {
+  if (padBytes <= 0) return PING_BODY(model);
+  return JSON.stringify(buildProbeBodyObj(model, padBytes));
+};
+
+// Adds `context-1m-2025-08-07` to an existing comma-separated beta header.
+// Used by upstream-direct's template path to BYPASS the strip — we let
+// `template.apply()` build all production headers normally (which strips
+// 1m), then force the flag back in for this single probe call.
+const appendContext1m = (existing: string | undefined): string => {
+  const have = (existing ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (have.includes(CONTEXT_1M_BETA)) return have.join(',');
+  return [...have, CONTEXT_1M_BETA].join(',');
 };
 
 const asInt = (value: unknown): number => {
@@ -452,11 +470,19 @@ const asBool = (value: unknown): boolean => {
 const CONTEXT_1M_BETA = 'context-1m-2025-08-07';
 
 export const createUpstreamDirectHandler =
-  (pool: AccountPool, store: TestResultStore) =>
+  (pool: AccountPool, template: ClaudeTemplate, store: TestResultStore) =>
   async (c: Context): Promise<Response> => {
     const raw = await parseFormOrJson(c).catch(() => null);
     const model = asString(raw?.model) || DEFAULT_MODEL;
     const with1m = asBool(raw?.with1m);
+    // When set, build headers via the production template (full CC header
+    // surface — user-agent, x-stainless-*, claude-code-* betas, etc.)
+    // instead of the bare-minimum set. Isolates "fingerprint/header drift"
+    // vs "actual entitlement" — if minimal-headers 429s but full-template
+    // 200s, we were wrongly blaming entitlement when the real gate is
+    // header/TLS-fingerprint shape. See [[project_cc-tls-fingerprint-gate]]
+    // for the prior misdiagnosis pattern.
+    const useTemplate = asBool(raw?.useTemplate);
     // Size-gate probe: operator-supplied filler size in KB. Estimated at
     // ~4 bytes/token for English+code, so 1000 KB ≈ 250K tokens. Clamped
     // against PAD_BYTES_CEILING (~1M tokens, the model max). 0 = no
@@ -468,28 +494,60 @@ export const createUpstreamDirectHandler =
     let result: TestResult;
     try {
       const { token, name: servedBy } = await pool.getAccessToken(undefined);
-      // `oauth-2025-04-20` is REQUIRED for Claude.ai OAuth-issued tokens —
-      // without it upstream rejects the call regardless of model. Everything
-      // else (x-stainless-*, claude-code-* betas, user-agent) is omitted to
-      // keep this isolating from template drift. When `with1m` is set we
-      // additionally append the 1M context beta to re-test the gate.
-      const betaFlags = with1m
-        ? `oauth-2025-04-20,${CONTEXT_1M_BETA}`
-        : 'oauth-2025-04-20';
-      // Large 1M-context requests can take 30-90s upstream just to read
-      // input tokens. 20s is fine for the tiny ping but blows out the
-      // moment we start padding. Bump to 180s when padded.
-      const timeoutMs = padBytes > 0 ? 180_000 : 20_000;
-      const probeBody = buildProbeBody(model, padBytes);
-      const res = await fetch(ANTHROPIC_DIRECT_URL, {
-        method: 'POST',
-        headers: {
+      // Two paths:
+      //   useTemplate=false  → bare-minimum headers (drift-isolation mode)
+      //   useTemplate=true   → full production headers via template.apply,
+      //                        and (if with1m) force `context-1m-` BACK in
+      //                        post-strip so the probe actually carries the
+      //                        flag despite the proxy's normal strip rule.
+      const targetUrl = ANTHROPIC_DIRECT_URL;
+      let requestHeaders: Record<string, string>;
+      let requestBody: string;
+      let modeTag: string;
+      let betaFlagsForLog: string;
+
+      if (useTemplate) {
+        const bodyObj = buildProbeBodyObj(model, padBytes);
+        const out = await template.apply({
+          clientBody: bodyObj,
+          accessToken: token,
+          clientHeaders: undefined,
+        });
+        const existingBeta = out.headers['anthropic-beta'];
+        const finalBeta = with1m ? appendContext1m(existingBeta) : existingBeta;
+        requestHeaders = finalBeta
+          ? { ...out.headers, 'anthropic-beta': finalBeta }
+          : out.headers;
+        requestBody = out.body;
+        modeTag = 'full-template';
+        betaFlagsForLog = finalBeta ?? '';
+      } else {
+        // `oauth-2025-04-20` is REQUIRED for Claude.ai OAuth-issued tokens —
+        // without it upstream rejects the call regardless of model. Everything
+        // else (x-stainless-*, claude-code-* betas, user-agent) is omitted to
+        // keep this isolating from template drift.
+        const betaFlags = with1m
+          ? `oauth-2025-04-20,${CONTEXT_1M_BETA}`
+          : 'oauth-2025-04-20';
+        requestHeaders = {
           authorization: `Bearer ${token}`,
           'anthropic-version': '2023-06-01',
           'content-type': 'application/json',
           'anthropic-beta': betaFlags,
-        },
-        body: probeBody,
+        };
+        requestBody = buildProbeBody(model, padBytes);
+        modeTag = 'no template';
+        betaFlagsForLog = betaFlags;
+      }
+
+      // Large 1M-context requests can take 30-90s upstream just to read
+      // input tokens. 20s is fine for the tiny ping but blows out the
+      // moment we start padding. Bump to 180s when padded.
+      const timeoutMs = padBytes > 0 ? 180_000 : 20_000;
+      const res = await fetch(targetUrl, {
+        method: 'POST',
+        headers: requestHeaders,
+        body: requestBody,
         // Short-lived admin probe (upstream-direct variant) — full-fetch
         // wall-clock cap is correct. proxy/upstream.ts is the SSE exception.
         signal: AbortSignal.timeout(timeoutMs),
@@ -514,8 +572,8 @@ export const createUpstreamDirectHandler =
         ok: res.ok && res.status === 200,
         at: Date.now(),
         latencyMs,
-        summary: `${res.status} · ${latencyMs}ms · model=${model}${betaTag}${padTag} (member=${servedBy}, no template) · ${bodySummary}`,
-        detail: `status=${res.status} latency=${latencyMs}ms anthropic-beta=${betaFlags} req_body_bytes=${probeBody.length}${headersBlock}${bodyBlock}`,
+        summary: `${res.status} · ${latencyMs}ms · model=${model}${betaTag}${padTag} (member=${servedBy}, ${modeTag}) · ${bodySummary}`,
+        detail: `status=${res.status} latency=${latencyMs}ms mode=${modeTag} anthropic-beta=${betaFlagsForLog} req_body_bytes=${requestBody.length}${headersBlock}${bodyBlock}`,
       };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);

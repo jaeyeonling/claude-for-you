@@ -262,7 +262,7 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   );
   app.post(
     '/admin/test/upstream-direct',
-    createUpstreamDirectHandler(pool, testResultStore),
+    createUpstreamDirectHandler(pool, template, testResultStore),
   );
 
   const keysH = createKeysHandlers(apiKeyStore);
