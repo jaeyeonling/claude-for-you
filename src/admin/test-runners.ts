@@ -1,8 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import type { Context, Hono } from 'hono';
 import type { AccountPool } from '../auth/account-pool.js';
 import type { ApiKeyStore } from '../auth/api-key-store.js';
-import type { ClaudeTemplate } from '../template/types.js';
 import { InvalidRequest, NotFound } from '../lib/errors.js';
 
 /**
@@ -129,97 +127,6 @@ const PING_BODY = (model: string): string =>
   });
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
-
-// ---------- Padded-body builder for 1M-context size-gate testing ----------
-
-// Programming-mixed prose seed. Repeated to fill arbitrary byte targets.
-// Mixed code+prose keeps BPE token density realistic (~3.5-4 bytes/token)
-// instead of the degenerate single-token compression you'd get from
-// 'a'.repeat(N). Used ONLY by the upstream-direct probe when padKb > 0.
-const FILLER_SEED = `Anthropic's Claude is a state-of-the-art AI assistant. The /v1/messages endpoint accepts a JSON body with model, max_tokens, system, and messages fields. Streaming is enabled by setting "stream": true; the server then emits Server-Sent Events with content_block_delta, message_delta, and message_stop events. Authentication uses either x-api-key (Console API key) or Authorization: Bearer ... (OAuth subscription token). Beta flags are passed via the anthropic-beta header as a comma-separated list — common ones include oauth-2025-04-20, context-1m-2025-08-07, and prompt-caching-*.
-
-\`\`\`typescript
-interface MessagesRequest {
-  model: string;
-  max_tokens: number;
-  system?: string | Block[];
-  messages: Message[];
-  stream?: boolean;
-  metadata?: Record<string, unknown>;
-}
-
-interface Message {
-  role: 'user' | 'assistant';
-  content: string | Block[];
-}
-\`\`\`
-
-Rate limits respond with HTTP 429 plus retry-after and anthropic-ratelimit-* headers. Successful requests carry x-envoy-upstream-service-time and cf-ray for traceability. The proxy preserves these in non-streaming responses and forwards them byte-for-byte for SSE. When upstream returns a 5xx, the gateway treats it as transient and may retry against a different pool member depending on the failover policy.
-
-The 1M context window is currently in beta for Claude Sonnet 4.6, Opus 4.6, and Opus 4.7. Activation requires the anthropic-beta header carrying context-1m-2025-08-07. Requests that omit the flag are capped at the standard 200K-token window. Prompt cache keys include the beta-flag set, so toggling 1M creates a separate cache namespace from the 200K path — a subtle source of cache-miss spikes if a client toggles mid-session.`;
-
-// Soft ceiling: ~1M tokens (model max) at ~4 bytes/token. Above this the
-// upstream will reject regardless. The handler clamps padKb against this
-// so a fat-finger on the input doesn't spin a 100MB body.
-const PAD_BYTES_CEILING = 4_000_000;
-
-const generateFiller = (bytes: number): string => {
-  if (bytes <= 0) return '';
-  const seed = FILLER_SEED;
-  const chunks: string[] = [];
-  let total = 0;
-  while (total < bytes) {
-    chunks.push(seed);
-    total += seed.length;
-  }
-  return chunks.join('').slice(0, bytes);
-};
-
-const buildProbeBodyObj = (model: string, padBytes: number): Record<string, unknown> => {
-  // Filler first, then a short trailer that gives the model a clear
-  // instruction. Trailer position matters: instruction at the end is
-  // far more reliable than at the start when context is huge.
-  const userContent =
-    padBytes > 0
-      ? `${generateFiller(padBytes)}\n\n---\n\nreply with the single word: pong`
-      : 'reply with the single word: pong';
-  // Body shape mirrors real CC's outbound (mitmproxy capture 2026-05-29) as
-  // closely as possible. Earlier probe versions sent only {model, max_tokens,
-  // system, messages} and got 429 "Usage credits are required..." even with
-  // correct headers — because Anthropic appears to gate context-1m on body
-  // shape too (max_tokens too small, no metadata.user_id, etc.).
-  //   - max_tokens 32000: real CC default; matches the "I'm using long ctx" intent
-  //   - metadata.user_id: placeholder with empty account_uuid; the template's
-  //     enrichAccountUuid will fill account_uuid from accountLearner. Without
-  //     metadata.user_id present in the input, enrichment skips entirely.
-  //   - thinking adaptive: real CC always sends this for premium models
-  return {
-    model,
-    max_tokens: 32000,
-    system: "You are Claude Code, Anthropic's official CLI for Claude.",
-    messages: [{ role: 'user', content: userContent }],
-    metadata: {
-      user_id: JSON.stringify({
-        device_id: 'probe-device',
-        account_uuid: '',
-        session_id: randomUUID(),
-      }),
-    },
-    thinking: { type: 'adaptive' },
-  };
-};
-
-const buildProbeBody = (model: string, padBytes: number): string => {
-  if (padBytes <= 0) return PING_BODY(model);
-  return JSON.stringify(buildProbeBodyObj(model, padBytes));
-};
-
-const asInt = (value: unknown): number => {
-  const s = asString(value);
-  if (s === '') return 0;
-  const n = Number(s);
-  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
-};
 
 // ---------- OAuth refresh probe ----------
 
@@ -458,130 +365,36 @@ export const createKeyInvokeHandler =
  * NO x-stainless-*. Compared with self-ping (which goes through the full
  * proxy template), this isolates whether a 429 originates upstream-of-template
  * (account/quota) or template-of-upstream (header drift).
- *
- * `?beta=true` URL parameter: per static.ts, CC v2.1.142 sends this on every
- * POST and it's required for sonnet/opus to bypass the fingerprint gate
- * (haiku is exempt). Our previous probe omitted it — likely causing the
- * "Usage credits required" 429s we mis-diagnosed as entitlement. Both URLs
- * are kept here so the operator can A/B them via the `betaQuery` toggle.
  */
 const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_DIRECT_URL_BETA = 'https://api.anthropic.com/v1/messages?beta=true';
-
-// HTML checkbox semantics: present-and-"on" = checked; absent = unchecked.
-// We accept "true"/"1" too for JSON callers and curl convenience.
-const asBool = (value: unknown): boolean => {
-  const s = asString(value).toLowerCase();
-  return s === 'on' || s === 'true' || s === '1';
-};
-
-// `context-1m-2025-08-07` is the public beta flag for the 1M-token context
-// window. As of 2026-05-28 the proxy strips it from forwarded requests
-// because Claude.ai OAuth subscriptions returned a deterministic 429
-// "Usage credits are required for long context requests" (see
-// docs/operational-pitfalls.md #12). This probe lets an operator re-test
-// upstream's current behavior WITHOUT touching the strip — toggle the
-// `with1m` form field and observe the response. If it still 429s, the
-// strip stays. If it 200s, policy changed and the strip can be lifted.
-const CONTEXT_1M_BETA = 'context-1m-2025-08-07';
 
 export const createUpstreamDirectHandler =
-  (pool: AccountPool, template: ClaudeTemplate, store: TestResultStore) =>
+  (pool: AccountPool, store: TestResultStore) =>
   async (c: Context): Promise<Response> => {
     const raw = await parseFormOrJson(c).catch(() => null);
     const model = asString(raw?.model) || DEFAULT_MODEL;
-    const with1m = asBool(raw?.with1m);
-    // When set, build headers via the production template (full CC header
-    // surface — user-agent, x-stainless-*, claude-code-* betas, etc.)
-    // instead of the bare-minimum set. Isolates "fingerprint/header drift"
-    // vs "actual entitlement" — if minimal-headers 429s but full-template
-    // 200s, we were wrongly blaming entitlement when the real gate is
-    // header/TLS-fingerprint shape. See [[project_cc-tls-fingerprint-gate]]
-    // for the prior misdiagnosis pattern.
-    const useTemplate = asBool(raw?.useTemplate);
-    // `?beta=true` URL — see ANTHROPIC_DIRECT_URL_BETA comment. Default ON
-    // when useTemplate is set (production-fidelity mode should match CC's
-    // exact wire shape, including URL).
-    const betaQuery = asBool(raw?.betaQuery) || useTemplate;
-    // Size-gate probe: operator-supplied filler size in KB. Estimated at
-    // ~4 bytes/token for English+code, so 1000 KB ≈ 250K tokens. Clamped
-    // against PAD_BYTES_CEILING (~1M tokens, the model max). 0 = no
-    // padding, falls through to the tiny PING_BODY path.
-    const padKb = asInt(raw?.padKb);
-    const padBytes = Math.min(padKb * 1024, PAD_BYTES_CEILING);
 
     const startedAt = Date.now();
     let result: TestResult;
     try {
       const { token, name: servedBy } = await pool.getAccessToken(undefined);
-      // Two paths:
-      //   useTemplate=false  → bare-minimum headers (drift-isolation mode)
-      //   useTemplate=true   → full production headers via template.apply,
-      //                        and (if with1m) force `context-1m-` BACK in
-      //                        post-strip so the probe actually carries the
-      //                        flag despite the proxy's normal strip rule.
-      const targetUrl = betaQuery ? ANTHROPIC_DIRECT_URL_BETA : ANTHROPIC_DIRECT_URL;
-      let requestHeaders: Record<string, string>;
-      let requestBody: string;
-      let modeTag: string;
-      let betaFlagsForLog: string;
-
-      if (useTemplate) {
-        const bodyObj = buildProbeBodyObj(model, padBytes);
-        // Synthesize CC-client headers for production fidelity. Real CC over
-        // OAuth always sends `oauth-2025-04-20` in anthropic-beta; the
-        // template's snapshot baseline was captured under an API-key flow and
-        // doesn't include it. Production traffic gets it via the merge with
-        // CC's client headers — but the probe has no real client, so without
-        // synthesizing them we'd be missing oauth-2025-04-20 and any other
-        // dynamic CC-side flags, and upstream would reject 1M attempts even
-        // though the gateway itself is wired correctly. with1m additionally
-        // injects context-1m-2025-08-07 through the same merge path.
-        const syntheticBeta = with1m
-          ? `oauth-2025-04-20,${CONTEXT_1M_BETA}`
-          : 'oauth-2025-04-20';
-        const syntheticClientHeaders = new Headers({
-          'anthropic-beta': syntheticBeta,
-        });
-        const out = await template.apply({
-          clientBody: bodyObj,
-          accessToken: token,
-          clientHeaders: syntheticClientHeaders,
-        });
-        requestHeaders = out.headers;
-        requestBody = out.body;
-        modeTag = 'full-template';
-        betaFlagsForLog = out.headers['anthropic-beta'] ?? '';
-      } else {
-        // `oauth-2025-04-20` is REQUIRED for Claude.ai OAuth-issued tokens —
-        // without it upstream rejects the call regardless of model. Everything
-        // else (x-stainless-*, claude-code-* betas, user-agent) is omitted to
-        // keep this isolating from template drift.
-        const betaFlags = with1m
-          ? `oauth-2025-04-20,${CONTEXT_1M_BETA}`
-          : 'oauth-2025-04-20';
-        requestHeaders = {
+      const res = await fetch(ANTHROPIC_DIRECT_URL, {
+        method: 'POST',
+        headers: {
           authorization: `Bearer ${token}`,
           'anthropic-version': '2023-06-01',
           'content-type': 'application/json',
-          'anthropic-beta': betaFlags,
-        };
-        requestBody = buildProbeBody(model, padBytes);
-        modeTag = 'no template';
-        betaFlagsForLog = betaFlags;
-      }
-
-      // Large 1M-context requests can take 30-90s upstream just to read
-      // input tokens. 20s is fine for the tiny ping but blows out the
-      // moment we start padding. Bump to 180s when padded.
-      const timeoutMs = padBytes > 0 ? 180_000 : 20_000;
-      const res = await fetch(targetUrl, {
-        method: 'POST',
-        headers: requestHeaders,
-        body: requestBody,
+          // Beta flag REQUIRED for Claude.ai OAuth-issued tokens — without it
+          // the upstream rejects the call regardless of model. This is the
+          // smallest set; everything else (x-stainless-*, claude-code-* beta
+          // flags, user-agent) is omitted to isolate whether THAT extra set
+          // is what's tripping sonnet/opus.
+          'anthropic-beta': 'oauth-2025-04-20',
+        },
+        body: PING_BODY(model),
         // Short-lived admin probe (upstream-direct variant) — full-fetch
         // wall-clock cap is correct. proxy/upstream.ts is the SSE exception.
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(20_000),
       });
       const bodyText = await res.text();
       const latencyMs = Date.now() - startedAt;
@@ -596,16 +409,13 @@ export const createUpstreamDirectHandler =
         diag.length > 0 ? `\n--- response headers ---\n${diag}` : '';
       const bodyBlock =
         bodyText.length > 0 ? `\n--- body ---\n${excerpt(bodyText, 600)}` : '';
-      const betaTag = with1m ? ' +1m' : '';
-      const padTag = padBytes > 0 ? ` pad=${Math.round(padBytes / 1024)}KB` : '';
-      const urlTag = betaQuery ? ' ?beta=true' : '';
       result = {
         kind: 'upstream-direct',
         ok: res.ok && res.status === 200,
         at: Date.now(),
         latencyMs,
-        summary: `${res.status} · ${latencyMs}ms · model=${model}${betaTag}${padTag}${urlTag} (member=${servedBy}, ${modeTag}) · ${bodySummary}`,
-        detail: `status=${res.status} latency=${latencyMs}ms url=${targetUrl} mode=${modeTag} anthropic-beta=${betaFlagsForLog} req_body_bytes=${requestBody.length}${headersBlock}${bodyBlock}`,
+        summary: `${res.status} · ${latencyMs}ms · model=${model} (member=${servedBy}, no template) · ${bodySummary}`,
+        detail: `status=${res.status} latency=${latencyMs}ms${headersBlock}${bodyBlock}`,
       };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);

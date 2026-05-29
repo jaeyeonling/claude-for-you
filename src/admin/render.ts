@@ -320,22 +320,8 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
         : '<p class="tag" style="margin-top:.5rem">No keys to invoke — add one via <code>/admin/keys</code> first.</p>'
     }
     <form class="stack" action="/admin/test/upstream-direct" method="post">
-      <label for="direct-model">upstream direct <span class="tag">(calls api.anthropic.com — bypasses proxy /v1/messages but optionally uses the production template)</span></label>
+      <label for="direct-model">upstream direct <span class="tag">(bypasses proxy template — minimal headers)</span></label>
       <input id="direct-model" type="text" name="model" placeholder="claude-sonnet-4-6" value="claude-sonnet-4-6">
-      <label style="display:flex;align-items:center;gap:.5rem;font-weight:normal">
-        <input type="checkbox" name="with1m" value="on">
-        <span>append <code>context-1m-2025-08-07</code> beta <span class="tag">(re-test 1M gate; expect 429 if still locked)</span></span>
-      </label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-weight:normal">
-        <input type="checkbox" name="useTemplate" value="on">
-        <span>full CC template headers <span class="tag">(user-agent, x-stainless-*, claude-code-* betas, etc. — isolates fingerprint gate vs entitlement)</span></span>
-      </label>
-      <label style="display:flex;align-items:center;gap:.5rem;font-weight:normal">
-        <input type="checkbox" name="betaQuery" value="on">
-        <span>append <code>?beta=true</code> to URL <span class="tag">(static.ts says required for sonnet/opus to bypass fingerprint gate; auto-on with useTemplate)</span></span>
-      </label>
-      <label for="direct-padkb">pad filler <span class="tag">(KB; 0 = tiny ping. ~4 B/token → 1000 KB ≈ 250K tokens, 3800 KB ≈ 950K tokens. Cap ≈ 1M tokens. Input billed at ~\$3/MTok, doubles above 200K with 1M beta.)</span></label>
-      <input id="direct-padkb" type="number" name="padKb" min="0" max="4000" step="100" value="0">
       <button type="submit">call api.anthropic.com</button>
     </form>
   </section>
