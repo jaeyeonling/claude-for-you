@@ -207,23 +207,13 @@ The proxy itself should handle this transparently — it injects a default `syst
 - Your client may be sending an explicit empty `system` (`"system": ""`). Either remove the field or use a non-empty string.
 - Ask your operator to confirm the proxy is on a recent commit.
 
-### `[1m]` models / 1M context — silently downgraded to 200K
+### `[1m]` models / 1M context — works as of 2026-05-29
 
-The proxy's upstream is a Claude.ai OAuth subscription, which has no entitlement for the 1M context window beta. Anthropic deterministically rejects those requests with a 429 `"Usage credits are required for long context requests."`
+The 1M context window is fully supported via the gateway. Use the `[1m]` model variant from your client (e.g. select `claude-sonnet-4-6[1m]` via `/model` in Claude Code) and the proxy will forward the `context-1m-2025-08-07` beta flag through to upstream.
 
-To keep your client unchanged, the proxy strips the `context-1m-*` beta flag before forwarding — your request succeeds with the standard 200K window. You won't see a 429 anymore, but you also won't actually have 1M available.
+History note: between 2026-05-28 and 2026-05-29 the proxy was incorrectly stripping `context-1m-*` and rejecting bodies over 1MB based on a misdiagnosed 429. That behavior is gone; if you have a stale operator using an older commit (pre-`be2e4b4`), they should redeploy.
 
-What to expect:
-- `[1m]` model requests succeed but will hit "input too long" from upstream once your prompt crosses the 200K boundary.
-- Prompt cache may show unexpected misses — Anthropic's cache key includes the beta-flag set, and your client's set no longer matches what reaches upstream.
-
-### `413 context_too_large_for_oauth`
-
-A separate gate. The CC `[1m]` model variant tends to grow prompts past 200K tokens *without* setting the `context-1m-*` beta header — so the strip above can't catch it. Once the request body crosses ~1MB (≈250K English / ~150K CJK tokens), the gateway rejects locally with HTTP 413 so you get an actionable signal instead of bouncing off the upstream 429.
-
-Switch your client model to a non-`[1m]` variant (`/model` inside Claude Code) and your prompts will fit.
-
-**If you genuinely need 1M context:** bypass the gateway and talk to `api.anthropic.com` directly using a Console API key (usage-based billing). There is no workaround within the gateway — the 1M entitlement is account-scoped on Anthropic's side and the gateway's subscription token cannot grant it.
+If you DO see a `429 "Usage credits are required for long context requests"` now, that's a real upstream message — the subscription account's long-context usage budget is exhausted. Wait for the rate-limit reset window or contact your operator.
 
 ### `Please run /login` on every restart
 

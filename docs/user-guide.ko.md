@@ -207,23 +207,13 @@ claude -p "reply with the single word: pong" --model claude-sonnet-4-6
 - 클라이언트가 명시적으로 빈 `system` (`"system": ""`)을 보냈을 가능성. 필드 제거 또는 비어있지 않은 값으로 설정.
 - 운영자에게 프록시가 최근 커밋인지 확인 요청.
 
-### `[1m]` 모델 / 1M 컨텍스트 — 자동으로 200K로 강등
+### `[1m]` 모델 / 1M 컨텍스트 — 2026-05-29부터 정상 작동
 
-프록시 업스트림은 Claude.ai OAuth 구독이라 1M context 베타 엔타이틀먼트가 없음. Anthropic이 결정론적으로 429 `"Usage credits are required for long context requests"`로 거부.
+1M 컨텍스트가 게이트웨이를 통해 정상 작동한다. 클라이언트에서 `[1m]` 변종 선택 (Claude Code 안에서 `/model`로 `claude-sonnet-4-6[1m]` 같이 선택)하면, 프록시가 `context-1m-2025-08-07` 베타 플래그를 그대로 forward.
 
-클라이언트를 그대로 두기 위해 프록시가 `context-1m-*` 베타 플래그를 forward 전에 strip — 요청은 200K 윈도우로 정상 처리됨. 429는 더 이상 안 뜨지만, 실제 1M도 못 씀.
+역사 기록: 2026-05-28 ~ 2026-05-29 사이엔 프록시가 `context-1m-*`를 잘못 strip하고 1MB 초과 본문을 413으로 거부했음. 본사 429 메시지를 잘못 해석한 misdiagnosis였음. 그 동작은 제거됨 — `be2e4b4` 이전 커밋의 stale 운영자가 있으면 재배포 요청할 것.
 
-예상되는 동작:
-- `[1m]` 모델 요청은 통과하지만 프롬프트가 200K 경계를 넘으면 upstream의 "input too long"으로 명확히 거부됨.
-- 프롬프트 캐시 미스가 예상보다 많을 수 있음 — Anthropic의 캐시 키에 베타 플래그 셋이 포함되는데, 클라이언트가 보낸 셋과 실제 upstream에 도달하는 셋이 다름.
-
-### `413 context_too_large_for_oauth`
-
-별도 게이트. CC `[1m]` 모델 변종은 실제로는 `context-1m-*` 베타 헤더를 보내지 않고 본문 자체를 200K 토큰 너머로 키워서 1M을 활용한다 — 그래서 위 헤더 strip만으론 못 잡음. 요청 본문이 ~1MB(영문 ~250K / 한국어 ~150K 토큰)를 넘으면 게이트웨이가 사전 413으로 거부해서, upstream 429로 튕기기 전에 명확한 신호를 받게 됨.
-
-해결: 클라이언트 모델을 `[1m]` 없는 일반 변종으로 전환 (Claude Code 안에서 `/model`).
-
-**진짜로 1M 컨텍스트가 필요하다면**: 게이트웨이 우회해서 `api.anthropic.com`에 Console API key(종량제)로 직결. 게이트웨이 안에서는 회피책 없음 — 1M 엔타이틀먼트가 본사 계정 단위라 게이트웨이의 구독 토큰으로는 부여 불가.
+지금 `429 "Usage credits are required for long context requests"`가 보인다면, 그건 진짜 upstream 메시지 — 구독 계정의 long-context 사용량 예산이 소진된 것. rate-limit 리셋 윈도우 대기하거나 운영자에게 문의.
 
 ### 재시작할 때마다 `Please run /login`
 

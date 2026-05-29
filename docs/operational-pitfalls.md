@@ -197,29 +197,40 @@ OAuth가 살아 있으면서 `apiKeyHelper`/`ANTHROPIC_BASE_URL`도 프록시를
 
 ---
 
-## 12. 1M context는 게이트웨이로 못 씀 — `context-1m`은 자동 strip
+## 12. 1M context는 OAuth로 정상 작동 — `?beta=true` URL이 핵심 (이전 진단 정정)
 
-**증상**: 클라이언트가 `claude-opus-4-7[1m]` 같이 1M 컨텍스트 변종으로 요청하면 직결에서는 통과하지만 우리 프록시 통해 가면 HTTP 429 `"Usage credits are required for long context requests"` 로 거부.
+**상태**: `commit be2e4b4` (2026-05-29)에서 정정. 그 이전 4~5일 동안은 잘못된 진단으로 strip + size gate가 켜져있어 1M이 안 됐음.
 
-**원인**: 게이트웨이의 업스트림은 Claude.ai OAuth(구독)다. 1M context 베타(`context-1m-*`)는 **Console API key + tier-4 usage credit 전용 기능** — 구독 OAuth에는 엔타이틀먼트 자체가 없음. Anthropic이 토큰 종류를 보고 결정론적으로 거부 (rate-limit 아님, 권한 게이트).
+**현재 동작**: 클라이언트가 `context-1m-2025-08-07` 베타와 함께 1M 요청을 보내면 프록시는 그대로 forward, 본사가 200으로 응답한다 (mitmproxy로 직접 확인: 385K 입력 토큰, `service_tier: standard`).
 
-**현재 동작 — 두 단계 게이트**:
+**필수 조건**:
+- URL: `/v1/messages?beta=true` (이게 핵심 — beta-flag 게이트가 query param에 걸려있음)
+- `anthropic-beta`에 `context-1m-2025-08-07` 포함
+- 모델 field: 평문 (`claude-sonnet-4-6`, `claude-opus-4-7` 등) — CC의 `[1m]` suffix는 클라이언트 내부 용으로만 사용되고 wire에는 plain name으로 전송
 
-1. **헤더 strip (`src/template/extracted.ts`)**: `mergeAndFilterAnthropicBeta`가 클라이언트가 보낸 `context-1m-*` 플래그를 머지 후 silent strip. *명시적* 1M 활성화 경로 차단.
+### 과거 잘못된 진단 (역사 기록, 같은 함정 재발 방지용)
 
-2. **본문 사이즈 게이트 (`src/proxy/messages.ts`, `OAUTH_PAYLOAD_LIMIT_BYTES = 1MB`)**: 클라이언트가 헤더 없이도 본문을 200K 토큰 넘게 채워 보내는 *암묵적* 경로 차단. content-length > 1MB이면 사전 413 `context_too_large_for_oauth` 반환. 메시지에 "Use Console API key directly"가 들어가 있어 사용자가 즉시 알 수 있음.
+**잘못된 가설** (2026-05-28 ~ 2026-05-29): "OAuth 구독은 1M 엔타이틀먼트 없음. 본사가 토큰 종류 보고 결정론적 429 'Usage credits are required for long context requests' 반환." → strip + 1MB 사이즈 게이트 추가.
 
-**왜 두 단계인가**: CC `[1m]` 모델 변종은 실측 결과 `context-1m-*` 베타 헤더를 *보내지 않고*, 본문 크기 자체를 200K 토큰 너머로 키워서 1M을 활용한다. 헤더 strip만으로는 부족 — 본사가 토큰 카운트로 직접 게이트하므로 게이트웨이도 본문 사이즈로 사전 차단해야 함. 1MB 임계는 영문 ~250K, 한국어 ~150K 토큰. 1MB~2MB 사이 본문은 본사 429로 fallback (false negative 허용).
+**실제 원인**: 우리 `src/template/extracted.ts:10`이 `/v1/messages` (no `?beta=true`)를 사용 중이었다. 200K 표준 트래픽은 query param 없이도 통과해서 운영 중에 안 보였는데, **beta 기능은 이 param이 게이트**라 본사가 거부했고 그 거부 메시지의 "Usage credits required" 표현이 entitlement 게이트처럼 보였을 뿐.
 
-**확인 방법 (운영자)**: 프록시 로그에서 `[template] stripped OAuth-incompatible anthropic-beta flag(s): context-1m-...` 라인 검색. 라인이 보이면 그 요청은 강등됐다는 뜻.
+`static.ts:5`의 주석("`?beta=true` is required by upstream")이 정답을 가리키고 있었는데, "production이 그 URL 없이도 sonnet/opus 200K 트래픽 잘 처리하니까 주석이 outdated하다"고 잘못 기각.
 
-**부수 효과 — 프롬프트 캐시 미스**: Anthropic의 prompt cache key는 `anthropic-beta` 플래그 집합도 포함한다. 클라이언트가 `context-1m-*`를 켜고 보내면 캐시 쓰기/읽기는 strip된 베타 셋 기준으로 이뤄지므로 — 클라이언트는 캐시 히트를 기대했는데 실제로는 미스. 비용/지연이 살짝 늘 수 있고, "원인 모를 cache-miss 증가"로 보이면 strip 로그 빈도와 상관관계부터 확인할 것.
+**검증 절차** (운영자가 미래에 또 의심 들 때):
+```bash
+# 본인 머신에서 mitmproxy 캡쳐
+mitmdump --listen-port 8765 --ssl-insecure -w /tmp/flow.bin &
+HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem \
+  claude --print --no-session-persistence --model "claude-sonnet-4-6[1m]" < big-prompt.txt
+# Python으로 /v1/messages POST 파싱 → URL, anthropic-beta, body 크기, 응답 status 확인
+# 우리 프록시 wire shape와 diff
+```
 
-**1M이 진짜로 필요한 사용자**: 게이트웨이를 우회하고 **Console API key로 직결** 사용. 구독 OAuth로는 구조적으로 불가능 — 회피책 없음.
+**admin probe**: `upstream-direct`에 `betaQuery` 토글이 추가됐다 (commit `be2e4b4`). useTemplate=on이면 자동으로 `?beta=true`. 미래 동일 의심 들 때 어드민 UI에서 5분 안에 A/B 가능.
 
-**확장**: 미래에 OAuth로 못 쓰는 다른 베타가 추가되면 `OAUTH_INCOMPATIBLE_BETA_PREFIXES` 배열에 prefix만 추가하면 자동 strip. 테스트는 `tests/template-extracted.test.ts`에 prefix-match 케이스 포함.
+**메타 교훈**: 본사 응답 메시지("Usage credits required")의 문자 그대로 해석에 매달리지 말 것. **항상 real client(mitmproxy로 CC 캡쳐) wire shape와 우리 wire shape를 diff하는 게 ground truth**. 응답 메시지는 본사가 정확히 어디서 거부했는지 알려주지 않는다.
 
-**관련**: 함정 #2(본인 머신 검증)와 같은 "게이트웨이 모델의 자연스러운 trade-off" 카테고리 — 구독 1개를 여럿이 공유한다는 비용 절감 모델은 곧 API-tier 전용 기능을 못 쓴다는 의미.
+**관련**: [[project_cc-tls-fingerprint-gate]] (이전에도 같은 함정 — 본사 응답을 "권한 게이트"로 잘못 해석하다가 fingerprint 차이가 진짜 원인이었음). 그때 학습한 교훈을 이번에는 더 빨리 적용해야 했다.
 
 ---
 
