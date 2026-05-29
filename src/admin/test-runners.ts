@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Context, Hono } from 'hono';
 import type { AccountPool } from '../auth/account-pool.js';
 import type { ApiKeyStore } from '../auth/api-key-store.js';
@@ -182,11 +183,29 @@ const buildProbeBodyObj = (model: string, padBytes: number): Record<string, unkn
     padBytes > 0
       ? `${generateFiller(padBytes)}\n\n---\n\nreply with the single word: pong`
       : 'reply with the single word: pong';
+  // Body shape mirrors real CC's outbound (mitmproxy capture 2026-05-29) as
+  // closely as possible. Earlier probe versions sent only {model, max_tokens,
+  // system, messages} and got 429 "Usage credits are required..." even with
+  // correct headers — because Anthropic appears to gate context-1m on body
+  // shape too (max_tokens too small, no metadata.user_id, etc.).
+  //   - max_tokens 32000: real CC default; matches the "I'm using long ctx" intent
+  //   - metadata.user_id: placeholder with empty account_uuid; the template's
+  //     enrichAccountUuid will fill account_uuid from accountLearner. Without
+  //     metadata.user_id present in the input, enrichment skips entirely.
+  //   - thinking adaptive: real CC always sends this for premium models
   return {
     model,
-    max_tokens: 16,
+    max_tokens: 32000,
     system: "You are Claude Code, Anthropic's official CLI for Claude.",
     messages: [{ role: 'user', content: userContent }],
+    metadata: {
+      user_id: JSON.stringify({
+        device_id: 'probe-device',
+        account_uuid: '',
+        session_id: randomUUID(),
+      }),
+    },
+    thinking: { type: 'adaptive' },
   };
 };
 
