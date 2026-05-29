@@ -29,11 +29,11 @@ import { requireAdmin } from './auth/require-admin.js';
 import { createCanaryController } from './canary.js';
 import { createCaptureMiddleware, loadCaptureConfig } from './capture.js';
 import type { AppConfig } from './config.js';
-import { ConfigError, DomainError } from './lib/errors.js';
+import { ConfigError, DomainError, FORBIDDEN_ERROR_HEADERS } from './lib/errors.js';
 import { log } from './lib/logger.js';
 import { redact } from './lib/redact.js';
 import { createPacingEnforcer } from './pacing.js';
-import { createConcurrencyLimiter } from './proxy/concurrency.js';
+import { createConcurrencyLimiter, createPerKeyConcurrencyLimiter } from './proxy/concurrency.js';
 import { createIpRateLimiter } from './proxy/rate-limit.js';
 import { createMessagesHandler } from './proxy/messages.js';
 import {
@@ -197,6 +197,10 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   // Per-IP token-bucket: a leaked key from a single source IP can no longer
   // pin the whole concurrency pool. perSecond=0 disables the middleware.
   app.use('/v1/messages', createIpRateLimiter({ perSecond: config.perIpRateLimitPerSecond }));
+  // Per-key cap first so a single key gets a clear "your slot quota" error
+  // before colliding with the shared global pool. Both are wired; one key
+  // can't monopolize and the proxy still has a hard global ceiling.
+  app.use('/v1/messages', createPerKeyConcurrencyLimiter(config.maxConcurrentRequestsPerKey));
   // Global concurrency cap across all clients.
   app.use('/v1/messages', createConcurrencyLimiter(config.maxConcurrentRequests));
   app.post(
@@ -294,10 +298,23 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
         log.error(msg);
         void serverErrorSink(msg);
       }
-      return c.json(
+      const response = c.json(
         { error: { type: err.code, message: err.message } },
         err.status as 400 | 401 | 403 | 429 | 500 | 502,
       );
+      if (err.headers) {
+        for (const [name, value] of Object.entries(err.headers)) {
+          const key = name.toLowerCase();
+          if (FORBIDDEN_ERROR_HEADERS.has(key)) {
+            // Defensive: a future factory might accidentally include a
+            // hop-by-hop/framing/sensitive header. Strip rather than trust.
+            log.warn(`[onError] dropped forbidden header from DomainError: ${key}`);
+            continue;
+          }
+          response.headers.set(key, value);
+        }
+      }
+      return response;
     }
     const msg = redact(`[unhandled] ${err instanceof Error ? err.message : String(err)}`);
     log.error(msg);

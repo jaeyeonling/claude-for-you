@@ -70,6 +70,8 @@ export const createAccountLearner = (initial?: string | null): AccountLearner =>
     async bootstrap(accessToken: string): Promise<string | null> {
       for (const url of BOOTSTRAP_CANDIDATES) {
         try {
+          // Short-lived bootstrap GET — full-fetch wall-clock cap is correct.
+          // (See proxy/upstream.ts for the SSE exception that needs TTFB-only.)
           const res = await fetch(url, {
             method: 'GET',
             headers: { authorization: `Bearer ${accessToken}` },

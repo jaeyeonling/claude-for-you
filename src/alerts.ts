@@ -17,6 +17,8 @@ export type AlertSink = (message: string) => Promise<void>;
 
 const postJson = async (url: string, body: unknown): Promise<void> => {
   try {
+    // Short-lived webhook POST — full-fetch wall-clock cap is correct here.
+    // (See proxy/upstream.ts for the SSE exception that needs TTFB-only.)
     await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

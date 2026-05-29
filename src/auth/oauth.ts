@@ -90,6 +90,8 @@ export const createOAuthManager = async (params: {
       client_id: CLIENT_ID,
     }).toString();
 
+    // Short-lived OAuth refresh POST — full-fetch wall-clock cap is correct.
+    // (See proxy/upstream.ts for the SSE exception that needs TTFB-only.)
     const res = await fetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },

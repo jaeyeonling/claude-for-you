@@ -220,6 +220,8 @@ const runLoopbackPing = async (
 }> => {
   const startedAt = Date.now();
   try {
+    // Short-lived admin probe — full-fetch wall-clock cap is correct here.
+    // (See proxy/upstream.ts for the SSE exception that needs TTFB-only.)
     const res = await fetcher('http://internal/v1/messages', {
       method: 'POST',
       headers: {
@@ -390,6 +392,8 @@ export const createUpstreamDirectHandler =
           'anthropic-beta': 'oauth-2025-04-20',
         },
         body: PING_BODY(model),
+        // Short-lived admin probe (upstream-direct variant) — full-fetch
+        // wall-clock cap is correct. proxy/upstream.ts is the SSE exception.
         signal: AbortSignal.timeout(20_000),
       });
       const bodyText = await res.text();

@@ -4,6 +4,7 @@ import {
   Conflict,
   CsrfFailed,
   DomainError,
+  FORBIDDEN_ERROR_HEADERS,
   Forbidden,
   InvalidRequest,
   NotFound,
@@ -43,5 +44,22 @@ describe('errors factories', () => {
 
   test('UpstreamFailed accepts status override (e.g. 504 for gateway timeout)', () => {
     expect(UpstreamFailed('slow', 504).status).toBe(504);
+  });
+
+  test('TooManyRequests carries optional headers (e.g. Retry-After)', () => {
+    const err = TooManyRequests('cap', { 'retry-after': '1' });
+    expect(err.headers).toEqual({ 'retry-after': '1' });
+  });
+
+  test('FORBIDDEN_ERROR_HEADERS covers hop-by-hop, framing, and sensitive headers', () => {
+    // Spot-check the categories — exact membership is documented in errors.ts.
+    expect(FORBIDDEN_ERROR_HEADERS.has('connection')).toBe(true); // hop-by-hop
+    expect(FORBIDDEN_ERROR_HEADERS.has('transfer-encoding')).toBe(true); // framing
+    expect(FORBIDDEN_ERROR_HEADERS.has('content-length')).toBe(true); // framing
+    expect(FORBIDDEN_ERROR_HEADERS.has('set-cookie')).toBe(true); // sensitive
+    expect(FORBIDDEN_ERROR_HEADERS.has('authorization')).toBe(true); // sensitive
+    // Legitimate response metadata must NOT be on the list.
+    expect(FORBIDDEN_ERROR_HEADERS.has('retry-after')).toBe(false);
+    expect(FORBIDDEN_ERROR_HEADERS.has('www-authenticate')).toBe(false);
   });
 });
