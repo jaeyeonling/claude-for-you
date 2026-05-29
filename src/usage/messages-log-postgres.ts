@@ -1,0 +1,223 @@
+import postgres from 'postgres';
+import type {
+  ListFilters,
+  MessageLogRecord,
+  MessageLogStore,
+  MessageLogSummary,
+  ResponseBody,
+} from './messages-log.js';
+import { extractPreview } from './messages-log.js';
+
+/**
+ * Postgres-backed MessageLogStore.
+ *
+ * Schema: one row per `/v1/messages` call, with full request/response JSON.
+ * Writes are fire-and-forget from the proxy (see `proxy/messages.ts`) — a DB
+ * outage must NOT break user-visible traffic.
+ *
+ * Row size note: with 1M-context bodies a single row can be multiple MB.
+ * JSONB columns are TOAST-compressed transparently, but unbounded retention +
+ * heavy users means the table can grow fast. The operator must plan for
+ * pg_repack / partition pruning out-of-band — this module has no TTL.
+ *
+ * postgres.js pool sized at 2: writes are mostly serialized (single proxy
+ * container) and admin queries are rare. Bumping the pool buys little while
+ * the per-key concurrency cap (`MAX_CONCURRENT_REQUESTS_PER_KEY`) already
+ * keeps inflight work small.
+ */
+
+export interface PostgresMessageLogStoreParams {
+  readonly databaseUrl: string;
+}
+
+interface DetailRow {
+  readonly id: string;
+  readonly ts: Date;
+  readonly user_name: string;
+  readonly model: string | null;
+  readonly status: number;
+  readonly streaming: boolean;
+  readonly duration_ms: number;
+  readonly input_tokens: number;
+  readonly output_tokens: number;
+  readonly cache_read_tokens: number;
+  readonly cache_creation_tokens: number;
+  readonly service_tier: string | null;
+  readonly stop_reason: string | null;
+  readonly client_ip: string | null;
+  readonly user_agent: string | null;
+  readonly request_body: unknown;
+  readonly response_body: ResponseBody | null;
+  readonly error_message: string | null;
+}
+
+interface SummaryRow {
+  readonly id: string;
+  readonly ts: Date;
+  readonly user_name: string;
+  readonly model: string | null;
+  readonly status: number;
+  readonly streaming: boolean;
+  readonly duration_ms: number;
+  readonly input_tokens: number;
+  readonly output_tokens: number;
+  readonly service_tier: string | null;
+  readonly preview: string;
+}
+
+const toSummary = (r: SummaryRow): MessageLogSummary => ({
+  id: r.id,
+  ts: r.ts,
+  userName: r.user_name,
+  model: r.model,
+  status: r.status,
+  streaming: r.streaming,
+  durationMs: r.duration_ms,
+  inputTokens: r.input_tokens,
+  outputTokens: r.output_tokens,
+  serviceTier: r.service_tier,
+  preview: r.preview,
+});
+
+const toRecord = (r: DetailRow): MessageLogRecord => ({
+  id: r.id,
+  ts: r.ts,
+  userName: r.user_name,
+  model: r.model,
+  status: r.status,
+  streaming: r.streaming,
+  durationMs: r.duration_ms,
+  inputTokens: r.input_tokens,
+  outputTokens: r.output_tokens,
+  cacheReadTokens: r.cache_read_tokens,
+  cacheCreationTokens: r.cache_creation_tokens,
+  serviceTier: r.service_tier,
+  stopReason: r.stop_reason,
+  clientIp: r.client_ip,
+  userAgent: r.user_agent,
+  requestBody: r.request_body,
+  responseBody: r.response_body,
+  errorMessage: r.error_message,
+});
+
+export const createPostgresMessageLogStore = async (
+  params: PostgresMessageLogStoreParams,
+): Promise<MessageLogStore> => {
+  const sql = postgres(params.databaseUrl, {
+    max: 2,
+    idle_timeout: 30,
+    connect_timeout: 10,
+  });
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS messages_log (
+      id UUID PRIMARY KEY,
+      ts TIMESTAMPTZ NOT NULL,
+      user_name TEXT NOT NULL,
+      model TEXT,
+      status SMALLINT NOT NULL,
+      streaming BOOLEAN NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      service_tier TEXT,
+      stop_reason TEXT,
+      client_ip TEXT,
+      user_agent TEXT,
+      request_body JSONB NOT NULL,
+      response_body JSONB,
+      preview TEXT NOT NULL DEFAULT '',
+      error_message TEXT
+    )
+  `;
+  // Indexes: ts-desc is the dashboard's default scan; (user, ts) accelerates
+  // per-user views; status-partial gates the "errors only" filter without
+  // bloating the index for the 2xx majority.
+  await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_ts ON messages_log (ts DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_user_ts ON messages_log (user_name, ts DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_status_ts ON messages_log (status, ts DESC) WHERE status >= 400`;
+
+  // `preview ILIKE '%foo%'` has a leading-wildcard pattern that a plain B-tree
+  // can't help with. pg_trgm + GIN gives us proper sub-string acceleration —
+  // without it the admin search scans the full table once it grows past
+  // toy size. CREATE EXTENSION may require superuser; failure is non-fatal
+  // (search still works, just slower).
+  try {
+    await sql`CREATE EXTENSION IF NOT EXISTS pg_trgm`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_preview_trgm ON messages_log USING gin (preview gin_trgm_ops)`;
+  } catch {
+    // No-op: pg_trgm not available or insufficient privileges. ILIKE search
+    // falls back to a seq scan, which is fine until the table grows large.
+  }
+
+  return Object.freeze({
+    async record(entry: MessageLogRecord): Promise<void> {
+      const preview = extractPreview(entry.requestBody);
+      await sql`
+        INSERT INTO messages_log (
+          id, ts, user_name, model, status, streaming, duration_ms,
+          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+          service_tier, stop_reason, client_ip, user_agent,
+          request_body, response_body, preview, error_message
+        ) VALUES (
+          ${entry.id}, ${entry.ts}, ${entry.userName}, ${entry.model}, ${entry.status},
+          ${entry.streaming}, ${entry.durationMs},
+          ${entry.inputTokens}, ${entry.outputTokens},
+          ${entry.cacheReadTokens}, ${entry.cacheCreationTokens},
+          ${entry.serviceTier}, ${entry.stopReason}, ${entry.clientIp}, ${entry.userAgent},
+          ${sql.json(entry.requestBody as never)},
+          ${entry.responseBody === null ? null : sql.json(entry.responseBody as never)},
+          ${preview},
+          ${entry.errorMessage}
+        )
+      `;
+    },
+
+    async list(filters: ListFilters): Promise<readonly MessageLogSummary[]> {
+      // Optional filters expressed via NULL-coalescing: each predicate is a
+      // no-op when its parameter is null. PG planner handles this fine and
+      // we avoid runtime fragment composition.
+      const userName = filters.userName ?? null;
+      const model = filters.model ?? null;
+      const statusClass = filters.statusClass ?? 'all';
+      const search = filters.search && filters.search.length > 0 ? filters.search : null;
+      const before = filters.before ?? null;
+      const limit = Math.max(1, Math.min(filters.limit, 500));
+
+      const rows = await sql<SummaryRow[]>`
+        SELECT id, ts, user_name, model, status, streaming, duration_ms,
+               input_tokens, output_tokens, service_tier, preview
+          FROM messages_log
+         WHERE (${userName}::text IS NULL OR user_name = ${userName})
+           AND (${model}::text IS NULL OR model = ${model})
+           AND (${statusClass}::text = 'all'
+                OR (${statusClass}::text = 'success' AND status >= 200 AND status < 300)
+                OR (${statusClass}::text = 'error'   AND status >= 400))
+           AND (${search}::text IS NULL OR preview ILIKE '%' || ${search}::text || '%')
+           AND (${before}::timestamptz IS NULL OR ts < ${before})
+         ORDER BY ts DESC
+         LIMIT ${limit}
+      `;
+      return rows.map(toSummary);
+    },
+
+    async get(id: string): Promise<MessageLogRecord | null> {
+      const rows = await sql<DetailRow[]>`
+        SELECT id, ts, user_name, model, status, streaming, duration_ms,
+               input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+               service_tier, stop_reason, client_ip, user_agent,
+               request_body, response_body, error_message
+          FROM messages_log
+         WHERE id = ${id}
+      `;
+      const first = rows[0];
+      return first ? toRecord(first) : null;
+    },
+
+    async close(): Promise<void> {
+      await sql.end({ timeout: 5 });
+    },
+  });
+};

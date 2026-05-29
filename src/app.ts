@@ -6,6 +6,7 @@ import { createAlertsHandlers } from './admin/alerts.js';
 import { csrfGuard } from './admin/csrf.js';
 import { createAdminEventsHandler } from './admin/events.js';
 import { createKeysHandlers } from './admin/keys.js';
+import { createMessageDetailHandler, createMessagesListHandler } from './admin/messages.js';
 import { createOAuthReplaceHandler } from './admin/oauth.js';
 import { createAdminPageHandler } from './admin/page.js';
 import { createSnapshotHandlers } from './admin/snapshot.js';
@@ -44,6 +45,9 @@ import {
 import { createBillingMonitor } from './usage/billing-monitor.js';
 import { createDriftAnalyzer } from './usage/drift-analyzer.js';
 import { createGlobalGuard } from './usage/global.js';
+import { createNullMessageLogStore } from './usage/messages-log.js';
+import type { MessageLogStore } from './usage/messages-log.js';
+import { createPostgresMessageLogStore } from './usage/messages-log-postgres.js';
 import { createPostgresUsageTracker } from './usage/per-user-postgres.js';
 import { createUsageTracker } from './usage/per-user.js';
 import type { UsageTracker } from './usage/per-user.js';
@@ -113,6 +117,13 @@ const buildTracker = async (config: AppConfig): Promise<UsageTracker> => {
   return createUsageTracker({ dailyLimitPerKey: config.dailyTokenLimitPerKey });
 };
 
+const buildMessageLogStore = async (config: AppConfig): Promise<MessageLogStore> => {
+  if (!config.messagesLogEnabled || !config.databaseUrl) {
+    return createNullMessageLogStore();
+  }
+  return createPostgresMessageLogStore({ databaseUrl: config.databaseUrl });
+};
+
 export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   const startedAt = Date.now();
 
@@ -126,8 +137,11 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   const serverErrorSink = withCooldown(rawSink, 60_000);
   const usageErrorSink = withCooldown(rawSink, 60_000);
 
+  const messageLogErrorSink = withCooldown(rawSink, 60_000);
+
   const pool = await buildPool(config, oauthFailSink);
   const tracker = await buildTracker(config);
+  const messageLogStore = await buildMessageLogStore(config);
   const globalGuard = createGlobalGuard({
     thresholdTokens: config.globalSubscriptionThresholdTokens,
   });
@@ -217,6 +231,8 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
       pacing,
       drift,
       usageErrorSink,
+      messageLogStore,
+      messageLogErrorSink,
     }),
   );
 
@@ -279,6 +295,9 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   app.get('/admin/snapshot', snapH.status);
   app.post('/admin/snapshot/promote', snapH.promote);
   app.post('/admin/snapshot/rollback', snapH.rollback);
+
+  app.get('/admin/messages', createMessagesListHandler({ store: messageLogStore }));
+  app.get('/admin/messages/:id', createMessageDetailHandler({ store: messageLogStore }));
 
   app.post('/admin/oauth/replace', createOAuthReplaceHandler(pool));
   const alertsH = createAlertsHandlers(alertStore);
@@ -370,6 +389,13 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     } catch (err: unknown) {
       log.error(
         `[shutdown] tracker close failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      await messageLogStore.close?.();
+    } catch (err: unknown) {
+      log.error(
+        `[shutdown] messageLogStore close failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   };

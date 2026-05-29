@@ -39,6 +39,10 @@ export type AppConfig = Readonly<{
   accountUuidOverride: string | null;
   accountsPath: string;
   canaryPercent: number;
+  /** Full-content `/v1/messages` log. Defaults to ON when DATABASE_URL is
+   * set; set `MESSAGES_LOG_ENABLED=false` to opt out. No-op when DATABASE_URL
+   * is unset (no place to write). */
+  messagesLogEnabled: boolean;
   discordWebhookUrl: string | null;
   slackWebhookUrl: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
@@ -110,6 +114,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): AppConfig => {
         : null,
     canaryPercent: Number(env.CANARY_PERCENT ?? 0),
     accountsPath: env.ACCOUNTS_PATH ?? './data/accounts.json',
+    messagesLogEnabled: (env.MESSAGES_LOG_ENABLED ?? 'true').toLowerCase() !== 'false',
     discordWebhookUrl:
       env.DISCORD_WEBHOOK_URL && env.DISCORD_WEBHOOK_URL.length > 0
         ? env.DISCORD_WEBHOOK_URL
