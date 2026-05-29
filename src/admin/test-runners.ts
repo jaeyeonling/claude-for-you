@@ -195,16 +195,6 @@ const buildProbeBody = (model: string, padBytes: number): string => {
   return JSON.stringify(buildProbeBodyObj(model, padBytes));
 };
 
-// Adds `context-1m-2025-08-07` to an existing comma-separated beta header.
-// Used by upstream-direct's template path to BYPASS the strip — we let
-// `template.apply()` build all production headers normally (which strips
-// 1m), then force the flag back in for this single probe call.
-const appendContext1m = (existing: string | undefined): string => {
-  const have = (existing ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (have.includes(CONTEXT_1M_BETA)) return have.join(',');
-  return [...have, CONTEXT_1M_BETA].join(',');
-};
-
 const asInt = (value: unknown): number => {
   const s = asString(value);
   if (s === '') return 0;
@@ -519,19 +509,30 @@ export const createUpstreamDirectHandler =
 
       if (useTemplate) {
         const bodyObj = buildProbeBodyObj(model, padBytes);
+        // Synthesize CC-client headers for production fidelity. Real CC over
+        // OAuth always sends `oauth-2025-04-20` in anthropic-beta; the
+        // template's snapshot baseline was captured under an API-key flow and
+        // doesn't include it. Production traffic gets it via the merge with
+        // CC's client headers — but the probe has no real client, so without
+        // synthesizing them we'd be missing oauth-2025-04-20 and any other
+        // dynamic CC-side flags, and upstream would reject 1M attempts even
+        // though the gateway itself is wired correctly. with1m additionally
+        // injects context-1m-2025-08-07 through the same merge path.
+        const syntheticBeta = with1m
+          ? `oauth-2025-04-20,${CONTEXT_1M_BETA}`
+          : 'oauth-2025-04-20';
+        const syntheticClientHeaders = new Headers({
+          'anthropic-beta': syntheticBeta,
+        });
         const out = await template.apply({
           clientBody: bodyObj,
           accessToken: token,
-          clientHeaders: undefined,
+          clientHeaders: syntheticClientHeaders,
         });
-        const existingBeta = out.headers['anthropic-beta'];
-        const finalBeta = with1m ? appendContext1m(existingBeta) : existingBeta;
-        requestHeaders = finalBeta
-          ? { ...out.headers, 'anthropic-beta': finalBeta }
-          : out.headers;
+        requestHeaders = out.headers;
         requestBody = out.body;
         modeTag = 'full-template';
-        betaFlagsForLog = finalBeta ?? '';
+        betaFlagsForLog = out.headers['anthropic-beta'] ?? '';
       } else {
         // `oauth-2025-04-20` is REQUIRED for Claude.ai OAuth-issued tokens —
         // without it upstream rejects the call regardless of model. Everything
