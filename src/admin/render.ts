@@ -326,6 +326,8 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
         <input type="checkbox" name="with1m" value="on">
         <span>append <code>context-1m-2025-08-07</code> beta <span class="tag">(re-test 1M gate; expect 429 if still locked)</span></span>
       </label>
+      <label for="direct-padkb">pad filler <span class="tag">(KB; 0 = tiny ping. ~4 B/token → 1000 KB ≈ 250K tokens, 3800 KB ≈ 950K tokens. Cap ≈ 1M tokens. Input billed at ~\$3/MTok, doubles above 200K with 1M beta.)</span></label>
+      <input id="direct-padkb" type="number" name="padKb" min="0" max="4000" step="100" value="0">
       <button type="submit">call api.anthropic.com</button>
     </form>
   </section>
