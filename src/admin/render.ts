@@ -525,6 +525,7 @@ export const renderAdminHtml = (s: AdminPageSnapshot): string => {
   <h1>claude-for-you · admin</h1>
   <span class="tag">bun ${esc(s.bunVersion)} · uptime ${esc(fmtDur(s.uptimeSec))}</span>
   <span class="tag" style="flex:1">${esc(s.templateDescription)}</span>
+  <a href="/admin/messages" style="color:var(--accent);text-decoration:none;font-size:.82rem">messages →</a>
 </header>
 <main>
   <div id="live-region" style="display:contents">${renderLiveSections(s)}</div>

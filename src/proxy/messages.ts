@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Context } from 'hono';
 import type { AccountLearner } from '../account-learner.js';
 import type { AccountPool } from '../auth/account-pool.js';
@@ -8,12 +9,15 @@ import type { AlertSink } from '../alerts.js';
 import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
+import type { MessageLogStore, ResponseBody } from '../usage/messages-log.js';
+import { extractModel, extractResponseMeta } from '../usage/messages-log.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { isModelAllowed } from '../auth/model-allow.js';
 import { Forbidden } from '../lib/errors.js';
 import { extractUsage, safeParseJson, sniffUsage } from '../usage/sniff.js';
 import { log } from '../lib/logger.js';
 import { callUpstream } from './upstream.js';
+import { tapResponseBody } from './response-tap.js';
 
 /**
  * Hop-by-hop headers (RFC 7230 §6.1) plus content-length / content-encoding
@@ -54,12 +58,33 @@ export interface MessagesDeps {
   /** Cooldown-wrapped sink. Receives non-fatal usage-write errors so DB
    * outages alarm once per cooldown window instead of flooding stderr. */
   readonly usageErrorSink: AlertSink;
+  /** Full-content request/response log. The null impl no-ops, so the handler
+   * can call `record()` unconditionally. */
+  readonly messageLogStore: MessageLogStore;
+  /** Cooldown-wrapped sink for messages_log write failures. Same rationale
+   * as usageErrorSink — DB outages must not flood stderr. */
+  readonly messageLogErrorSink: AlertSink;
 }
+
+/**
+ * First IP we trust from `X-Forwarded-For`. When the proxy is behind no
+ * trusted forwarder this is meaningless, but we capture whatever the client
+ * sent for log forensics — it's a hint, not a security control.
+ */
+const clientIpHint = (c: Context): string | null => {
+  const xff = c.req.header('x-forwarded-for');
+  if (xff) {
+    const first = xff.split(',')[0]?.trim();
+    if (first && first.length > 0) return first;
+  }
+  return c.req.header('x-real-ip') ?? null;
+};
 
 export const createMessagesHandler =
   (deps: MessagesDeps) =>
   async (c: Context): Promise<Response> => {
     const user = c.get('user');
+    const t0 = Date.now();
 
     // Pre-flight: subscription headroom first (cheap shared state), then per-user
     // quota. Both throw QuotaExceeded (429) handled by the global onError.
@@ -162,6 +187,39 @@ export const createMessagesHandler =
     const contentType = upstream.response.headers.get('content-type') ?? '';
     const isStream = contentType.toLowerCase().startsWith('text/event-stream');
 
+    // Fire-and-forget log write. The store may be the null impl when the log
+    // feature is disabled — in that case `record` is an immediate no-op and
+    // the catch never fires. Failures are funneled into a cooldown sink so a
+    // DB outage doesn't blow up stderr.
+    const writeLog = (responseBody: ResponseBody | null, errorMessage: string | null): void => {
+      const meta = extractResponseMeta(responseBody);
+      void deps.messageLogStore
+        .record({
+          id: randomUUID(),
+          ts: new Date(t0),
+          userName: user.name,
+          model: extractModel(clientBody),
+          status: upstream.response.status,
+          streaming: isStream,
+          durationMs: Date.now() - t0,
+          inputTokens: meta.inputTokens,
+          outputTokens: meta.outputTokens,
+          cacheReadTokens: meta.cacheReadTokens,
+          cacheCreationTokens: meta.cacheCreationTokens,
+          serviceTier: meta.serviceTier,
+          stopReason: meta.stopReason,
+          clientIp: clientIpHint(c),
+          userAgent: c.req.header('user-agent') ?? null,
+          requestBody: clientBody,
+          responseBody,
+          errorMessage,
+        })
+        .catch((err: unknown) => {
+          const msg = `[messages-log] write failed: ${err instanceof Error ? err.message : String(err)}`;
+          void deps.messageLogErrorSink(msg);
+        });
+    };
+
     // Common usage-observation callback. Fire-and-forget DB write (we don't
     // block the response on accounting), then alarm sinks.
     const onUsage = (usage: import('../usage/sniff.js').SniffedUsage): void => {
@@ -175,11 +233,18 @@ export const createMessagesHandler =
       }
     };
 
-    // Streaming responses (SSE): wrap with sniffUsage TransformStream so we
-    // forward chunks byte-for-byte to the client while extracting usage from
-    // each event payload as it flies past.
+    // Streaming responses (SSE): tap the upstream body for full-content log
+    // capture, then run it through sniffUsage for token accounting. Tap sits
+    // upstream of sniff so it observes every byte Anthropic sent regardless
+    // of whether the client disconnects mid-stream (sniff stops enqueuing in
+    // that case but tap's accumulation continues).
     if (isStream && upstream.response.body !== null) {
-      const sniffed = sniffUsage(upstream.response.body, contentType, onUsage);
+      const tap = tapResponseBody(upstream.response.body);
+      const sniffed = sniffUsage(tap.stream, contentType, onUsage);
+      // Stream end → write the log. Detached: failures land in the sink.
+      void tap.done.then(() => {
+        writeLog({ kind: 'sse', raw: tap.getRaw() }, null);
+      });
       return new Response(sniffed, {
         status: upstream.response.status,
         statusText: upstream.response.statusText,
@@ -212,7 +277,8 @@ export const createMessagesHandler =
           `ce=${upstream.response.headers.get('content-encoding') ?? '?'}`,
       );
     }
-    const usage = extractUsage(safeParseJson(bodyText));
+    const parsedBody = safeParseJson(bodyText);
+    const usage = extractUsage(parsedBody);
     if (usage) {
       onUsage({
         inputTokens: usage.input ?? 0,
@@ -220,9 +286,42 @@ export const createMessagesHandler =
         serviceTier: usage.tier,
       });
     }
+    // Log capture for non-streaming path. Wrap whichever shape the body
+    // actually had: JSON envelope when parseable, raw text otherwise (4xx
+    // upstream responses sometimes return non-JSON or empty bodies — see
+    // the warn-log above).
+    // Non-streaming bodies split three ways:
+    //   - parseable JSON → 'json' with the parsed object
+    //   - non-empty non-JSON text (HTML error pages, plain-text 4xx) → 'text'
+    //   - empty body (the known 429-empty-body case) → null
+    // 'sse' is reserved for the streaming branch where `raw` is genuinely
+    // wire-format SSE that admin UI can decode event-by-event.
+    const responseBody: ResponseBody | null =
+      parsedBody !== null
+        ? { kind: 'json', body: parsedBody }
+        : bodyText.length > 0
+          ? { kind: 'text', raw: bodyText }
+          : null;
+    const errorMessage =
+      upstream.response.status >= 400 && parsedBody !== null
+        ? extractErrorMessage(parsedBody)
+        : null;
+    writeLog(responseBody, errorMessage);
     return new Response(bodyText, {
       status: upstream.response.status,
       statusText: upstream.response.statusText,
       headers: forwardHeaders(upstream.response.headers),
     });
   };
+
+/**
+ * Best-effort pull of `error.message` from an Anthropic-shaped error body.
+ * Returns null when the body doesn't match the expected envelope.
+ */
+const extractErrorMessage = (parsed: unknown): string | null => {
+  if (parsed === null || typeof parsed !== 'object') return null;
+  const err = (parsed as Record<string, unknown>).error;
+  if (err === null || typeof err !== 'object') return null;
+  const m = (err as Record<string, unknown>).message;
+  return typeof m === 'string' ? m : null;
+};
