@@ -449,8 +449,15 @@ export const createKeyInvokeHandler =
  * NO x-stainless-*. Compared with self-ping (which goes through the full
  * proxy template), this isolates whether a 429 originates upstream-of-template
  * (account/quota) or template-of-upstream (header drift).
+ *
+ * `?beta=true` URL parameter: per static.ts, CC v2.1.142 sends this on every
+ * POST and it's required for sonnet/opus to bypass the fingerprint gate
+ * (haiku is exempt). Our previous probe omitted it — likely causing the
+ * "Usage credits required" 429s we mis-diagnosed as entitlement. Both URLs
+ * are kept here so the operator can A/B them via the `betaQuery` toggle.
  */
 const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_DIRECT_URL_BETA = 'https://api.anthropic.com/v1/messages?beta=true';
 
 // HTML checkbox semantics: present-and-"on" = checked; absent = unchecked.
 // We accept "true"/"1" too for JSON callers and curl convenience.
@@ -483,6 +490,10 @@ export const createUpstreamDirectHandler =
     // header/TLS-fingerprint shape. See [[project_cc-tls-fingerprint-gate]]
     // for the prior misdiagnosis pattern.
     const useTemplate = asBool(raw?.useTemplate);
+    // `?beta=true` URL — see ANTHROPIC_DIRECT_URL_BETA comment. Default ON
+    // when useTemplate is set (production-fidelity mode should match CC's
+    // exact wire shape, including URL).
+    const betaQuery = asBool(raw?.betaQuery) || useTemplate;
     // Size-gate probe: operator-supplied filler size in KB. Estimated at
     // ~4 bytes/token for English+code, so 1000 KB ≈ 250K tokens. Clamped
     // against PAD_BYTES_CEILING (~1M tokens, the model max). 0 = no
@@ -500,7 +511,7 @@ export const createUpstreamDirectHandler =
       //                        and (if with1m) force `context-1m-` BACK in
       //                        post-strip so the probe actually carries the
       //                        flag despite the proxy's normal strip rule.
-      const targetUrl = ANTHROPIC_DIRECT_URL;
+      const targetUrl = betaQuery ? ANTHROPIC_DIRECT_URL_BETA : ANTHROPIC_DIRECT_URL;
       let requestHeaders: Record<string, string>;
       let requestBody: string;
       let modeTag: string;
@@ -567,13 +578,14 @@ export const createUpstreamDirectHandler =
         bodyText.length > 0 ? `\n--- body ---\n${excerpt(bodyText, 600)}` : '';
       const betaTag = with1m ? ' +1m' : '';
       const padTag = padBytes > 0 ? ` pad=${Math.round(padBytes / 1024)}KB` : '';
+      const urlTag = betaQuery ? ' ?beta=true' : '';
       result = {
         kind: 'upstream-direct',
         ok: res.ok && res.status === 200,
         at: Date.now(),
         latencyMs,
-        summary: `${res.status} · ${latencyMs}ms · model=${model}${betaTag}${padTag} (member=${servedBy}, ${modeTag}) · ${bodySummary}`,
-        detail: `status=${res.status} latency=${latencyMs}ms mode=${modeTag} anthropic-beta=${betaFlagsForLog} req_body_bytes=${requestBody.length}${headersBlock}${bodyBlock}`,
+        summary: `${res.status} · ${latencyMs}ms · model=${model}${betaTag}${padTag}${urlTag} (member=${servedBy}, ${modeTag}) · ${bodySummary}`,
+        detail: `status=${res.status} latency=${latencyMs}ms url=${targetUrl} mode=${modeTag} anthropic-beta=${betaFlagsForLog} req_body_bytes=${requestBody.length}${headersBlock}${bodyBlock}`,
       };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);

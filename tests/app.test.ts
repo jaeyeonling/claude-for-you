@@ -115,38 +115,6 @@ describe('composeApp', () => {
     }
   });
 
-  test('/v1/messages with body over OAuth payload limit → 413 with actionable code', async () => {
-    // Reproduces the case where CC's `[1m]` model variant grows the prompt
-    // past 200K tokens without flipping the `context-1m-*` beta header.
-    // Upstream returns 429 (masquerading as quota); we surface a local 413
-    // so clients see an actionable signal before bouncing off the gate.
-    const { app, dispose } = await composeApp(baseConfig());
-    try {
-      const oversizedContent = 'x'.repeat(1_100_000); // 1.1MB > 1MB limit
-      const body = JSON.stringify({
-        model: 'claude-opus-4-7',
-        max_tokens: 100,
-        messages: [{ role: 'user', content: oversizedContent }],
-      });
-      const res = await app.request('/v1/messages', {
-        method: 'POST',
-        body,
-        headers: {
-          'content-type': 'application/json',
-          'content-length': String(body.length),
-          'x-api-key': VALID_KEY,
-        },
-      });
-      expect(res.status).toBe(413);
-      const text = await res.text();
-      // DomainError message surfaces verbatim via the global onError handler;
-      // we just check it carries the actionable hint.
-      expect(text).toContain('Use Console API key directly');
-    } finally {
-      await dispose();
-    }
-  });
-
   test('boots with no apiKeys + no apiKeysFilePath → throws ConfigError', async () => {
     expect(
       composeApp(baseConfig({ apiKeys: [] })),

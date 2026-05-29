@@ -28,36 +28,20 @@ describe('mergeAndFilterAnthropicBeta', () => {
     expect(stripped).toEqual([]);
   });
 
-  test('strips context-1m flag from client and reports it', () => {
+  test('passes context-1m through (OAuth + 1M is now confirmed working)', () => {
+    // 2026-05-29: real CC v2.1.145 sends `context-1m-2025-08-07` over OAuth
+    // and upstream returns 200 (verified by mitmproxy capture against a Pro
+    // account). The earlier strip was a misdiagnosis caused by our URL
+    // omitting `?beta=true`. Filter is now empty by default.
     const { value, stripped } = mergeAndFilterAnthropicBeta(
       BASELINE,
       'context-1m-2025-08-07,oauth-2025-04-20',
     );
 
-    expect(value).not.toContain('context-1m');
+    expect(value).toContain('context-1m-2025-08-07');
     expect(value).toContain('oauth-2025-04-20');
     expect(value).toContain('claude-code-20250219');
-    expect(stripped).toEqual(['context-1m-2025-08-07']);
-  });
-
-  test('strips future context-1m version variants via prefix match', () => {
-    const { value, stripped } = mergeAndFilterAnthropicBeta(BASELINE, 'context-1m-2099-12-31');
-
-    expect(value).not.toContain('context-1m');
-    expect(stripped).toEqual(['context-1m-2099-12-31']);
-  });
-
-  test('strips context-1m even when present in the baseline', () => {
-    // Defensive: if a future snapshot accidentally bakes context-1m into the
-    // baseline, filter must still drop it. The gateway constraint is at the
-    // upstream-auth layer, not at the source of the flag.
-    const { value, stripped } = mergeAndFilterAnthropicBeta(
-      `${BASELINE},context-1m-2025-08-07`,
-      '',
-    );
-
-    expect(value).not.toContain('context-1m');
-    expect(stripped).toEqual(['context-1m-2025-08-07']);
+    expect(stripped).toEqual([]);
   });
 
   test('deduplicates when client repeats a baseline flag', () => {
@@ -73,9 +57,9 @@ describe('mergeAndFilterAnthropicBeta', () => {
       '  context-1m-2025-08-07 , , oauth-2025-04-20  ',
     );
 
-    expect(value).not.toContain('context-1m');
     expect(value.split(',')).toContain('oauth-2025-04-20');
-    expect(stripped).toEqual(['context-1m-2025-08-07']);
+    expect(value.split(',')).toContain('context-1m-2025-08-07');
+    expect(stripped).toEqual([]);
   });
 
   test('returns empty string when both inputs are empty', () => {
@@ -91,7 +75,7 @@ describe('createExtractedTemplate apply() — wrapper integration', () => {
   // mergeAndFilterAnthropicBeta (the pure helper). If someone refactors and
   // forgets to call the helper, or wires clientHeaders wrong, only this test
   // catches it — the pure tests above pass even if the wrapper bypasses them.
-  test('strips context-1m from a real Headers object when going through apply()', async () => {
+  test('forwards context-1m through to upstream (OAuth + 1M works)', async () => {
     const template = createExtractedTemplate();
     const clientHeaders = new Headers({
       'anthropic-beta': 'context-1m-2025-08-07,oauth-2025-04-20',
@@ -104,7 +88,17 @@ describe('createExtractedTemplate apply() — wrapper integration', () => {
     });
 
     const sentBeta = outbound.headers['anthropic-beta'] ?? '';
-    expect(sentBeta).not.toContain('context-1m');
+    expect(sentBeta).toContain('context-1m-2025-08-07');
     expect(sentBeta).toContain('oauth-2025-04-20');
+  });
+
+  test('URL includes ?beta=true (required for upstream beta-flag gating)', async () => {
+    const template = createExtractedTemplate();
+    const outbound = await template.apply({
+      clientBody: { model: 'claude-sonnet-4-6', messages: [] },
+      accessToken: 'sk-ant-test-token',
+      clientHeaders: undefined,
+    });
+    expect(outbound.url).toContain('?beta=true');
   });
 });

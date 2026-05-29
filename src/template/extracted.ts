@@ -7,7 +7,16 @@ import { ConfigError } from '../lib/errors.js';
 import { log } from '../lib/logger.js';
 import type { ApplyInput, ClaudeTemplate, OutboundRequest } from './types.js';
 
-const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
+// Real CC v2.1.145 POSTs to /v1/messages?beta=true on every request (verified
+// 2026-05-29 via mitmproxy capture). The `?beta=true` query parameter is the
+// upstream's gate for ALL anthropic-beta features — including `context-1m-*`.
+// Without it, 1M requests are deterministically rejected with HTTP 429
+// "Usage credits are required for long context requests" (a misleading error
+// — it's a URL/flag misconfiguration, not a billing issue). Standard 200K
+// traffic happens to work without `?beta=true` because beta gating only kicks
+// in for flagged features. Treat the query param as part of the URL, not a
+// toggle. See docs/operational-pitfalls.md #12 for the 36-hour misdiagnosis.
+const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages?beta=true';
 const SUPPORTED_SCHEMA_VERSION = 2;
 const SNAPSHOT_AGE_WARN_DAYS = 60;
 
@@ -86,14 +95,16 @@ const loadSnapshot = (path: string): SnapshotV2 => {
   return parsed;
 };
 
-// Beta flags the gateway cannot honor because upstream auth is Claude.ai OAuth
-// (subscription), not a Console API key. Long-context (1M) is the canonical
-// case — OAuth has no entitlement for it, so Anthropic returns HTTP 429
-// "Usage credits are required for long context requests" (deterministic, not
-// rate-limit). We strip silently so requests downgrade to the standard 200K
-// window instead of failing. Oversized prompts still surface a clear
-// "input too long" from upstream. See docs/operational-pitfalls.md #12.
-const OAUTH_INCOMPATIBLE_BETA_PREFIXES: readonly string[] = ['context-1m-'];
+// Beta flags the gateway cannot honor because upstream auth is Claude.ai OAuth.
+// EMPTY as of 2026-05-29 — the earlier `context-1m-` entry was a misdiagnosis.
+// Real CC's `[1m]` model variant sends `context-1m-2025-08-07` over OAuth and
+// upstream accepts it (verified by capturing CC v2.1.145 against a Pro/Max
+// account). The 429s we attributed to OAuth entitlement were actually caused
+// by our URL omitting `?beta=true` (see ANTHROPIC_MESSAGES_URL above). Keep
+// the helper plumbing in place so future genuinely OAuth-incompatible betas
+// can be added by appending a prefix here — but verify with an upstream-direct
+// capture first, don't speculate.
+const OAUTH_INCOMPATIBLE_BETA_PREFIXES: readonly string[] = [];
 
 const isOAuthIncompatibleBeta = (flag: string): boolean =>
   OAUTH_INCOMPATIBLE_BETA_PREFIXES.some((p) => flag.startsWith(p));
