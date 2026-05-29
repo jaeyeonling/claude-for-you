@@ -322,6 +322,10 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     <form class="stack" action="/admin/test/upstream-direct" method="post">
       <label for="direct-model">upstream direct <span class="tag">(bypasses proxy template — minimal headers)</span></label>
       <input id="direct-model" type="text" name="model" placeholder="claude-sonnet-4-6" value="claude-sonnet-4-6">
+      <label style="display:flex;align-items:center;gap:.5rem;font-weight:normal">
+        <input type="checkbox" name="with1m" value="on">
+        <span>append <code>context-1m-2025-08-07</code> beta <span class="tag">(re-test 1M gate; expect 429 if still locked)</span></span>
+      </label>
       <button type="submit">call api.anthropic.com</button>
     </form>
   </section>

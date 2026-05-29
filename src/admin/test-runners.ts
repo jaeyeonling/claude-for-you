@@ -368,28 +368,49 @@ export const createKeyInvokeHandler =
  */
 const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com/v1/messages';
 
+// HTML checkbox semantics: present-and-"on" = checked; absent = unchecked.
+// We accept "true"/"1" too for JSON callers and curl convenience.
+const asBool = (value: unknown): boolean => {
+  const s = asString(value).toLowerCase();
+  return s === 'on' || s === 'true' || s === '1';
+};
+
+// `context-1m-2025-08-07` is the public beta flag for the 1M-token context
+// window. As of 2026-05-28 the proxy strips it from forwarded requests
+// because Claude.ai OAuth subscriptions returned a deterministic 429
+// "Usage credits are required for long context requests" (see
+// docs/operational-pitfalls.md #12). This probe lets an operator re-test
+// upstream's current behavior WITHOUT touching the strip — toggle the
+// `with1m` form field and observe the response. If it still 429s, the
+// strip stays. If it 200s, policy changed and the strip can be lifted.
+const CONTEXT_1M_BETA = 'context-1m-2025-08-07';
+
 export const createUpstreamDirectHandler =
   (pool: AccountPool, store: TestResultStore) =>
   async (c: Context): Promise<Response> => {
     const raw = await parseFormOrJson(c).catch(() => null);
     const model = asString(raw?.model) || DEFAULT_MODEL;
+    const with1m = asBool(raw?.with1m);
 
     const startedAt = Date.now();
     let result: TestResult;
     try {
       const { token, name: servedBy } = await pool.getAccessToken(undefined);
+      // `oauth-2025-04-20` is REQUIRED for Claude.ai OAuth-issued tokens —
+      // without it upstream rejects the call regardless of model. Everything
+      // else (x-stainless-*, claude-code-* betas, user-agent) is omitted to
+      // keep this isolating from template drift. When `with1m` is set we
+      // additionally append the 1M context beta to re-test the gate.
+      const betaFlags = with1m
+        ? `oauth-2025-04-20,${CONTEXT_1M_BETA}`
+        : 'oauth-2025-04-20';
       const res = await fetch(ANTHROPIC_DIRECT_URL, {
         method: 'POST',
         headers: {
           authorization: `Bearer ${token}`,
           'anthropic-version': '2023-06-01',
           'content-type': 'application/json',
-          // Beta flag REQUIRED for Claude.ai OAuth-issued tokens — without it
-          // the upstream rejects the call regardless of model. This is the
-          // smallest set; everything else (x-stainless-*, claude-code-* beta
-          // flags, user-agent) is omitted to isolate whether THAT extra set
-          // is what's tripping sonnet/opus.
-          'anthropic-beta': 'oauth-2025-04-20',
+          'anthropic-beta': betaFlags,
         },
         body: PING_BODY(model),
         // Short-lived admin probe (upstream-direct variant) — full-fetch
@@ -409,13 +430,14 @@ export const createUpstreamDirectHandler =
         diag.length > 0 ? `\n--- response headers ---\n${diag}` : '';
       const bodyBlock =
         bodyText.length > 0 ? `\n--- body ---\n${excerpt(bodyText, 600)}` : '';
+      const betaTag = with1m ? ' +1m' : '';
       result = {
         kind: 'upstream-direct',
         ok: res.ok && res.status === 200,
         at: Date.now(),
         latencyMs,
-        summary: `${res.status} · ${latencyMs}ms · model=${model} (member=${servedBy}, no template) · ${bodySummary}`,
-        detail: `status=${res.status} latency=${latencyMs}ms${headersBlock}${bodyBlock}`,
+        summary: `${res.status} · ${latencyMs}ms · model=${model}${betaTag} (member=${servedBy}, no template) · ${bodySummary}`,
+        detail: `status=${res.status} latency=${latencyMs}ms anthropic-beta=${betaFlags}${headersBlock}${bodyBlock}`,
       };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
