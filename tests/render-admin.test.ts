@@ -213,4 +213,142 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     expect(html).toContain('name="name"');
     expect(html).toContain('name="allowedModels"');
   });
+
+  test('edit-api-key section explains there is nothing to edit when no file keys exist', () => {
+    const html = renderAdminHtml(baseSnap({ apiKeyRows: [] }));
+    expect(html).toContain('edit api key');
+    expect(html).toContain('No file-issued keys to edit');
+  });
+
+  test('edit-api-key section omits env-baked keys from the editable select', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'operator',
+            source: 'env',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '(env)',
+          },
+        ],
+      }),
+    );
+    // Only env keys present → still treated as "nothing to edit".
+    expect(html).toContain('No file-issued keys to edit');
+    expect(html).not.toContain('id="edit-key-form"');
+  });
+
+  test('edit-api-key form renders when at least one file-issued key exists', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+            allowedModels: ['claude-haiku-*'],
+          },
+        ],
+      }),
+    );
+    expect(html).toContain('id="edit-key-form"');
+    expect(html).toContain('action="/admin/keys/bob/update"');
+    // Inputs prefilled with the current values so a no-op submit is harmless.
+    expect(html).toContain('value="bob"');
+    expect(html).toContain('value="claude-haiku-*"');
+  });
+
+  test('edit-api-key form prefills empty allowedModels when no restriction is set', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    expect(html).toContain('id="edit-key-form"');
+    // value="" on the allowedModels input — operator can type without clearing first.
+    expect(html).toMatch(/id="edit-key-models"[^>]*value=""/);
+  });
+
+  test('edit-api-key form action is intercepted client-side', () => {
+    const html = renderAdminHtml(baseSnap());
+    // shouldIntercept should match POST /admin/keys/:name/update so submits
+    // don't blow away the typed values via a full page nav.
+    expect(html).toContain("/admin/keys/'");
+    expect(html).toContain("endsWith('/update')");
+  });
+
+  test('edit-api-key Save button starts disabled and noscript warns', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Save must be disabled until JS confirms editMeta is fresh.
+    expect(html).toMatch(/id="edit-key-save"[^>]*disabled/);
+    // noscript fallback for JS-disabled operators.
+    expect(html).toContain('<noscript>');
+    expect(html).toContain('JavaScript is required');
+  });
+
+  test('paintResult branches on explicit kind:"updated" marker', () => {
+    const html = renderAdminHtml(baseSnap());
+    // The kind marker keeps the branch unambiguous instead of relying on
+    // the absence of a "key" field.
+    expect(html).toContain("payload.kind === 'updated'");
+  });
+
+  test('editMeta uses null-prototype object (prototype pollution defense)', () => {
+    const html = renderAdminHtml(baseSnap());
+    expect(html).toContain('Object.create(null)');
+  });
+
+  test('edit-key form has dedicated status span next to Save', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Status span is the dedicated channel for meta-health messages — must
+    // exist and start with the loading hint so the operator never sees a
+    // mysterious disabled Save with no context.
+    expect(html).toMatch(/id="edit-key-status"[^>]*>loading key data/);
+    expect(html).toContain('aria-live="polite"');
+  });
+
+  test('refresh error message tells the operator to refresh the page', () => {
+    const html = renderAdminHtml(baseSnap());
+    // The reword from "save is disabled until reload" to the explicit
+    // keyboard shortcut prevents ambiguity between "reload page" and
+    // "retry button".
+    expect(html).toContain('Refresh the page (Cmd/Ctrl+R) and try again');
+  });
+
+  test('select change re-fetches metadata (defense against stale prefill)', () => {
+    const html = renderAdminHtml(baseSnap());
+    // The change handler must call refreshEditMeta (not just applyEditSelection)
+    // so external edits never leave stale values prefilled.
+    expect(html).toContain('refreshEditMeta().then(applyEditSelection)');
+  });
 });

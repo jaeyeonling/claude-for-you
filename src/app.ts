@@ -284,9 +284,15 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   const keysH = createKeysHandlers(apiKeyStore);
   app.get('/admin/keys', keysH.list);
   app.post('/admin/keys', keysH.create);
+  app.patch('/admin/keys/:name', keysH.update);
   app.delete('/admin/keys/:name', keysH.revoke);
   app.post('/admin/keys/:name/revoke', async (c) => {
     const res = await keysH.revoke(c);
+    if (res.status < 300) return c.redirect('/admin');
+    return res;
+  });
+  app.post('/admin/keys/:name/update', async (c) => {
+    const res = await keysH.update(c);
     if (res.status < 300) return c.redirect('/admin');
     return res;
   });

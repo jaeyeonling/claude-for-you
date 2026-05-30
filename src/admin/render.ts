@@ -336,6 +336,43 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
       <button type="submit">issue key</button>
     </form>
   </section>
+  ${(() => {
+    // Only file-issued keys are editable — env-baked keys carry no
+    // allowedModels slot and renaming env keys is meaningless (the env var
+    // is the ground truth).
+    const editable = s.apiKeyRows.filter((k) => k.source === 'file');
+    if (editable.length === 0) {
+      return `<section>
+    <h2>edit api key</h2>
+    <p class="tag">No file-issued keys to edit. Env-baked keys cannot be modified here — change <code>API_KEYS</code> and redeploy instead.</p>
+  </section>`;
+    }
+    const editOptions = editable
+      .map(
+        (k, i) =>
+          `<option value="${esc(k.name)}"${i === 0 ? ' selected' : ''}>${esc(k.name)}</option>`,
+      )
+      .join('');
+    const first = editable[0]!;
+    const firstModels = first.allowedModels ? first.allowedModels.join(', ') : '';
+    return `<section>
+    <h2>edit api key</h2>
+    <p class="tag">Rename or change <code>allowedModels</code> on a file-issued key. An empty <code>allowedModels</code> field removes the restriction (any model allowed).</p>
+    <noscript><p class="tag" style="color:var(--bad)">⚠ JavaScript is required to edit keys safely — the selector and prefilled inputs stay in sync via JS. Enable JS or edit <code>api-keys.json</code> on disk directly.</p></noscript>
+    <form id="edit-key-form" class="stack" action="/admin/keys/${esc(first.name)}/update" method="post">
+      <label for="edit-key-target">key</label>
+      <select id="edit-key-target" style="${selectStyle}">${editOptions}</select>
+      <label for="edit-key-name">name <span class="tag">(rename — keep current to leave unchanged)</span></label>
+      <input id="edit-key-name" type="text" name="name" value="${esc(first.name)}" autocomplete="off">
+      <label for="edit-key-models">allowedModels <span class="tag">(comma-separated; empty = no restriction)</span></label>
+      <input id="edit-key-models" type="text" name="allowedModels" value="${esc(firstModels)}" placeholder="claude-haiku-*, claude-sonnet-4-6" autocomplete="off">
+      <div style="display:flex;align-items:center;gap:.6rem">
+        <button id="edit-key-save" type="submit" disabled>save</button>
+        <span id="edit-key-status" class="tag" aria-live="polite">loading key data…</span>
+      </div>
+    </form>
+  </section>`;
+  })()}
   <section>
     <h2>oauth token rotation</h2>
     <p class="tag">Paste a fresh refresh token. The next request triggers a refresh and writes a new access token to disk.</p>
@@ -455,6 +492,19 @@ const LIVE_SCRIPT = `
       slot.textContent = '✗ ' + (payload.error.type || 'error') + ': ' + (payload.error.message || '');
       return;
     }
+    // Key-update response: { kind: 'updated', name, createdAt, allowedModels }.
+    // The explicit kind marker keeps this branch unambiguous even if other
+    // endpoints later return shapes with name + createdAt.
+    if (payload.kind === 'updated' && typeof payload.name === 'string') {
+      slot.style.background = 'oklch(72% 0.16 145 / 0.18)';
+      slot.style.color = 'var(--good)';
+      const models =
+        payload.allowedModels && payload.allowedModels.length
+          ? 'allowedModels: ' + payload.allowedModels.join(', ')
+          : 'no model restriction';
+      slot.textContent = '✓ updated "' + payload.name + '" (' + models + ')';
+      return;
+    }
     // Test-result response: { ok, summary, ... }
     const ok = payload.ok === true;
     slot.style.background = ok
@@ -467,11 +517,103 @@ const LIVE_SCRIPT = `
   const shouldIntercept = (action) => {
     if (action.includes('/admin/test/')) return true;
     try {
-      return new URL(action, location.href).pathname === '/admin/keys';
+      const path = new URL(action, location.href).pathname;
+      if (path === '/admin/keys') return true;
+      // POST /admin/keys/:name/update — handle inline so the inputs the
+      // operator just typed don't get blown away by a full page nav.
+      if (path.startsWith('/admin/keys/') && path.endsWith('/update')) return true;
+      return false;
     } catch (_) {
       return false;
     }
   };
+
+  // ---------- edit-key form: keep action + inputs in sync with the select ----------
+  // Server renders inputs prefilled for the FIRST file key. When the operator
+  // picks a different one we need to (a) repoint form.action to the new path
+  // and (b) refresh the prefilled values. We re-fetch /admin/keys on every
+  // selection so external edits (other admin sessions, manual file edit) can't
+  // leave stale prefill on screen.
+  //
+  // Save is gated: disabled until refreshEditMeta() resolves so the operator
+  // can't submit stale prefill from a previous key while the fetch is still
+  // in flight. On fetch failure we keep Save disabled and surface the error
+  // in a dedicated status span (NOT the result slot — those serve different
+  // events: status = meta health, result = last submit outcome).
+  const editForm = document.getElementById('edit-key-form');
+  const editSel = document.getElementById('edit-key-target');
+  const editName = document.getElementById('edit-key-name');
+  const editModels = document.getElementById('edit-key-models');
+  const editSave = document.getElementById('edit-key-save');
+  const editStatus = document.getElementById('edit-key-status');
+  // Null-prototype object so a (hypothetical, server-side rejected) key name
+  // of '__proto__' / 'constructor' cannot pollute the lookup map.
+  let editMeta = Object.create(null);
+  let editMetaReady = false;
+  const setEditStatus = (text, color) => {
+    if (!editStatus) return;
+    editStatus.textContent = text;
+    editStatus.style.color = color || 'var(--muted)';
+  };
+  const refreshEditMeta = () => {
+    setEditStatus('loading key data…', 'var(--muted)');
+    return fetch('/admin/keys', { credentials: 'same-origin', headers: { accept: 'application/json' } })
+      .then((r) => {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then((body) => {
+        if (!body || !Array.isArray(body.keys)) {
+          throw new Error('malformed /admin/keys response');
+        }
+        const next = Object.create(null);
+        for (const k of body.keys) {
+          if (k && k.source === 'file' && typeof k.name === 'string') {
+            next[k.name] = k;
+          }
+        }
+        editMeta = next;
+        editMetaReady = true;
+      })
+      .catch((err) => {
+        editMetaReady = false;
+        const msg = err && err.message ? err.message : String(err);
+        setEditStatus(
+          '⚠ could not refresh key metadata (' + msg +
+            '). Refresh the page (Cmd/Ctrl+R) and try again.',
+          'var(--bad)',
+        );
+      });
+  };
+  const applyEditSelection = () => {
+    if (!editForm || !editSel || !editName || !editModels) return;
+    const sel = editSel.value;
+    editForm.action = '/admin/keys/' + encodeURIComponent(sel) + '/update';
+    // Only trust prefilled values when meta is fresh. If meta lookup misses
+    // (key was just revoked / renamed elsewhere) we also gate save.
+    const meta = editMetaReady ? editMeta[sel] : null;
+    if (meta) {
+      editName.value = meta.name;
+      editModels.value = Array.isArray(meta.allowedModels) ? meta.allowedModels.join(', ') : '';
+      if (editSave) editSave.disabled = false;
+      // Successful resolve — clear any prior error/loading text so the
+      // operator sees that the form is healthy now. (Previously we kept
+      // errors sticky, but that left misleading red text after recovery.)
+      setEditStatus('', 'var(--muted)');
+    } else {
+      if (editSave) editSave.disabled = true;
+    }
+  };
+  if (editSel) {
+    editSel.addEventListener('change', () => {
+      // Re-disable while we re-resolve. We re-fetch on every change so a
+      // selection landing on a key that was externally renamed/revoked doesn't
+      // prefill stale values from the cached map.
+      if (editSave) editSave.disabled = true;
+      refreshEditMeta().then(applyEditSelection);
+    });
+    refreshEditMeta().then(applyEditSelection);
+  }
   document.addEventListener('submit', (ev) => {
     const form = ev.target;
     if (!(form instanceof HTMLFormElement)) return;
@@ -501,6 +643,12 @@ const LIVE_SCRIPT = `
         }
         const body = await res.json().catch(() => null);
         paintResult(slot, body);
+        // Keep the edit-key select + prefill in sync after any /admin/keys
+        // mutation (create / update). Revoke goes through a different form
+        // that submits with a full reload, so no refresh needed there.
+        if (form.action.includes('/admin/keys')) {
+          refreshEditMeta().then(applyEditSelection);
+        }
       })
       .catch((err) => {
         slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
