@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ApiKeyEntry } from '../config.js';
-import { ConfigError, Conflict, InvalidRequest } from '../lib/errors.js';
+import { ConfigError, Conflict, InvalidRequest, NotFound } from '../lib/errors.js';
 import { assertValidModelPattern } from './model-allow.js';
 
 /**
@@ -57,6 +57,18 @@ interface ApiKeyFile {
   readonly revoked: readonly string[];
 }
 
+/**
+ * `null`/empty array on `allowedModels` = "no restriction" (drops the field
+ * from the persisted entry). `undefined` = "don't touch this field". The
+ * distinction matters: a form submit with an empty input means "remove the
+ * restriction", whereas a JSON PATCH that omits the field entirely means
+ * "leave it alone".
+ */
+export interface ApiKeyPatch {
+  readonly newName?: string;
+  readonly allowedModels?: readonly string[] | null;
+}
+
 export interface ApiKeyStore {
   list(): readonly ApiKeyRecord[];
   add(
@@ -66,6 +78,17 @@ export interface ApiKeyStore {
   revoke(name: string): Promise<boolean>;
   /** True if `name` is in the revoke set — caller can short-circuit. */
   isRevoked(name: string): boolean;
+  /**
+   * Patch a file-issued key in place. Only `name` and `allowedModels` are
+   * mutable — `key` and `createdAt` are stable identifiers. Throws:
+   *   - Conflict (`key_revoked`)         if the target is in the revoke list
+   *   - InvalidRequest (`env_source_immutable`) if the target is env-baked
+   *   - NotFound (`key_not_found`)       if no file entry matches
+   *   - Conflict (`name_conflict`)       if `newName` collides with an active key
+   *   - Conflict (`name_in_revoke_list`) if `newName` is currently revoked
+   *   - InvalidRequest                   on malformed name / model pattern
+   */
+  update(name: string, patch: ApiKeyPatch): Promise<ApiKeyRecord>;
 }
 
 const emptyFile = (): ApiKeyFile => ({ keys: [], revoked: [] });
@@ -147,10 +170,31 @@ export const createApiKeyStore = (params: {
     file = next;
   };
 
+  // Reserved names that would alias Object.prototype slots if used as map
+  // keys downstream — block at the boundary so we never persist them.
+  const RESERVED_NAMES: ReadonlySet<string> = new Set([
+    '__proto__',
+    'prototype',
+    'constructor',
+  ]);
+
   const assertValidName = (name: string): void => {
-    if (name.length === 0 || /\s|,|:/.test(name)) {
+    // Order matters: the message lists *all* disallowed shapes so the caller
+    // doesn't have to retry one constraint at a time.
+    //   whitespace/colon/comma — env format separators (API_KEYS=a:k,b:k)
+    //   slash                  — would break URL path params
+    //   control / DEL          — defense against header/log injection
+    //   reserved               — prototype-pollution defense for downstream maps
+    if (
+      name.length === 0 ||
+      /\s|,|:|\//.test(name) ||
+      // eslint-disable-next-line no-control-regex
+      /[\x00-\x1f\x7f]/.test(name) ||
+      RESERVED_NAMES.has(name)
+    ) {
       throw InvalidRequest(
-        'name must be non-empty and contain no whitespace/colon/comma',
+        'name must be non-empty and contain no whitespace/colon/comma/slash/control-chars, ' +
+          'and must not be a reserved key (__proto__, prototype, constructor)',
         'invalid_name',
       );
     }
@@ -193,6 +237,136 @@ export const createApiKeyStore = (params: {
         ? { name, key, createdAt, source: 'file', role: 'user', allowedModels }
         : { name, key, createdAt, source: 'file', role: 'user' };
       return record;
+    },
+    async update(name: string, patch: ApiKeyPatch): Promise<ApiKeyRecord> {
+      // Helper kept local to update() because only file-source records are
+      // ever returned from this path. `allowedModels` is copied via spread so
+      // callers cannot mutate the in-memory keystore through the returned
+      // record (the readonly[] type only enforces this at compile time).
+      // Callers may pass `allowedModels: undefined` to signal "no restriction",
+      // so the parameter is explicitly union-typed rather than optional —
+      // satisfies tsconfig `exactOptionalPropertyTypes`.
+      const buildFileRecord = (entry: {
+        readonly name: string;
+        readonly key: string;
+        readonly createdAt: string;
+        readonly allowedModels: readonly string[] | undefined;
+      }): ApiKeyRecord => {
+        const base = {
+          name: entry.name,
+          key: entry.key,
+          createdAt: entry.createdAt,
+          source: 'file' as const,
+          role: 'user' as const,
+        };
+        return entry.allowedModels
+          ? { ...base, allowedModels: [...entry.allowedModels] }
+          : base;
+      };
+
+
+      assertValidName(name);
+      if (file.revoked.includes(name)) {
+        throw Conflict(
+          `key "${name}" is revoked — restore it before editing`,
+          'key_revoked',
+        );
+      }
+      if (params.envKeys.some((e) => e.name === name)) {
+        throw InvalidRequest(
+          `key "${name}" is env-baked and cannot be updated via the keystore file ` +
+            `— change API_KEYS env and redeploy instead`,
+          'env_source_immutable',
+        );
+      }
+      const idx = file.keys.findIndex((e) => e.name === name);
+      if (idx === -1) {
+        throw NotFound(`key "${name}" not found`, 'key_not_found');
+      }
+      const current = file.keys[idx]!;
+
+      let nextName = current.name;
+      if (patch.newName !== undefined && patch.newName !== current.name) {
+        assertValidName(patch.newName);
+        if (file.revoked.includes(patch.newName)) {
+          throw Conflict(
+            `name "${patch.newName}" is in revoke list — pick another name or ` +
+              `restore the revoked entry first`,
+            'name_in_revoke_list',
+          );
+        }
+        const collidesEnv = params.envKeys.some((e) => e.name === patch.newName);
+        const collidesFile = file.keys.some(
+          (e, i) => i !== idx && e.name === patch.newName,
+        );
+        if (collidesEnv || collidesFile) {
+          throw Conflict(`key "${patch.newName}" already exists`, 'name_conflict');
+        }
+        nextName = patch.newName;
+      }
+
+      let nextAllowed: readonly string[] | undefined = current.allowedModels;
+      if (patch.allowedModels !== undefined) {
+        if (patch.allowedModels === null || patch.allowedModels.length === 0) {
+          // Empty list and explicit null both mean "drop the restriction" —
+          // we never persist an empty allowedModels array (it would be
+          // unmatchable and lock the user out of every model).
+          nextAllowed = undefined;
+        } else {
+          try {
+            for (const p of patch.allowedModels) assertValidModelPattern(p);
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw InvalidRequest(msg, 'invalid_model_pattern');
+          }
+          nextAllowed = patch.allowedModels;
+        }
+      }
+
+      // No-op fast path: if neither name nor allowedModels actually changed,
+      // skip the disk write entirely. Empty patches are common when the form
+      // is submitted without modifications, and a no-op write would only add
+      // contention on the keystore file.
+      //
+      // Ordered comparison is intentional: ['claude-haiku-*','claude-sonnet-*']
+      // and ['claude-sonnet-*','claude-haiku-*'] differ at request time because
+      // isModelAllowed (src/auth/model-allow.ts) runs `.some()` top-down. If
+      // you ever switch this to set-equality, also revisit isModelAllowed.
+      const sameAllowed =
+        (nextAllowed === undefined && current.allowedModels === undefined) ||
+        (nextAllowed !== undefined &&
+          current.allowedModels !== undefined &&
+          nextAllowed.length === current.allowedModels.length &&
+          nextAllowed.every((p, i) => p === current.allowedModels![i]));
+      if (nextName === current.name && sameAllowed) {
+        return buildFileRecord({
+          name: current.name,
+          key: current.key,
+          createdAt: current.createdAt,
+          allowedModels: current.allowedModels,
+        });
+      }
+
+      const nextEntry: ApiKeyFile['keys'][number] = nextAllowed
+        ? {
+            name: nextName,
+            key: current.key,
+            createdAt: current.createdAt,
+            allowedModels: nextAllowed,
+          }
+        : { name: nextName, key: current.key, createdAt: current.createdAt };
+      const next: ApiKeyFile = {
+        keys: file.keys.map((e, i) => (i === idx ? nextEntry : e)),
+        revoked: file.revoked,
+      };
+      await persist(next);
+
+      return buildFileRecord({
+        name: nextName,
+        key: current.key,
+        createdAt: current.createdAt,
+        allowedModels: nextAllowed,
+      });
     },
     async revoke(name: string): Promise<boolean> {
       // Apply the same validator as add() — rejects malformed names from
