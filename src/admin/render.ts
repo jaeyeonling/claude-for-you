@@ -515,24 +515,60 @@ const LIVE_SCRIPT = `
       //
       // textContent already escapes HTML, but copy-paste from an error toast
       // into a terminal would carry control chars / bidi overrides. We strip
-      // those while preserving legible Unicode (Korean etc) and \\t \\n \\r so
+      // those while preserving legible Unicode (Korean etc) and \\t \\n so
       // multi-line stack traces stay readable when an upstream relays them.
+      //
+      // Newline policy (issue #27): preserving raw \\n was a log-injection
+      // surface — an attacker controlling upstream error text could craft
+      // 199 newlines + 1 char to fake separate log lines when an operator
+      // pasted the toast into a terminal / Slack / log aggregator. We now
+      // (a) normalize \\r\\n → \\n and drop bare \\r, (b) collapse 3+ runs to
+      // a single blank line, and (c) hard-cap total line count below the
+      // codepoint cap. Legitimate short stack traces still survive.
+      // MAX_LINES is the hard ceiling on the rendered line count (NOT the
+      // newline count — a 6-line message has 5 newlines, both numbers
+      // matter and conflating them invites off-by-ones).
+      const MAX_LINES = 6;
       const safeText = (s, max) => {
         if (typeof s !== 'string') return '';
+        // Normalize line endings FIRST so the control-strip pass below can
+        // treat \\n as the single canonical line separator. Order matters:
+        // doing this after the strip would silently rely on \\r falling out
+        // of the strip range, hiding the normalization intent.
+        const normalized = s.replace(/\\r\\n?/g, '\\n');
         // \\p{Cf} covers zero-width, bidi-override, BOM (no need to list
         // U+200B-200F / U+202A-202E / U+2060-2069 / U+FEFF separately).
         // \\p{Co}/\\p{Cs} drop private-use and lone surrogates. We explicitly
-        // strip C0 controls except \\t \\n \\r and the C1 range — narrower than
-        // a blanket \\p{C} which would also remove \\t/\\n.
-        const cleaned = s.replace(
-          /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F\\p{Cf}\\p{Co}\\p{Cs}]/gu,
+        // strip C0 controls except \\t \\n and the C1 range — narrower than
+        // a blanket \\p{C} which would also remove \\t/\\n. \\r is gone after
+        // the normalize step above, so it's excluded from the keep-set here.
+        const cleaned = normalized.replace(
+          /[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F\\p{Cf}\\p{Co}\\p{Cs}]/gu,
           ''
         );
+        // Collapse 3+ newlines to a single blank line (\\n\\n). Stops
+        // attacker from padding with vertical whitespace to push fake log
+        // entries below the visible area, but keeps "paragraph break"
+        // legibility for legitimate multi-line errors.
+        const collapsed = cleaned.replace(/\\n{3,}/g, '\\n\\n');
+        // Trim leading/trailing blank lines BEFORE the line cap. Without
+        // this, a payload prefixed with 3+ newlines collapses to "\\n\\n"
+        // which then takes 2 of the MAX_LINES budget — silently truncating
+        // the real content's last line. (Chaos persona, PR #N round 1.)
+        const trimmed = collapsed.replace(/^\\n+|\\n+$/g, '');
+        // Hard-cap total line count. Even after collapse, an attacker can
+        // craft N alternating "text\\n" segments that survive the run-collapse.
+        // Splitting + slicing gives a deterministic ceiling.
+        const lines = trimmed.split('\\n');
+        const lineCapped =
+          lines.length > MAX_LINES
+            ? lines.slice(0, MAX_LINES).join('\\n') + '…'
+            : trimmed;
         // Codepoint-aware slice so an emoji at the cap boundary doesn't get
         // sliced inside its surrogate pair, leaving a lone surrogate that
         // would render as a replacement char in the terminal.
-        const cps = Array.from(cleaned);
-        return cps.length > max ? cps.slice(0, max).join('') + '…' : cleaned;
+        const cps = Array.from(lineCapped);
+        return cps.length > max ? cps.slice(0, max).join('') + '…' : lineCapped;
       };
       // Two failure modes collapse to the same 'error' fallback, which is
       // intentional — both leave the operator with no actionable type code,
