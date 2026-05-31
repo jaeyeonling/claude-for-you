@@ -285,6 +285,81 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     expect(html).toContain("endsWith('/update')");
   });
 
+  test('edit-key name field is readonly by default with rename toggle', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Rename safety: prefilled name input must start with `readonly` so a
+    // misclick can't trigger an accidental rename. The toggle next to it
+    // unlocks the field when the operator explicitly opts in.
+    expect(html).toMatch(/id="edit-key-name"[^>]*readonly/);
+    expect(html).toContain('id="edit-key-rename-toggle"');
+    // Label hints at the gating mechanism so a noscript / first-time
+    // operator immediately understands why the field looks disabled.
+    expect(html).toMatch(/readonly — check "rename" to edit/);
+  });
+
+  test('issue + edit forms surface allowedModels caps in label hints', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Both forms should expose the per-key entry cap and per-pattern length
+    // cap in the label so an operator sees the bound BEFORE submit instead
+    // of after a server reject. Numbers reference the imported source-of-
+    // truth constants so a future cap change updates the UI automatically.
+    expect(html).toMatch(/max 50 entries, ≤128 chars each/g);
+    // Both forms means: at least two occurrences (issue + edit).
+    const matches = html.match(/max 50 entries, ≤128 chars each/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('env-only-keys section names the env format and links to user-guide', () => {
+    const html = renderAdminHtml(baseSnap({ apiKeyRows: [] }));
+    // With no file keys, the edit section degrades to operator guidance.
+    // It must (a) show the API_KEYS format so an operator who only has
+    // env-baked keys can configure new ones without grep, and (b) link to
+    // the user guide for the full layout.
+    expect(html).toContain('name1:key1,name2:key2');
+    expect(html).toContain('docs/user-guide.md');
+  });
+
+  test('noscript fallback mentions API_KEYS_PATH instead of bare filename', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // A noscript operator can't use the inline JS edit flow. The fallback
+    // points them at the env var that defines the file path rather than a
+    // bare filename — operators may run the proxy with a custom path.
+    expect(html).toContain('API_KEYS_PATH');
+  });
+
   test('edit-api-key Save button starts disabled and noscript warns', () => {
     const html = renderAdminHtml(
       baseSnap({

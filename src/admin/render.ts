@@ -5,6 +5,8 @@ import type { UsageSnapshot } from '../usage/per-user.js';
 import type { BillingMonitorSnapshot } from '../usage/billing-monitor.js';
 import type { GlobalGuardSnapshot } from '../usage/global.js';
 import type { TestKind, TestResult } from './test-runners.js';
+import { MAX_ALLOWED_MODELS_PER_KEY } from '../auth/api-key-store.js';
+import { MAX_MODEL_PATTERN_LENGTH } from '../auth/model-allow.js';
 
 /**
  * Pure renderer for the /admin dashboard.
@@ -331,7 +333,7 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     <form class="stack" action="/admin/keys" method="post">
       <label for="newkey-name">name <span class="tag">(no spaces/colons/commas)</span></label>
       <input id="newkey-name" type="text" name="name" required minlength="1" autocomplete="off">
-      <label for="newkey-models">allowedModels <span class="tag">(optional, comma-separated; empty = no restriction)</span></label>
+      <label for="newkey-models">allowedModels <span class="tag">(optional, comma-separated; empty = no restriction; max ${MAX_ALLOWED_MODELS_PER_KEY} entries, ≤${MAX_MODEL_PATTERN_LENGTH} chars each)</span></label>
       <input id="newkey-models" type="text" name="allowedModels" placeholder="claude-haiku-*, claude-sonnet-4-6" autocomplete="off">
       <button type="submit">issue key</button>
     </form>
@@ -344,7 +346,7 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     if (editable.length === 0) {
       return `<section>
     <h2>edit api key</h2>
-    <p class="tag">No file-issued keys to edit. Env-baked keys cannot be modified here — change <code>API_KEYS</code> and redeploy instead.</p>
+    <p class="tag">No file-issued keys to edit. Env-baked keys cannot be modified here — change <code>API_KEYS</code> (format: <code>name1:key1,name2:key2</code>) and redeploy. To issue editable keys instead, set <code>API_KEYS_PATH</code> and use the form above. See <a href="https://github.com/jaeyeonling/claude-for-you/blob/main/docs/user-guide.md#api-keys" style="color:var(--accent)">docs/user-guide.md</a> for the full key layout.</p>
   </section>`;
     }
     const editOptions = editable
@@ -358,13 +360,19 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     return `<section>
     <h2>edit api key</h2>
     <p class="tag">Rename or change <code>allowedModels</code> on a file-issued key. An empty <code>allowedModels</code> field removes the restriction (any model allowed).</p>
-    <noscript><p class="tag" style="color:var(--bad)">⚠ JavaScript is required to edit keys safely — the selector and prefilled inputs stay in sync via JS. Enable JS or edit <code>api-keys.json</code> on disk directly.</p></noscript>
+    <noscript><p class="tag" style="color:var(--bad)">⚠ JavaScript is required to edit keys safely — the selector and prefilled inputs stay in sync via JS. Enable JS, or edit the keystore file on disk directly (path = whatever <code>API_KEYS_PATH</code> points to; no default — operator-supplied).</p></noscript>
     <form id="edit-key-form" class="stack" action="/admin/keys/${esc(first.name)}/update" method="post">
       <label for="edit-key-target">key</label>
       <select id="edit-key-target" style="${selectStyle}">${editOptions}</select>
-      <label for="edit-key-name">name <span class="tag">(rename — keep current to leave unchanged)</span></label>
-      <input id="edit-key-name" type="text" name="name" value="${esc(first.name)}" autocomplete="off">
-      <label for="edit-key-models">allowedModels <span class="tag">(comma-separated; empty = no restriction)</span></label>
+      <label for="edit-key-name">name <span class="tag">(readonly — check "rename" to edit)</span></label>
+      <div style="display:flex;align-items:center;gap:.6rem">
+        <input id="edit-key-name" type="text" name="name" value="${esc(first.name)}" autocomplete="off" readonly style="flex:1">
+        <label style="display:flex;align-items:center;gap:.3rem;font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;cursor:pointer">
+          <input id="edit-key-rename-toggle" type="checkbox" style="margin:0">
+          rename
+        </label>
+      </div>
+      <label for="edit-key-models">allowedModels <span class="tag">(comma-separated; empty = no restriction; max ${MAX_ALLOWED_MODELS_PER_KEY} entries, ≤${MAX_MODEL_PATTERN_LENGTH} chars each)</span></label>
       <input id="edit-key-models" type="text" name="allowedModels" value="${esc(firstModels)}" placeholder="claude-haiku-*, claude-sonnet-4-6" autocomplete="off">
       <div style="display:flex;align-items:center;gap:.6rem">
         <button id="edit-key-save" type="submit" disabled>save</button>
@@ -595,6 +603,24 @@ const LIVE_SCRIPT = `
   const editModels = document.getElementById('edit-key-models');
   const editSave = document.getElementById('edit-key-save');
   const editStatus = document.getElementById('edit-key-status');
+  const renameToggle = document.getElementById('edit-key-rename-toggle');
+  // Rename safety: name field stays readonly by default so a misclick or
+  // tab-and-type on the prefilled value can't trigger an accidental rename.
+  // Operator opts in via the checkbox. We also reset the toggle whenever
+  // the selection changes — selecting a different key shouldn't carry over
+  // the "rename" intent from the previous one.
+  const setRenameUnlocked = (unlocked) => {
+    if (!editName) return;
+    if (unlocked) editName.removeAttribute('readonly');
+    else editName.setAttribute('readonly', '');
+  };
+  if (renameToggle && editName) {
+    setRenameUnlocked(false);
+    renameToggle.addEventListener('change', () => {
+      setRenameUnlocked(renameToggle.checked);
+      if (renameToggle.checked) editName.focus();
+    });
+  }
   // Null-prototype object so a (hypothetical, server-side rejected) key name
   // of '__proto__' / 'constructor' cannot pollute the lookup map.
   let editMeta = Object.create(null);
@@ -659,6 +685,10 @@ const LIVE_SCRIPT = `
       // selection landing on a key that was externally renamed/revoked doesn't
       // prefill stale values from the cached map.
       if (editSave) editSave.disabled = true;
+      // Reset rename intent on selection change — operator picking a
+      // different key shouldn't inherit the previous row's "rename" state.
+      if (renameToggle && renameToggle.checked) renameToggle.checked = false;
+      setRenameUnlocked(false);
       refreshEditMeta().then(applyEditSelection);
     });
     refreshEditMeta().then(applyEditSelection);

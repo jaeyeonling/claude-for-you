@@ -42,7 +42,7 @@ export const isModelAllowed = (
  * logs — there is no dedicated metric, see issue #24 follow-up for adding
  * one if this becomes load-bearing).
  */
-const MAX_MODEL_PATTERN_LENGTH = 128;
+export const MAX_MODEL_PATTERN_LENGTH = 128;
 
 /**
  * Validate a pattern shape before persisting it. Catches stray internal `*`

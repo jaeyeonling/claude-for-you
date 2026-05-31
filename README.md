@@ -160,6 +160,17 @@ curl -sS -u admin:<your-key> http://<proxy-host>/admin/keys \
 # ids ("claude-haiku-4-5-20251001") or trailing-wildcard families
 # ("claude-sonnet-*"). Env-baked keys (API_KEYS=…) cannot carry allowedModels —
 # use api-keys.json for restricted users.
+# Caps: max 50 patterns per key, each pattern ≤128 chars. Trips return
+# 400 `allowed_models_too_many` / `invalid_model_pattern`.
+
+# Edit an existing file-issued key (rename or change allowedModels)
+curl -sS -u admin:<your-key> -X PATCH \
+  http://<proxy-host>/admin/keys/carol \
+  -H 'content-type: application/json' \
+  -d '{"allowedModels": ["claude-haiku-*", "claude-sonnet-4-6"]}'
+# Or via the admin UI's "edit api key" panel. Name field is readonly by
+# default — tick the rename checkbox to enable. Env-baked keys reject
+# with 400 `env_source_immutable` — change API_KEYS env and redeploy.
 ```
 
 Message you send them:
@@ -178,7 +189,8 @@ All `/admin/*` routes require API-key auth (the proxy's authorized keys list —
 |---|---|---|
 | `GET /admin` | — | Operator dashboard. Billing health, account pool headroom, canary state, per-user usage, forms below. |
 | `GET /admin/stats` | — | Same data as JSON. |
-| `POST /admin/keys` | JSON | Self-serve add — `{ name, key?, allowedModels? }`. Requires `API_KEYS_PATH`. `allowedModels` entries accept exact ids or `family-*` wildcards. |
+| `POST /admin/keys` | JSON | Self-serve add — `{ name, key?, allowedModels? }`. Requires `API_KEYS_PATH`. `allowedModels` entries accept exact ids or `family-*` wildcards; **max 50 entries per key, each ≤128 chars**. |
+| `PATCH /admin/keys/:name` | JSON | Edit a file-issued key in place — `{ newName?, allowedModels? }`. Same caps as `POST`. Form mirror at `POST /admin/keys/:name/update`. Env-baked keys reject with `env_source_immutable`. |
 | `DELETE /admin/keys/:name` | — | Revoke a key. Form mirror at `POST /admin/keys/:name/revoke`. |
 | `POST /admin/oauth/replace` | form/JSON | Paste a fresh refresh token. Next request mints a new access token. `memberName=default` for single-account mode. |
 | `POST /admin/alerts/discord` | form | Rotate Discord webhook URL. Empty `url` clears it. |

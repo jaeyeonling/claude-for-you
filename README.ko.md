@@ -160,6 +160,17 @@ curl -sS -u admin:<운영자-키> http://<프록시-호스트>/admin/keys \
 # ("claude-haiku-4-5-20251001") 또는 끝-와일드카드 family
 # ("claude-sonnet-*") 만 허용. env-baked 키(API_KEYS=…)는 allowedModels
 # 못 가짐 — 제한된 사용자는 api-keys.json 사용.
+# 상한: 키당 패턴 최대 50개, 각 패턴 ≤128자. 초과 시 400
+# `allowed_models_too_many` / `invalid_model_pattern` 반환.
+
+# 발급된 file 키 수정 (이름 변경 또는 allowedModels 변경)
+curl -sS -u admin:<운영자-키> -X PATCH \
+  http://<프록시-호스트>/admin/keys/carol \
+  -H 'content-type: application/json' \
+  -d '{"allowedModels": ["claude-haiku-*", "claude-sonnet-4-6"]}'
+# 또는 admin UI의 "edit api key" 패널 사용. name 필드는 기본 readonly —
+# rename 체크박스를 체크해야 편집 가능. env-baked 키는 400
+# `env_source_immutable` 반환 — API_KEYS env 수정 후 재배포 필요.
 ```
 
 사용자에게 보낼 메시지:
@@ -178,7 +189,8 @@ curl -sS -u admin:<운영자-키> http://<프록시-호스트>/admin/keys \
 |---|---|---|
 | `GET /admin` | — | 운영자 대시보드. billing health, account pool headroom, canary 상태, per-user usage, 아래 폼들. |
 | `GET /admin/stats` | — | 같은 데이터를 JSON으로. |
-| `POST /admin/keys` | JSON | Self-serve 추가 — `{ name, key?, allowedModels? }`. `API_KEYS_PATH` 필요. `allowedModels`는 정확 id 또는 `family-*` wildcard. |
+| `POST /admin/keys` | JSON | Self-serve 추가 — `{ name, key?, allowedModels? }`. `API_KEYS_PATH` 필요. `allowedModels`는 정확 id 또는 `family-*` wildcard. **키당 최대 50개, 각 ≤128자.** |
+| `PATCH /admin/keys/:name` | JSON | 발급된 file 키 in-place 수정 — `{ newName?, allowedModels? }`. POST와 동일 상한. 폼 미러: `POST /admin/keys/:name/update`. env-baked 키는 `env_source_immutable`로 거부. |
 | `DELETE /admin/keys/:name` | — | 키 회수. 폼 미러: `POST /admin/keys/:name/revoke`. |
 | `POST /admin/oauth/replace` | form/JSON | Fresh refresh token paste. 다음 요청이 새 access token을 mint. single-account 모드는 `memberName=default`. |
 | `POST /admin/alerts/discord` | form | Discord webhook URL 회전. 빈 `url`은 클리어. |
