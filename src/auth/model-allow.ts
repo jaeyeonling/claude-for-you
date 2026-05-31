@@ -50,6 +50,19 @@ const MAX_MODEL_PATTERN_LENGTH = 128;
  * silently locks the user out.
  */
 export const assertValidModelPattern = (p: string): void => {
+  // typeof MUST be the first guard: every check below dereferences `p`
+  // (`.length`, `.match`, `.endsWith`) and would crash with a generic
+  // TypeError if `p` were non-string. Reordering breaks error quality.
+  //
+  // null is split out from typeof because JS reports `typeof null === 'object'`,
+  // which would otherwise hide a common JSON-parse failure mode behind a
+  // misleading "got object" message.
+  if (p === null) {
+    throw new Error('model pattern must be a string (got null)');
+  }
+  if (typeof p !== 'string') {
+    throw new Error(`model pattern must be a string (got ${typeof p})`);
+  }
   if (p.length === 0) {
     throw new Error('model pattern must be non-empty');
   }

@@ -56,6 +56,24 @@ describe('assertValidModelPattern', () => {
     expect(() => assertValidModelPattern('*-opus')).toThrow(/trailing suffix/);
   });
 
+  test('rejects null with explicit "got null" message (not "got object")', () => {
+    // `typeof null === 'object'` would otherwise produce a misleading
+    // "got object" message — common JSON-parse failure mode deserves a
+    // direct diagnostic.
+    expect(() => assertValidModelPattern(null as unknown as string)).toThrow(
+      /got null/,
+    );
+  });
+
+  test('rejects non-string non-null with typeof in message', () => {
+    expect(() => assertValidModelPattern(42 as unknown as string)).toThrow(
+      /got number/,
+    );
+    expect(() => assertValidModelPattern(undefined as unknown as string)).toThrow(
+      /got undefined/,
+    );
+  });
+
   test('accepts pattern at the 128-char boundary, rejects 129+', () => {
     // Real Anthropic ids top out near 30 chars; the cap exists to keep
     // isModelAllowed bounded on the hot auth path, not to constrain
