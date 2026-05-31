@@ -556,10 +556,15 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     //      can't eat the MAX_LINES budget and silently drop real content).
     //   4. Hard-cap total line count via MAX_LINES.
     //
-    // Asserting the source-text invariants is the strongest static check we
-    // can do without LIVE_SCRIPT extraction (#26 will add behavioral tests).
-    // The exact regex spelling is intentional — a regression that drops the
-    // collapse, the trim, or the line cap would fail at least one of these.
+    // TODO(#26): these assertions match the *source text* of the regexes —
+    // a semantically equivalent rewrite (e.g. `normalized.split(/\\r\\n?/)
+    // .join('\\n')`) would fail every one of them even though behavior is
+    // unchanged. Conversely a semantic regression that keeps the literal
+    // intact would silently pass. Behavioral coverage requires extracting
+    // LIVE_SCRIPT into a unit-testable module (#26). Until that lands,
+    // treat this test as a stopgap: a single line of red here means
+    // someone reshaped the source; verify they kept the behavior intact
+    // before adjusting the assertions.
     expect(html).toContain('replace(/\\r\\n?/g');
     expect(html).toMatch(/\\n\{3,\}/);
     // Trim: must strip leading or trailing blank lines via /^\\n+|\\n+$/g.
