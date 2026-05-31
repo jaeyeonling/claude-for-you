@@ -327,4 +327,141 @@ describe('createApiKeyStore', () => {
       expect(entry?.allowedModels).toEqual(['claude-haiku-*']);
     });
   });
+
+  describe('concurrency (issue #14)', () => {
+    // Without serialization, two writes that both read the same in-memory
+    // `file` snapshot and then `await persist(next)` end up with last-write-
+    // wins — the earlier mutation is silently lost. Each test below fires
+    // two writes via Promise.all; both must survive.
+
+    test('two updates on different keys both persist', async () => {
+      const path = join(workdir, 'api-keys.json');
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      await store.add('alice', { allowedModels: ['claude-haiku-*'] });
+      await store.add('bob', { allowedModels: ['claude-haiku-*'] });
+
+      await Promise.all([
+        store.update('alice', { allowedModels: ['claude-sonnet-*'] }),
+        store.update('bob', { allowedModels: ['claude-opus-*'] }),
+      ]);
+
+      // Re-read from disk so we exercise the persisted state, not the
+      // in-memory closure.
+      const reread = createApiKeyStore({ envKeys: [], filePath: path });
+      const alice = reread.list().find((e) => e.name === 'alice');
+      const bob = reread.list().find((e) => e.name === 'bob');
+      expect(alice?.allowedModels).toEqual(['claude-sonnet-*']);
+      expect(bob?.allowedModels).toEqual(['claude-opus-*']);
+    });
+
+    test('two updates on the same key — second sees the first and fails visibly, no silent loss', async () => {
+      const path = join(workdir, 'api-keys.json');
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      await store.add('bob');
+
+      // Two clients both think the key is "bob" and submit different patches.
+      // The mutex serializes them in submission order. The first commits a
+      // rename to "robert"; the second still references "bob" and so must
+      // observe a fresh snapshot — not the stale pre-lock one — and fail
+      // visibly with key_not_found.
+      //
+      // The point of the fix is *not* "both writes land" (impossible without
+      // a merge resolver — the second client has no idea bob was renamed).
+      // The point is "loss is surfaced to the caller as a rejection rather
+      // than silently dropped by a last-write-wins overwrite."
+      //
+      // Ordering assumption: `Promise.allSettled` here relies on
+      // `withWriteLock` queueing each call via `writeLock.then(fn, fn)` —
+      // because `.then()` callbacks fire in registration order, the call we
+      // pass first to `allSettled` registers first and therefore runs first.
+      // If anyone replaces the chain mutex with a different primitive that
+      // doesn't preserve submission order, this test will start flaking on
+      // which result is fulfilled vs rejected.
+      const results = await Promise.allSettled([
+        store.update('bob', { newName: 'robert' }),
+        store.update('bob', { allowedModels: ['claude-haiku-*'] }),
+      ]);
+
+      expect(results[0].status).toBe('fulfilled');
+      expect(results[1].status).toBe('rejected');
+      if (results[1].status === 'rejected') {
+        expect(String(results[1].reason)).toMatch(/not found/);
+      }
+
+      // Persisted state reflects the first (rename) write; the second was
+      // rejected before any disk mutation.
+      const reread = createApiKeyStore({ envKeys: [], filePath: path });
+      const final = reread.list().find((e) => e.name === 'robert');
+      expect(final).toBeDefined();
+      expect(final?.allowedModels).toBeUndefined();
+    });
+
+    test('write queue cap rejects beyond MAX_WRITE_QUEUE_DEPTH (DoS guard)', async () => {
+      const path = join(workdir, 'api-keys.json');
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+
+      // The cap (currently 100) caps the unbounded promise-chain queue that
+      // an authenticated admin could otherwise grow without bound via a
+      // PATCH/POST flood. We fire 110 add() calls concurrently; the first
+      // 100 should queue and resolve, the rest must reject synchronously
+      // with `write_queue_full` rather than join the queue.
+      const total = 110;
+      const calls = Array.from({ length: total }, (_, i) => store.add('k' + i));
+      const results = await Promise.allSettled(calls);
+
+      const fulfilled = results.filter((r) => r.status === 'fulfilled').length;
+      const queueFullRejections = results.filter(
+        (r) =>
+          r.status === 'rejected' && String(r.reason).match(/write queue full/),
+      ).length;
+
+      // Up to MAX_WRITE_QUEUE_DEPTH (100) succeed; the rest are queue-full.
+      expect(fulfilled).toBe(100);
+      expect(queueFullRejections).toBe(total - 100);
+    });
+
+    test('TOCTOU guard: caller mutating patch after submit cannot leak past pre-lock validation', async () => {
+      const path = join(workdir, 'api-keys.json');
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      await store.add('bob');
+
+      // Build a patch with a *valid* newName so it passes pre-lock validation,
+      // then mutate it to an *invalid* one before the lock body runs. The
+      // store must use the snapshot captured at pre-lock time, not re-read
+      // the mutated patch object.
+      const patch: { newName: string; allowedModels: string[] } = {
+        newName: 'robert',
+        allowedModels: ['claude-haiku-*'],
+      };
+      const pending = store.update('bob', patch);
+      // Caller flips fields after submitting. If `update()` re-reads `patch`
+      // inside the lock, the persisted state would carry the mutated values
+      // — name with a space, or allowedModels with an invalid pattern.
+      patch.newName = 'invalid name';
+      patch.allowedModels.push('multi-*-wildcard-*');
+
+      const result = await pending;
+      expect(result.name).toBe('robert');
+      expect(result.allowedModels).toEqual(['claude-haiku-*']);
+
+      // Verify persistence too — the snapshot copy must protect the on-disk
+      // state, not just the returned record.
+      const reread = createApiKeyStore({ envKeys: [], filePath: path });
+      const final = reread.list().find((e) => e.name === 'robert');
+      expect(final?.allowedModels).toEqual(['claude-haiku-*']);
+    });
+
+    test('concurrent add() + revoke() both land', async () => {
+      const path = join(workdir, 'api-keys.json');
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      await store.add('alice');
+
+      await Promise.all([store.add('bob'), store.revoke('alice')]);
+
+      const reread = createApiKeyStore({ envKeys: [], filePath: path });
+      const names = reread.list().map((e) => e.name);
+      expect(names).toEqual(['bob']);
+      expect(reread.isRevoked('alice')).toBe(true);
+    });
+  });
 });

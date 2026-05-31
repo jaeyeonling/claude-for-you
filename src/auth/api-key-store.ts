@@ -130,6 +130,85 @@ export const createApiKeyStore = (params: {
   const filePath = params.filePath;
   let file: ApiKeyFile = filePath ? loadFile(filePath) : emptyFile();
 
+  // Per-store write mutex (issue #14). The store keeps `file` as in-memory
+  // closure state and every mutator follows read-modify-persist. Without
+  // serialization two concurrent writers read the same snapshot, each
+  // computes `next` from it, and the later persist silently overwrites the
+  // earlier one — admin UI assumes a single human operator but external
+  // callers (curl, scripts) hit the race trivially.
+  //
+  // The chain shape needs three properties, each driven by a specific line:
+  //
+  //   1. `writeLock.then(fn, fn)` — `fn` runs whether the previous link
+  //      resolved OR rejected. Passing `fn` as both arguments means a
+  //      throwing mutator does not stall later writers behind a pending
+  //      rejection; the queue keeps moving.
+  //
+  //   2. `writeLock = next.catch(() => undefined)` — we MUST store the
+  //      caught version, not `next` itself. If `next` is stored and rejects,
+  //      every later `writeLock.then(fn, fn)` resolves the second handler
+  //      with the *same* rejection reason, propagating it forever and
+  //      effectively poisoning the chain head. The `.catch()` swallows the
+  //      rejection only for the lock-tracking reference; `return next` still
+  //      surfaces it to the original caller.
+  //
+  //   3. `return next` — the caller observes the real result of their fn,
+  //      including any throw. The lock-tracking promise is separate.
+  //
+  // Removing the `.catch()` looks innocent ("we already return next") but
+  // breaks the chain on the first rejection. Don't.
+  //
+  // `MAX_WRITE_QUEUE_DEPTH` caps the unbounded-queue DoS surface flagged by
+  // the Adversary persona on the issue #14 review. An authenticated admin
+  // can otherwise fire PATCH/POST/DELETE in a tight loop and grow the
+  // promise chain (each link holds a `file` snapshot in its closure)
+  // without bound. 100 is sized for the realistic single-operator-plus-
+  // some-scripts workload — bursts that would legitimately exceed it
+  // suggest a stuck disk or a misconfigured client.
+  const MAX_WRITE_QUEUE_DEPTH = 100;
+  let writeLock: Promise<unknown> = Promise.resolve();
+  let queueDepth = 0;
+  const withWriteLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    if (queueDepth >= MAX_WRITE_QUEUE_DEPTH) {
+      return Promise.reject(
+        Conflict(
+          `write queue full (${MAX_WRITE_QUEUE_DEPTH} pending) — retry shortly`,
+          'write_queue_full',
+        ),
+      );
+    }
+    queueDepth++;
+    // Wrap fn so the decrement runs *inside* the same chain link as fn
+    // itself — i.e. before `next` resolves. Putting the decrement on
+    // `next.finally(...)` defers it by one microtask: a caller that does
+    // `await withWriteLock(a); withWriteLock(b)` would then see `queueDepth`
+    // still incremented for `a` when `b` runs its cap check, producing a
+    // spurious `write_queue_full` on perfectly serial usage.
+    // Wrapping pulls the bookkeeping back into the lock-held critical
+    // section, which is the only way to keep `queueDepth` consistent with
+    // what callers observe.
+    const wrapped = async (): Promise<T> => {
+      try {
+        return await fn();
+      } finally {
+        queueDepth--;
+      }
+    };
+    const next = writeLock.then(wrapped, wrapped);
+    // We MUST store the caught variant — not `next` itself. If `next` is
+    // stored and rejects, every later `writeLock.then(fn, fn)` resolves the
+    // second handler with that same rejection reason, propagating it forever
+    // and poisoning the chain head. The `.catch()` swallows the rejection
+    // only for the lock-tracking reference; `return next` still surfaces it
+    // to the original caller.
+    //
+    // Don't simplify this to `void next.finally(...)`: that spawns a
+    // *separate* promise whose rejection (when fn throws) becomes unhandled,
+    // and Bun/Node mark unhandled rejections as test failures.
+    writeLock = next.catch(() => undefined);
+    return next;
+  };
+
   const compose = (): readonly ApiKeyRecord[] => {
     const out: ApiKeyRecord[] = [];
     const seen = new Set<string>();
@@ -159,6 +238,12 @@ export const createApiKeyStore = (params: {
     return out;
   };
 
+  // Invariant: `file = next` happens *after* `writeAtomic` resolves, so if
+  // the disk write throws (ENOSPC, EACCES, etc.) the in-memory `file` is
+  // left untouched — the mutator throws and the next read still sees the
+  // previous committed state. There is no explicit rollback because there
+  // is nothing to roll back. Anyone adding retry/recovery logic must
+  // preserve this property: a failed persist must NOT leave `file` updated.
   const persist = async (next: ApiKeyFile): Promise<void> => {
     if (!filePath) {
       throw Conflict(
@@ -206,37 +291,62 @@ export const createApiKeyStore = (params: {
       name: string,
       options?: { providedKey?: string; allowedModels?: readonly string[] },
     ): Promise<ApiKeyRecord> {
+      // ───────────────────────────────────────────────────────────────────
+      // Validation placement rule (applies to add/update/revoke):
+      //
+      //   - PRE-LOCK if the check depends only on the inputs themselves —
+      //     name/key/pattern shape, length, character set. Fail fast and
+      //     don't park bad input behind the write queue.
+      //
+      //   - INSIDE LOCK if the check depends on the in-flight result of
+      //     other writers — uniqueness, existence, revoke-list membership,
+      //     env-baked-name collision. Two requests can both pass a pre-lock
+      //     "no such name" check; only a lock-internal re-check is sound.
+      //
+      // When in doubt: ask "could a concurrent writer change the answer
+      // between my check and my persist?" If yes, it belongs in the lock.
+      // ───────────────────────────────────────────────────────────────────
       assertValidName(name);
-      const existing = compose().find((e) => e.name === name);
-      if (existing) {
-        throw Conflict(`key "${name}" already exists`, 'key_exists');
-      }
       const key = options?.providedKey ?? generateKey();
       if (key.length < MIN_KEY_LENGTH) {
         throw InvalidRequest(`key must be at least ${MIN_KEY_LENGTH} chars`, 'key_too_short');
       }
-      const allowedModels = options?.allowedModels;
-      if (allowedModels) {
+      // Same TOCTOU snapshot pattern as update(): caller could mutate
+      // options.allowedModels between submission and lock granting. Shallow
+      // copy is enough because the elements are string primitives.
+      const capturedAllowed: readonly string[] | undefined = options?.allowedModels
+        ? [...options.allowedModels]
+        : undefined;
+      if (capturedAllowed) {
         try {
-          for (const p of allowedModels) assertValidModelPattern(p);
+          for (const p of capturedAllowed) assertValidModelPattern(p);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           throw InvalidRequest(msg, 'invalid_model_pattern');
         }
       }
-      const createdAt = new Date().toISOString();
-      const fileEntry: ApiKeyFile['keys'][number] = allowedModels
-        ? { name, key, createdAt, allowedModels }
-        : { name, key, createdAt };
-      const next: ApiKeyFile = {
-        keys: [...file.keys, fileEntry],
-        revoked: file.revoked.filter((r) => r !== name),
-      };
-      await persist(next);
-      const record: ApiKeyRecord = allowedModels
-        ? { name, key, createdAt, source: 'file', role: 'user', allowedModels }
-        : { name, key, createdAt, source: 'file', role: 'user' };
-      return record;
+
+      return withWriteLock(async () => {
+        // Existence check has to live *inside* the lock: a concurrent add()
+        // of the same name could otherwise both pass the pre-lock check.
+        const existing = compose().find((e) => e.name === name);
+        if (existing) {
+          throw Conflict(`key "${name}" already exists`, 'key_exists');
+        }
+        const createdAt = new Date().toISOString();
+        const fileEntry: ApiKeyFile['keys'][number] = capturedAllowed
+          ? { name, key, createdAt, allowedModels: capturedAllowed }
+          : { name, key, createdAt };
+        const next: ApiKeyFile = {
+          keys: [...file.keys, fileEntry],
+          revoked: file.revoked.filter((r) => r !== name),
+        };
+        await persist(next);
+        const record: ApiKeyRecord = capturedAllowed
+          ? { name, key, createdAt, source: 'file', role: 'user', allowedModels: capturedAllowed }
+          : { name, key, createdAt, source: 'file', role: 'user' };
+        return record;
+      });
     },
     async update(name: string, patch: ApiKeyPatch): Promise<ApiKeyRecord> {
       // Helper kept local to update() because only file-source records are
@@ -264,123 +374,172 @@ export const createApiKeyStore = (params: {
           : base;
       };
 
-
+      // Placement rule: see add() above.
+      //
+      // Pre-lock validation + TOCTOU snapshot. `ApiKeyPatch`'s `readonly` is
+      // a compile-time hint, not a runtime guarantee — a caller could mutate
+      // the patch object between submitting the request and the lock
+      // granting it. To make the validate-then-use sequence safe we capture
+      // each patched field into a local *here*, validate the local, and use
+      // *only* the local inside the lock. `patch` itself is never read
+      // again after this point.
       assertValidName(name);
-      if (file.revoked.includes(name)) {
-        throw Conflict(
-          `key "${name}" is revoked — restore it before editing`,
-          'key_revoked',
-        );
-      }
-      if (params.envKeys.some((e) => e.name === name)) {
-        throw InvalidRequest(
-          `key "${name}" is env-baked and cannot be updated via the keystore file ` +
-            `— change API_KEYS env and redeploy instead`,
-          'env_source_immutable',
-        );
-      }
-      const idx = file.keys.findIndex((e) => e.name === name);
-      if (idx === -1) {
-        throw NotFound(`key "${name}" not found`, 'key_not_found');
-      }
-      const current = file.keys[idx]!;
+      const targetName = name;
 
-      let nextName = current.name;
-      if (patch.newName !== undefined && patch.newName !== current.name) {
-        assertValidName(patch.newName);
-        if (file.revoked.includes(patch.newName)) {
+      // Plain capture: primitive string copy by value, safe against any
+      // later mutation of `patch.newName` (including via a Proxy getter).
+      const patchedNewName = patch.newName;
+      if (patchedNewName !== undefined && patchedNewName !== targetName) {
+        assertValidName(patchedNewName);
+      }
+
+      // Three-way snapshot for allowedModels:
+      //   undefined → "don't touch this field"
+      //   null      → "drop the restriction" (no allowedModels stored)
+      //   array     → shallow-copy so caller's later .push() cannot leak
+      //               into the lock-internal `nextAllowed` reference. Items
+      //               are strings (primitives), so a shallow copy is enough.
+      let patchedAllowed: readonly string[] | null | undefined;
+      if (patch.allowedModels === undefined) {
+        patchedAllowed = undefined;
+      } else if (patch.allowedModels === null) {
+        patchedAllowed = null;
+      } else {
+        patchedAllowed = [...patch.allowedModels];
+      }
+
+      if (
+        patchedAllowed !== undefined &&
+        patchedAllowed !== null &&
+        patchedAllowed.length > 0
+      ) {
+        try {
+          for (const p of patchedAllowed) assertValidModelPattern(p);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw InvalidRequest(msg, 'invalid_model_pattern');
+        }
+      }
+
+      return withWriteLock(async () => {
+        // From here on, only the captured locals (`targetName`,
+        // `patchedNewName`, `patchedAllowed`) are read — never `patch.*`.
+        if (file.revoked.includes(targetName)) {
           throw Conflict(
-            `name "${patch.newName}" is in revoke list — pick another name or ` +
-              `restore the revoked entry first`,
-            'name_in_revoke_list',
+            `key "${targetName}" is revoked — restore it before editing`,
+            'key_revoked',
           );
         }
-        const collidesEnv = params.envKeys.some((e) => e.name === patch.newName);
-        const collidesFile = file.keys.some(
-          (e, i) => i !== idx && e.name === patch.newName,
-        );
-        if (collidesEnv || collidesFile) {
-          throw Conflict(`key "${patch.newName}" already exists`, 'name_conflict');
+        if (params.envKeys.some((e) => e.name === targetName)) {
+          throw InvalidRequest(
+            `key "${targetName}" is env-baked and cannot be updated via the keystore file ` +
+              `— change API_KEYS env and redeploy instead`,
+            'env_source_immutable',
+          );
         }
-        nextName = patch.newName;
-      }
+        const idx = file.keys.findIndex((e) => e.name === targetName);
+        if (idx === -1) {
+          throw NotFound(`key "${targetName}" not found`, 'key_not_found');
+        }
+        const current = file.keys[idx]!;
 
-      let nextAllowed: readonly string[] | undefined = current.allowedModels;
-      if (patch.allowedModels !== undefined) {
-        if (patch.allowedModels === null || patch.allowedModels.length === 0) {
-          // Empty list and explicit null both mean "drop the restriction" —
-          // we never persist an empty allowedModels array (it would be
-          // unmatchable and lock the user out of every model).
-          nextAllowed = undefined;
-        } else {
-          try {
-            for (const p of patch.allowedModels) assertValidModelPattern(p);
-          } catch (e: unknown) {
-            const msg = e instanceof Error ? e.message : String(e);
-            throw InvalidRequest(msg, 'invalid_model_pattern');
+        let nextName = current.name;
+        if (patchedNewName !== undefined && patchedNewName !== current.name) {
+          if (file.revoked.includes(patchedNewName)) {
+            throw Conflict(
+              `name "${patchedNewName}" is in revoke list — pick another name or ` +
+                `restore the revoked entry first`,
+              'name_in_revoke_list',
+            );
           }
-          nextAllowed = patch.allowedModels;
+          const collidesEnv = params.envKeys.some((e) => e.name === patchedNewName);
+          const collidesFile = file.keys.some(
+            (e, i) => i !== idx && e.name === patchedNewName,
+          );
+          if (collidesEnv || collidesFile) {
+            throw Conflict(`key "${patchedNewName}" already exists`, 'name_conflict');
+          }
+          nextName = patchedNewName;
         }
-      }
 
-      // No-op fast path: if neither name nor allowedModels actually changed,
-      // skip the disk write entirely. Empty patches are common when the form
-      // is submitted without modifications, and a no-op write would only add
-      // contention on the keystore file.
-      //
-      // Ordered comparison is intentional: ['claude-haiku-*','claude-sonnet-*']
-      // and ['claude-sonnet-*','claude-haiku-*'] differ at request time because
-      // isModelAllowed (src/auth/model-allow.ts) runs `.some()` top-down. If
-      // you ever switch this to set-equality, also revisit isModelAllowed.
-      const sameAllowed =
-        (nextAllowed === undefined && current.allowedModels === undefined) ||
-        (nextAllowed !== undefined &&
-          current.allowedModels !== undefined &&
-          nextAllowed.length === current.allowedModels.length &&
-          nextAllowed.every((p, i) => p === current.allowedModels![i]));
-      if (nextName === current.name && sameAllowed) {
-        return buildFileRecord({
-          name: current.name,
-          key: current.key,
-          createdAt: current.createdAt,
-          allowedModels: current.allowedModels,
-        });
-      }
+        let nextAllowed: readonly string[] | undefined = current.allowedModels;
+        if (patchedAllowed !== undefined) {
+          if (patchedAllowed === null || patchedAllowed.length === 0) {
+            // Empty list and explicit null both mean "drop the restriction" —
+            // we never persist an empty allowedModels array (it would be
+            // unmatchable and lock the user out of every model).
+            nextAllowed = undefined;
+          } else {
+            nextAllowed = patchedAllowed;
+          }
+        }
 
-      const nextEntry: ApiKeyFile['keys'][number] = nextAllowed
-        ? {
-            name: nextName,
+        // No-op fast path: if neither name nor allowedModels actually changed,
+        // skip the disk write entirely. Empty patches are common when the form
+        // is submitted without modifications, and a no-op write would only add
+        // contention on the keystore file.
+        //
+        // Ordered comparison is intentional: ['claude-haiku-*','claude-sonnet-*']
+        // and ['claude-sonnet-*','claude-haiku-*'] differ at request time because
+        // isModelAllowed (src/auth/model-allow.ts) runs `.some()` top-down. The
+        // matcher there iterates patterns in array order via `.some()`, so two
+        // arrays with identical contents but different ordering are NOT
+        // equivalent at request time. If anyone ever switches this comparison
+        // to set-equality (`new Set(...)` etc.), `isModelAllowed` must change
+        // first — otherwise this fast path silently drops legitimate reorders.
+        const sameAllowed =
+          (nextAllowed === undefined && current.allowedModels === undefined) ||
+          (nextAllowed !== undefined &&
+            current.allowedModels !== undefined &&
+            nextAllowed.length === current.allowedModels.length &&
+            nextAllowed.every((p, i) => p === current.allowedModels![i]));
+        if (nextName === current.name && sameAllowed) {
+          return buildFileRecord({
+            name: current.name,
             key: current.key,
             createdAt: current.createdAt,
-            allowedModels: nextAllowed,
-          }
-        : { name: nextName, key: current.key, createdAt: current.createdAt };
-      const next: ApiKeyFile = {
-        keys: file.keys.map((e, i) => (i === idx ? nextEntry : e)),
-        revoked: file.revoked,
-      };
-      await persist(next);
+            allowedModels: current.allowedModels,
+          });
+        }
 
-      return buildFileRecord({
-        name: nextName,
-        key: current.key,
-        createdAt: current.createdAt,
-        allowedModels: nextAllowed,
+        const nextEntry: ApiKeyFile['keys'][number] = nextAllowed
+          ? {
+              name: nextName,
+              key: current.key,
+              createdAt: current.createdAt,
+              allowedModels: nextAllowed,
+            }
+          : { name: nextName, key: current.key, createdAt: current.createdAt };
+        const next: ApiKeyFile = {
+          keys: file.keys.map((e, i) => (i === idx ? nextEntry : e)),
+          revoked: file.revoked,
+        };
+        await persist(next);
+
+        return buildFileRecord({
+          name: nextName,
+          key: current.key,
+          createdAt: current.createdAt,
+          allowedModels: nextAllowed,
+        });
       });
     },
     async revoke(name: string): Promise<boolean> {
-      // Apply the same validator as add() — rejects malformed names from
-      // the URL param before they touch the file format.
+      // Placement rule: see add() above. Name-shape validation is input-
+      // only, so it stays pre-lock; the existence check has to live inside
+      // the lock to handle a concurrent add/update of the same name.
       assertValidName(name);
-      const present = compose().some((e) => e.name === name);
-      if (!present) return false;
-      // Drop from file.keys if present and add to revoked (covers env-baked keys).
-      const next: ApiKeyFile = {
-        keys: file.keys.filter((k) => k.name !== name),
-        revoked: file.revoked.includes(name) ? file.revoked : [...file.revoked, name],
-      };
-      await persist(next);
-      return true;
+      return withWriteLock(async () => {
+        const present = compose().some((e) => e.name === name);
+        if (!present) return false;
+        // Drop from file.keys if present and add to revoked (covers env-baked keys).
+        const next: ApiKeyFile = {
+          keys: file.keys.filter((k) => k.name !== name),
+          revoked: file.revoked.includes(name) ? file.revoked : [...file.revoked, name],
+        };
+        await persist(next);
+        return true;
+      });
     },
     isRevoked(name: string): boolean {
       return file.revoked.includes(name);
