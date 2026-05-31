@@ -535,11 +535,44 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     // Format-character class (zero-width, bidi-override, BOM) MUST be in the
     // strip set — \\p{Cf} covers the whole family.
     expect(html).toContain('\\p{Cf}');
-    // C0 controls must be stripped EXCEPT \\t \\n \\r so multi-line stack
-    // traces survive when an upstream relays them. The regex achieves this
-    // by listing the explicit ranges around 0x09/0x0A/0x0D.
+    // C0 controls must be stripped EXCEPT \\t \\n so multi-line stack traces
+    // survive when an upstream relays them. The regex achieves this by
+    // listing the explicit ranges around 0x09/0x0A. \\r is stripped by the
+    // strip pass but only because the normalize pass below converts \\r\\n
+    // → \\n first — see the newline-policy test for the \\r path.
     expect(html).toContain('\\u0000-\\u0008');
-    expect(html).toContain('\\u000E-\\u001F');
+    expect(html).toContain('\\u000B-\\u001F');
+  });
+
+  test('paintResult collapses newline runs to prevent log-injection padding (#27)', () => {
+    const html = renderAdminHtml(baseSnap());
+    // Issue #27: an attacker controlling upstream error text could craft
+    // long newline runs to fake separate log entries when an operator
+    // pasted the toast text into a terminal / Slack / log aggregator. The
+    // safeText helper must:
+    //   1. Normalize \\r\\n? → \\n so the rest of the pipeline only sees \\n.
+    //   2. Collapse 3+ consecutive newlines down to one blank line.
+    //   3. Trim leading/trailing blank lines (so leading-newline padding
+    //      can't eat the MAX_LINES budget and silently drop real content).
+    //   4. Hard-cap total line count via MAX_LINES.
+    //
+    // TODO(#26): these assertions match the *source text* of the regexes —
+    // a semantically equivalent rewrite (e.g. `normalized.split(/\\r\\n?/)
+    // .join('\\n')`) would fail every one of them even though behavior is
+    // unchanged. Conversely a semantic regression that keeps the literal
+    // intact would silently pass. Behavioral coverage requires extracting
+    // LIVE_SCRIPT into a unit-testable module (#26). Until that lands,
+    // treat this test as a stopgap: a single line of red here means
+    // someone reshaped the source; verify they kept the behavior intact
+    // before adjusting the assertions.
+    expect(html).toContain('replace(/\\r\\n?/g');
+    expect(html).toMatch(/\\n\{3,\}/);
+    // Trim: must strip leading or trailing blank lines via /^\\n+|\\n+$/g.
+    // Without trim, leading newlines eat the MAX_LINES budget and silently
+    // truncate real content (chaos persona finding).
+    expect(html).toContain('replace(/^\\n+|\\n+$/g');
+    expect(html).toContain('MAX_LINES');
+    expect(html).toMatch(/lines\.length\s*>\s*MAX_LINES/);
   });
 
   test('editMeta uses null-prototype object (prototype pollution defense)', () => {
