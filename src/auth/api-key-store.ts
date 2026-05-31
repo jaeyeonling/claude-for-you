@@ -311,10 +311,15 @@ export const createApiKeyStore = (params: {
       if (key.length < MIN_KEY_LENGTH) {
         throw InvalidRequest(`key must be at least ${MIN_KEY_LENGTH} chars`, 'key_too_short');
       }
-      const allowedModels = options?.allowedModels;
-      if (allowedModels) {
+      // Same TOCTOU snapshot pattern as update(): caller could mutate
+      // options.allowedModels between submission and lock granting. Shallow
+      // copy is enough because the elements are string primitives.
+      const capturedAllowed: readonly string[] | undefined = options?.allowedModels
+        ? [...options.allowedModels]
+        : undefined;
+      if (capturedAllowed) {
         try {
-          for (const p of allowedModels) assertValidModelPattern(p);
+          for (const p of capturedAllowed) assertValidModelPattern(p);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           throw InvalidRequest(msg, 'invalid_model_pattern');
@@ -329,16 +334,16 @@ export const createApiKeyStore = (params: {
           throw Conflict(`key "${name}" already exists`, 'key_exists');
         }
         const createdAt = new Date().toISOString();
-        const fileEntry: ApiKeyFile['keys'][number] = allowedModels
-          ? { name, key, createdAt, allowedModels }
+        const fileEntry: ApiKeyFile['keys'][number] = capturedAllowed
+          ? { name, key, createdAt, allowedModels: capturedAllowed }
           : { name, key, createdAt };
         const next: ApiKeyFile = {
           keys: [...file.keys, fileEntry],
           revoked: file.revoked.filter((r) => r !== name),
         };
         await persist(next);
-        const record: ApiKeyRecord = allowedModels
-          ? { name, key, createdAt, source: 'file', role: 'user', allowedModels }
+        const record: ApiKeyRecord = capturedAllowed
+          ? { name, key, createdAt, source: 'file', role: 'user', allowedModels: capturedAllowed }
           : { name, key, createdAt, source: 'file', role: 'user' };
         return record;
       });
