@@ -635,13 +635,19 @@ const LIVE_SCRIPT = `
       credentials: 'same-origin',
     })
       .then(async (res) => {
-        if (!res.ok && res.status !== 200) {
+        // Always read the body — server errors carry { error: { type, message } }
+        // that paintResult knows how to render. The previous early-return on
+        // !res.ok dropped that body and showed only "✗ http 404", hiding the
+        // actual reason (e.g. key_not_found triggered by a concurrent PATCH
+        // race losing to a rename). If JSON parse fails (non-JSON body), fall
+        // back to a status-only message.
+        const body = await res.json().catch(() => null);
+        if (!res.ok && (!body || typeof body !== 'object' || !body.error)) {
           slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
           slot.style.color = 'var(--bad)';
           slot.textContent = '✗ http ' + res.status;
           return;
         }
-        const body = await res.json().catch(() => null);
         paintResult(slot, body);
         // Keep the edit-key select + prefill in sync after any /admin/keys
         // mutation (create / update). Revoke goes through a different form

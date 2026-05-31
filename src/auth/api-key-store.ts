@@ -137,15 +137,57 @@ export const createApiKeyStore = (params: {
   // earlier one — admin UI assumes a single human operator but external
   // callers (curl, scripts) hit the race trivially.
   //
-  // The chain shape (`writeLock.then(fn, fn)`) intentionally runs `fn`
-  // whether the previous link resolved or rejected, so a throwing mutator
-  // never deadlocks the chain. `next.catch(() => {})` keeps the rejection
-  // contained inside the link that owns it; the lock-holding promise itself
-  // must not surface as an unhandled rejection.
+  // The chain shape needs three properties, each driven by a specific line:
+  //
+  //   1. `writeLock.then(fn, fn)` — `fn` runs whether the previous link
+  //      resolved OR rejected. Passing `fn` as both arguments means a
+  //      throwing mutator does not stall later writers behind a pending
+  //      rejection; the queue keeps moving.
+  //
+  //   2. `writeLock = next.catch(() => undefined)` — we MUST store the
+  //      caught version, not `next` itself. If `next` is stored and rejects,
+  //      every later `writeLock.then(fn, fn)` resolves the second handler
+  //      with the *same* rejection reason, propagating it forever and
+  //      effectively poisoning the chain head. The `.catch()` swallows the
+  //      rejection only for the lock-tracking reference; `return next` still
+  //      surfaces it to the original caller.
+  //
+  //   3. `return next` — the caller observes the real result of their fn,
+  //      including any throw. The lock-tracking promise is separate.
+  //
+  // Removing the `.catch()` looks innocent ("we already return next") but
+  // breaks the chain on the first rejection. Don't.
+  //
+  // `MAX_WRITE_QUEUE_DEPTH` caps the unbounded-queue DoS surface flagged by
+  // the Adversary persona on the issue #14 review. An authenticated admin
+  // can otherwise fire PATCH/POST/DELETE in a tight loop and grow the
+  // promise chain (each link holds a `file` snapshot in its closure)
+  // without bound. 100 is sized for the realistic single-operator-plus-
+  // some-scripts workload — bursts that would legitimately exceed it
+  // suggest a stuck disk or a misconfigured client.
+  const MAX_WRITE_QUEUE_DEPTH = 100;
   let writeLock: Promise<unknown> = Promise.resolve();
+  let queueDepth = 0;
   const withWriteLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    if (queueDepth >= MAX_WRITE_QUEUE_DEPTH) {
+      return Promise.reject(
+        Conflict(
+          `write queue full (${MAX_WRITE_QUEUE_DEPTH} pending) — retry shortly`,
+          'write_queue_full',
+        ),
+      );
+    }
+    queueDepth++;
     const next = writeLock.then(fn, fn);
-    writeLock = next.catch(() => undefined);
+    // The lock-tracking reference needs a swallowed rejection (see comments
+    // above), AND it's also the natural place to hang our queue-depth
+    // decrement. Doing it via `next.finally(...)` would create a *separate*
+    // promise whose rejection (when `fn` throws) is unhandled, which test
+    // runners flag. Chaining the decrement onto the already-caught variant
+    // settles cleanly with no orphan rejection.
+    writeLock = next.catch(() => undefined).finally(() => {
+      queueDepth--;
+    });
     return next;
   };
 
@@ -178,6 +220,12 @@ export const createApiKeyStore = (params: {
     return out;
   };
 
+  // Invariant: `file = next` happens *after* `writeAtomic` resolves, so if
+  // the disk write throws (ENOSPC, EACCES, etc.) the in-memory `file` is
+  // left untouched — the mutator throws and the next read still sees the
+  // previous committed state. There is no explicit rollback because there
+  // is nothing to roll back. Anyone adding retry/recovery logic must
+  // preserve this property: a failed persist must NOT leave `file` updated.
   const persist = async (next: ApiKeyFile): Promise<void> => {
     if (!filePath) {
       throw Conflict(
@@ -225,9 +273,21 @@ export const createApiKeyStore = (params: {
       name: string,
       options?: { providedKey?: string; allowedModels?: readonly string[] },
     ): Promise<ApiKeyRecord> {
-      // Validate inputs *outside* the lock so callers see synchronous-style
-      // rejection latency on bad input — no point holding the write queue
-      // for a request that's going to fail validation.
+      // ───────────────────────────────────────────────────────────────────
+      // Validation placement rule (applies to add/update/revoke):
+      //
+      //   - PRE-LOCK if the check depends only on the inputs themselves —
+      //     name/key/pattern shape, length, character set. Fail fast and
+      //     don't park bad input behind the write queue.
+      //
+      //   - INSIDE LOCK if the check depends on the in-flight result of
+      //     other writers — uniqueness, existence, revoke-list membership,
+      //     env-baked-name collision. Two requests can both pass a pre-lock
+      //     "no such name" check; only a lock-internal re-check is sound.
+      //
+      // When in doubt: ask "could a concurrent writer change the answer
+      // between my check and my persist?" If yes, it belongs in the lock.
+      // ───────────────────────────────────────────────────────────────────
       assertValidName(name);
       const key = options?.providedKey ?? generateKey();
       if (key.length < MIN_KEY_LENGTH) {
@@ -291,19 +351,36 @@ export const createApiKeyStore = (params: {
           : base;
       };
 
-      // Cheap pre-lock validation: same rationale as add() — fail fast on
-      // bad input without blocking other writers.
+      // Pre-lock validation + TOCTOU snapshot. `ApiKeyPatch`'s `readonly`
+      // is a compile-time hint, not a runtime guarantee — a caller could
+      // mutate the patch object between submitting the request and the
+      // lock granting it. To make the validate-then-use sequence safe we
+      // capture each patched field into a local *here*, validate the local,
+      // and use *only* the local inside the lock. `patch` itself is never
+      // read again after this point.
       assertValidName(name);
-      if (patch.newName !== undefined && patch.newName !== name) {
-        assertValidName(patch.newName);
+      const targetName = name;
+      const patchedNewName: string | undefined =
+        patch.newName !== undefined ? patch.newName : undefined;
+      if (patchedNewName !== undefined && patchedNewName !== targetName) {
+        assertValidName(patchedNewName);
       }
+      // null → "drop restriction"; undefined → "don't touch this field";
+      // an array → copy it so caller's later .push() cannot leak into the
+      // store via the lock-internal `nextAllowed` reference.
+      const patchedAllowed: readonly string[] | null | undefined =
+        patch.allowedModels === undefined
+          ? undefined
+          : patch.allowedModels === null
+            ? null
+            : [...patch.allowedModels];
       if (
-        patch.allowedModels !== undefined &&
-        patch.allowedModels !== null &&
-        patch.allowedModels.length > 0
+        patchedAllowed !== undefined &&
+        patchedAllowed !== null &&
+        patchedAllowed.length > 0
       ) {
         try {
-          for (const p of patch.allowedModels) assertValidModelPattern(p);
+          for (const p of patchedAllowed) assertValidModelPattern(p);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           throw InvalidRequest(msg, 'invalid_model_pattern');
@@ -311,53 +388,55 @@ export const createApiKeyStore = (params: {
       }
 
       return withWriteLock(async () => {
-        if (file.revoked.includes(name)) {
+        // From here on, only the captured locals (`targetName`,
+        // `patchedNewName`, `patchedAllowed`) are read — never `patch.*`.
+        if (file.revoked.includes(targetName)) {
           throw Conflict(
-            `key "${name}" is revoked — restore it before editing`,
+            `key "${targetName}" is revoked — restore it before editing`,
             'key_revoked',
           );
         }
-        if (params.envKeys.some((e) => e.name === name)) {
+        if (params.envKeys.some((e) => e.name === targetName)) {
           throw InvalidRequest(
-            `key "${name}" is env-baked and cannot be updated via the keystore file ` +
+            `key "${targetName}" is env-baked and cannot be updated via the keystore file ` +
               `— change API_KEYS env and redeploy instead`,
             'env_source_immutable',
           );
         }
-        const idx = file.keys.findIndex((e) => e.name === name);
+        const idx = file.keys.findIndex((e) => e.name === targetName);
         if (idx === -1) {
-          throw NotFound(`key "${name}" not found`, 'key_not_found');
+          throw NotFound(`key "${targetName}" not found`, 'key_not_found');
         }
         const current = file.keys[idx]!;
 
         let nextName = current.name;
-        if (patch.newName !== undefined && patch.newName !== current.name) {
-          if (file.revoked.includes(patch.newName)) {
+        if (patchedNewName !== undefined && patchedNewName !== current.name) {
+          if (file.revoked.includes(patchedNewName)) {
             throw Conflict(
-              `name "${patch.newName}" is in revoke list — pick another name or ` +
+              `name "${patchedNewName}" is in revoke list — pick another name or ` +
                 `restore the revoked entry first`,
               'name_in_revoke_list',
             );
           }
-          const collidesEnv = params.envKeys.some((e) => e.name === patch.newName);
+          const collidesEnv = params.envKeys.some((e) => e.name === patchedNewName);
           const collidesFile = file.keys.some(
-            (e, i) => i !== idx && e.name === patch.newName,
+            (e, i) => i !== idx && e.name === patchedNewName,
           );
           if (collidesEnv || collidesFile) {
-            throw Conflict(`key "${patch.newName}" already exists`, 'name_conflict');
+            throw Conflict(`key "${patchedNewName}" already exists`, 'name_conflict');
           }
-          nextName = patch.newName;
+          nextName = patchedNewName;
         }
 
         let nextAllowed: readonly string[] | undefined = current.allowedModels;
-        if (patch.allowedModels !== undefined) {
-          if (patch.allowedModels === null || patch.allowedModels.length === 0) {
+        if (patchedAllowed !== undefined) {
+          if (patchedAllowed === null || patchedAllowed.length === 0) {
             // Empty list and explicit null both mean "drop the restriction" —
             // we never persist an empty allowedModels array (it would be
             // unmatchable and lock the user out of every model).
             nextAllowed = undefined;
           } else {
-            nextAllowed = patch.allowedModels;
+            nextAllowed = patchedAllowed;
           }
         }
 
@@ -368,8 +447,12 @@ export const createApiKeyStore = (params: {
         //
         // Ordered comparison is intentional: ['claude-haiku-*','claude-sonnet-*']
         // and ['claude-sonnet-*','claude-haiku-*'] differ at request time because
-        // isModelAllowed (src/auth/model-allow.ts) runs `.some()` top-down. If
-        // you ever switch this to set-equality, also revisit isModelAllowed.
+        // isModelAllowed (src/auth/model-allow.ts) runs `.some()` top-down. The
+        // matcher there iterates patterns in array order via `.some()`, so two
+        // arrays with identical contents but different ordering are NOT
+        // equivalent at request time. If anyone ever switches this comparison
+        // to set-equality (`new Set(...)` etc.), `isModelAllowed` must change
+        // first — otherwise this fast path silently drops legitimate reorders.
         const sameAllowed =
           (nextAllowed === undefined && current.allowedModels === undefined) ||
           (nextAllowed !== undefined &&
