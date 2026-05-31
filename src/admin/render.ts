@@ -489,7 +489,17 @@ const LIVE_SCRIPT = `
     if (payload.error && typeof payload.error === 'object') {
       slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
       slot.style.color = 'var(--bad)';
-      slot.textContent = '✗ ' + (payload.error.type || 'error') + ': ' + (payload.error.message || '');
+      const base = '✗ ' + (payload.error.type || 'error') + ': ' + (payload.error.message || '');
+      // key_not_found on a PATCH is almost always a lost-race outcome: a
+      // concurrent edit renamed (or revoked) the row between the operator
+      // loading the form and submitting it. Surface the operator-facing
+      // recovery action explicitly — otherwise the message reads like the
+      // key was destroyed.
+      const hint =
+        payload.error.type === 'key_not_found'
+          ? ' — another edit may have renamed or revoked this key; reload and retry'
+          : '';
+      slot.textContent = base + hint;
       return;
     }
     // Key-update response: { kind: 'updated', name, createdAt, allowedModels }.
@@ -642,6 +652,10 @@ const LIVE_SCRIPT = `
         // race losing to a rename). If JSON parse fails (non-JSON body), fall
         // back to a status-only message.
         const body = await res.json().catch(() => null);
+        // 4xx/5xx without a structured { error: { type, message } } body
+        // (non-JSON 5xx, proxy-level errors, etc.) — fall back to a status
+        // line. When the body DOES carry an error object, fall through to
+        // paintResult which has the dedicated error branch.
         if (!res.ok && (!body || typeof body !== 'object' || !body.error)) {
           slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
           slot.style.color = 'var(--bad)';

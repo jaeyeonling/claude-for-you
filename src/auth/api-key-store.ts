@@ -178,16 +178,34 @@ export const createApiKeyStore = (params: {
       );
     }
     queueDepth++;
-    const next = writeLock.then(fn, fn);
-    // The lock-tracking reference needs a swallowed rejection (see comments
-    // above), AND it's also the natural place to hang our queue-depth
-    // decrement. Doing it via `next.finally(...)` would create a *separate*
-    // promise whose rejection (when `fn` throws) is unhandled, which test
-    // runners flag. Chaining the decrement onto the already-caught variant
-    // settles cleanly with no orphan rejection.
-    writeLock = next.catch(() => undefined).finally(() => {
-      queueDepth--;
-    });
+    // Wrap fn so the decrement runs *inside* the same chain link as fn
+    // itself — i.e. before `next` resolves. Putting the decrement on
+    // `next.finally(...)` defers it by one microtask: a caller that does
+    // `await withWriteLock(a); withWriteLock(b)` would then see `queueDepth`
+    // still incremented for `a` when `b` runs its cap check, producing a
+    // spurious `write_queue_full` on perfectly serial usage.
+    // Wrapping pulls the bookkeeping back into the lock-held critical
+    // section, which is the only way to keep `queueDepth` consistent with
+    // what callers observe.
+    const wrapped = async (): Promise<T> => {
+      try {
+        return await fn();
+      } finally {
+        queueDepth--;
+      }
+    };
+    const next = writeLock.then(wrapped, wrapped);
+    // We MUST store the caught variant — not `next` itself. If `next` is
+    // stored and rejects, every later `writeLock.then(fn, fn)` resolves the
+    // second handler with that same rejection reason, propagating it forever
+    // and poisoning the chain head. The `.catch()` swallows the rejection
+    // only for the lock-tracking reference; `return next` still surfaces it
+    // to the original caller.
+    //
+    // Don't simplify this to `void next.finally(...)`: that spawns a
+    // *separate* promise whose rejection (when fn throws) becomes unhandled,
+    // and Bun/Node mark unhandled rejections as test failures.
+    writeLock = next.catch(() => undefined);
     return next;
   };
 
@@ -351,29 +369,40 @@ export const createApiKeyStore = (params: {
           : base;
       };
 
-      // Pre-lock validation + TOCTOU snapshot. `ApiKeyPatch`'s `readonly`
-      // is a compile-time hint, not a runtime guarantee — a caller could
-      // mutate the patch object between submitting the request and the
-      // lock granting it. To make the validate-then-use sequence safe we
-      // capture each patched field into a local *here*, validate the local,
-      // and use *only* the local inside the lock. `patch` itself is never
-      // read again after this point.
+      // Placement rule: see add() above.
+      //
+      // Pre-lock validation + TOCTOU snapshot. `ApiKeyPatch`'s `readonly` is
+      // a compile-time hint, not a runtime guarantee — a caller could mutate
+      // the patch object between submitting the request and the lock
+      // granting it. To make the validate-then-use sequence safe we capture
+      // each patched field into a local *here*, validate the local, and use
+      // *only* the local inside the lock. `patch` itself is never read
+      // again after this point.
       assertValidName(name);
       const targetName = name;
-      const patchedNewName: string | undefined =
-        patch.newName !== undefined ? patch.newName : undefined;
+
+      // Plain capture: primitive string copy by value, safe against any
+      // later mutation of `patch.newName` (including via a Proxy getter).
+      const patchedNewName = patch.newName;
       if (patchedNewName !== undefined && patchedNewName !== targetName) {
         assertValidName(patchedNewName);
       }
-      // null → "drop restriction"; undefined → "don't touch this field";
-      // an array → copy it so caller's later .push() cannot leak into the
-      // store via the lock-internal `nextAllowed` reference.
-      const patchedAllowed: readonly string[] | null | undefined =
-        patch.allowedModels === undefined
-          ? undefined
-          : patch.allowedModels === null
-            ? null
-            : [...patch.allowedModels];
+
+      // Three-way snapshot for allowedModels:
+      //   undefined → "don't touch this field"
+      //   null      → "drop the restriction" (no allowedModels stored)
+      //   array     → shallow-copy so caller's later .push() cannot leak
+      //               into the lock-internal `nextAllowed` reference. Items
+      //               are strings (primitives), so a shallow copy is enough.
+      let patchedAllowed: readonly string[] | null | undefined;
+      if (patch.allowedModels === undefined) {
+        patchedAllowed = undefined;
+      } else if (patch.allowedModels === null) {
+        patchedAllowed = null;
+      } else {
+        patchedAllowed = [...patch.allowedModels];
+      }
+
       if (
         patchedAllowed !== undefined &&
         patchedAllowed !== null &&
@@ -491,8 +520,9 @@ export const createApiKeyStore = (params: {
       });
     },
     async revoke(name: string): Promise<boolean> {
-      // Apply the same validator as add() — rejects malformed names from
-      // the URL param before they touch the file format.
+      // Placement rule: see add() above. Name-shape validation is input-
+      // only, so it stays pre-lock; the existence check has to live inside
+      // the lock to handle a concurrent add/update of the same name.
       assertValidName(name);
       return withWriteLock(async () => {
         const present = compose().some((e) => e.name === name);
