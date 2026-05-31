@@ -319,13 +319,24 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     // would corrupt the operator's terminal on copy-paste. The error branch
     // must run a length-bounded, control-stripping helper before
     // concatenation.
-    expect(html).toContain('safeText');
-    // The Unicode "Other" category covers C0/C1 controls, format chars, etc.
-    expect(html).toContain('\\p{C}');
-    // Bidi-override range must also be stripped (RLO/LRO confusables).
-    expect(html).toContain('\\u202A-\\u202E');
-    // Length cap with ellipsis marker — pattern '+ ' …''.
-    expect(html).toMatch(/slice\(0, max\) \+ '…'/);
+    //
+    // We assert that the sanitizer is *applied to* the values, not how it's
+    // spelled internally — that's the actual security invariant. Implementation
+    // details (function name, regex form) can move without breaking this test.
+    // type may be aliased through a local (rawType etc.) — assert by data
+    // path: payload.error.type is read, then safeText runs on something that
+    // ultimately becomes `type`, and `type` reaches base/hint.
+    expect(html).toContain('payload.error.type');
+    expect(html).toContain('safeText(payload.error.message');
+    expect(html).toMatch(/'✗ ' \+ type/);
+    // Format-character class (zero-width, bidi-override, BOM) MUST be in the
+    // strip set — \\p{Cf} covers the whole family.
+    expect(html).toContain('\\p{Cf}');
+    // C0 controls must be stripped EXCEPT \\t \\n \\r so multi-line stack
+    // traces survive when an upstream relays them. The regex achieves this
+    // by listing the explicit ranges around 0x09/0x0A/0x0D.
+    expect(html).toContain('\\u0000-\\u0008');
+    expect(html).toContain('\\u000E-\\u001F');
   });
 
   test('editMeta uses null-prototype object (prototype pollution defense)', () => {

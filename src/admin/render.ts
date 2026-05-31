@@ -489,19 +489,37 @@ const LIVE_SCRIPT = `
     if (payload.error && typeof payload.error === 'object') {
       slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
       slot.style.color = 'var(--bad)';
-      // Defensive sanitization: textContent already escapes HTML, but the
-      // server can echo strings (http 500 bodies, upstream proxy text) that
-      // contain control chars or bidi overrides — those would corrupt the
-      // operator's terminal/log when copy-pasted. We strip non-printables
-      // and cap length while preserving legible Unicode (Korean, etc).
+      // Defensive sanitization is asymmetric: only the error branch runs
+      // safeText. The key-issuance and key-update branches render values
+      // (payload.name, payload.allowedModels) that the operator just typed —
+      // they're round-tripped, not relayed. The error branch is the only
+      // path where upstream text (500-body, proxy-relayed message) can reach
+      // textContent verbatim.
+      //
+      // textContent already escapes HTML, but copy-paste from an error toast
+      // into a terminal would carry control chars / bidi overrides. We strip
+      // those while preserving legible Unicode (Korean etc) and \\t \\n \\r so
+      // multi-line stack traces stay readable when an upstream relays them.
       const safeText = (s, max) => {
         if (typeof s !== 'string') return '';
-        // Drop C0/C1 controls, zero-width, and bidi-override characters.
-        // \\p{C} is the Unicode "Other" category (control/format/private/unused).
-        const cleaned = s.replace(/[\\p{C}\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2069\\uFEFF]/gu, '');
-        return cleaned.length > max ? cleaned.slice(0, max) + '…' : cleaned;
+        // \\p{Cf} covers zero-width, bidi-override, BOM (no need to list
+        // U+200B-200F / U+202A-202E / U+2060-2069 / U+FEFF separately).
+        // \\p{Co}/\\p{Cs} drop private-use and lone surrogates. We explicitly
+        // strip C0 controls except \\t \\n \\r and the C1 range — narrower than
+        // a blanket \\p{C} which would also remove \\t/\\n.
+        const cleaned = s.replace(
+          /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F\\p{Cf}\\p{Co}\\p{Cs}]/gu,
+          ''
+        );
+        // Codepoint-aware slice so an emoji at the cap boundary doesn't get
+        // sliced inside its surrogate pair, leaving a lone surrogate that
+        // would render as a replacement char in the terminal.
+        const cps = Array.from(cleaned);
+        return cps.length > max ? cps.slice(0, max).join('') + '…' : cleaned;
       };
-      const type = safeText(payload.error.type, 40) || 'error';
+      const rawType = payload.error.type;
+      const type =
+        (typeof rawType === 'string' && safeText(rawType, 40)) || 'error';
       const message = safeText(payload.error.message, 200);
       const base = message ? '✗ ' + type + ': ' + message : '✗ ' + type;
       // key_not_found on a PATCH is almost always a lost-race outcome: a

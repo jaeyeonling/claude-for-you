@@ -30,6 +30,12 @@ export const isModelAllowed = (
  * (e.g. `claude-haiku-4-5-20251001`); 128 gives ~4× headroom for future
  * naming changes while keeping `isModelAllowed`'s per-call cost bounded —
  * patterns run on every authenticated request.
+ *
+ * Units are UTF-16 code units (`String.prototype.length`), not codepoints or
+ * grapheme clusters. This is intentional — the cap exists to bound memory
+ * and `startsWith` cost, both of which scale with code units, not characters.
+ * Revisit when (a) Anthropic ships an id ≥ ~64 chars, or (b) admin telemetry
+ * shows `invalid_model_pattern` rejections from legitimate users.
  */
 const MAX_MODEL_PATTERN_LENGTH = 128;
 
