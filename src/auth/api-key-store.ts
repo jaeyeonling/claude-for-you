@@ -466,6 +466,12 @@ export const createApiKeyStore = (params: {
         patchedAllowed = [...patch.allowedModels];
       }
 
+      // Rename-only PATCHes (patchedAllowed === undefined) skip this block
+      // entirely — they inherit current.allowedModels. The post-lock cap
+      // re-check below catches the case where a legacy oversized array rides
+      // through that inheritance path. Don't try to merge the two guards
+      // into one: they verify different things (payload validity vs final
+      // persisted state) and only one of them has the current row in scope.
       if (
         patchedAllowed !== undefined &&
         patchedAllowed !== null &&
@@ -574,12 +580,21 @@ export const createApiKeyStore = (params: {
         // any write that re-persists the row must satisfy the cap, even if
         // the over-cap array came from disk rather than the patch payload.
         // No-op fast path above already returned, so we know we're writing.
+        //
+        // Message is intentionally verbose (vs the terse pre-lock variant)
+        // because the operator most likely sent a rename-only PATCH and is
+        // surprised to see an allowedModels error — they need the context
+        // ("we re-persist on rename, current row is legacy oversized") and
+        // the actionable resolution ("send allowedModels in this PATCH") to
+        // unblock without reading source.
         if (nextAllowed && nextAllowed.length > MAX_ALLOWED_MODELS_PER_KEY) {
           throw InvalidRequest(
-            `cannot persist allowedModels with ${nextAllowed.length} entries ` +
-              `(cap=${MAX_ALLOWED_MODELS_PER_KEY}). The current row carries a ` +
-              `legacy oversized array; supply allowedModels ≤${MAX_ALLOWED_MODELS_PER_KEY} ` +
-              `in the same PATCH to clear it.`,
+            `cannot persist this PATCH: the row's existing allowedModels has ` +
+              `${nextAllowed.length} entries (cap=${MAX_ALLOWED_MODELS_PER_KEY}). ` +
+              `A rename or any other field-change re-persists the whole row, ` +
+              `so the over-cap array must be trimmed at the same time. ` +
+              `Include allowedModels (≤${MAX_ALLOWED_MODELS_PER_KEY} entries) ` +
+              `in this PATCH to clear the legacy bloat in one call.`,
             'allowed_models_too_many',
           );
         }

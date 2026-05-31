@@ -593,7 +593,7 @@ describe('createApiKeyStore', () => {
       await Bun.write(path, JSON.stringify(oversizedLegacy()));
       const store = createApiKeyStore({ envKeys: [], filePath: path });
       expect(store.update('legacy', { newName: 'renamed' })).rejects.toThrow(
-        /cannot persist allowedModels/,
+        /cannot persist this PATCH.*existing allowedModels/s,
       );
     });
 

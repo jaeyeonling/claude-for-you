@@ -50,10 +50,16 @@ const MAX_MODEL_PATTERN_LENGTH = 128;
  * silently locks the user out.
  */
 export const assertValidModelPattern = (p: string): void => {
-  // Sparse arrays and JSON-parsed inputs can carry non-string slots that
-  // would otherwise reach `p.length` and throw a generic TypeError. Detect
-  // them here so the caller's wrap (`InvalidRequest('invalid_model_pattern')`)
-  // surfaces a useful message instead of a cryptic stack.
+  // typeof MUST be the first guard: every check below dereferences `p`
+  // (`.length`, `.match`, `.endsWith`) and would crash with a generic
+  // TypeError if `p` were non-string. Reordering breaks error quality.
+  //
+  // null is split out from typeof because JS reports `typeof null === 'object'`,
+  // which would otherwise hide a common JSON-parse failure mode behind a
+  // misleading "got object" message.
+  if (p === null) {
+    throw new Error('model pattern must be a string (got null)');
+  }
   if (typeof p !== 'string') {
     throw new Error(`model pattern must be a string (got ${typeof p})`);
   }
