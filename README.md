@@ -162,6 +162,10 @@ curl -sS -u admin:<your-key> http://<proxy-host>/admin/keys \
 # use api-keys.json for restricted users.
 # Caps: max 50 patterns per key, each pattern ≤128 chars. Trips return
 # 400 `allowed_models_too_many` / `invalid_model_pattern`.
+# <!-- CAP-DOCS: keep 50/128 in sync with MAX_ALLOWED_MODELS_PER_KEY
+#      (src/auth/api-key-store.ts) and MAX_MODEL_PATTERN_LENGTH
+#      (src/auth/model-allow.ts). UI labels auto-update from those
+#      constants; this doc snippet does not. -->
 
 # Edit an existing file-issued key (rename or change allowedModels)
 curl -sS -u admin:<your-key> -X PATCH \
@@ -189,8 +193,8 @@ All `/admin/*` routes require API-key auth (the proxy's authorized keys list —
 |---|---|---|
 | `GET /admin` | — | Operator dashboard. Billing health, account pool headroom, canary state, per-user usage, forms below. |
 | `GET /admin/stats` | — | Same data as JSON. |
-| `POST /admin/keys` | JSON | Self-serve add — `{ name, key?, allowedModels? }`. Requires `API_KEYS_PATH`. `allowedModels` entries accept exact ids or `family-*` wildcards; **max 50 entries per key, each ≤128 chars**. |
-| `PATCH /admin/keys/:name` | JSON | Edit a file-issued key in place — `{ newName?, allowedModels? }`. Same caps as `POST`. Form mirror at `POST /admin/keys/:name/update`. Env-baked keys reject with `env_source_immutable`. |
+| `POST /admin/keys` | JSON | Self-serve add — `{ name, key?, allowedModels? }`. Requires `API_KEYS_PATH`. `allowedModels` entries accept exact ids or `family-*` wildcards; **max 50 entries per key, each ≤128 chars** (see [CAP-DOCS](#giving-someone-access) note above). |
+| `PATCH /admin/keys/:name` | JSON | Edit a file-issued key in place — `{ newName?, allowedModels? }`. Same caps as `POST`. Form mirror at `POST /admin/keys/:name/update`. Env-baked keys reject with `env_source_immutable`. Also supports `newName` for renames; e.g. `-d '{"newName":"carol-restricted"}'`. |
 | `DELETE /admin/keys/:name` | — | Revoke a key. Form mirror at `POST /admin/keys/:name/revoke`. |
 | `POST /admin/oauth/replace` | form/JSON | Paste a fresh refresh token. Next request mints a new access token. `memberName=default` for single-account mode. |
 | `POST /admin/alerts/discord` | form | Rotate Discord webhook URL. Empty `url` clears it. |

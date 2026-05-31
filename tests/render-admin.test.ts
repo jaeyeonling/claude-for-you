@@ -4,6 +4,8 @@ import {
   renderLiveSections,
   type AdminPageSnapshot,
 } from '../src/admin/render.js';
+import { MAX_ALLOWED_MODELS_PER_KEY } from '../src/auth/api-key-store.js';
+import { MAX_MODEL_PATTERN_LENGTH } from '../src/auth/model-allow.js';
 
 const baseSnap = (overrides: Partial<AdminPageSnapshot> = {}): AdminPageSnapshot => ({
   poolSnap: {
@@ -321,14 +323,78 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
         ],
       }),
     );
-    // Both forms should expose the per-key entry cap and per-pattern length
-    // cap in the label so an operator sees the bound BEFORE submit instead
-    // of after a server reject. Numbers reference the imported source-of-
-    // truth constants so a future cap change updates the UI automatically.
-    expect(html).toMatch(/max 50 entries, ≤128 chars each/g);
-    // Both forms means: at least two occurrences (issue + edit).
-    const matches = html.match(/max 50 entries, ≤128 chars each/g) ?? [];
-    expect(matches.length).toBeGreaterThanOrEqual(2);
+    // Hint wording is derived dynamically from the imported source-of-truth
+    // constants — if either cap changes in src/auth/*, this test fires only
+    // when the rendered UI fails to track it. The literal "50/128" is not
+    // baked into the assertion.
+    const expectedHint = `max ${MAX_ALLOWED_MODELS_PER_KEY} entries, each pattern ≤${MAX_MODEL_PATTERN_LENGTH} chars`;
+    expect(html).toContain(expectedHint);
+    // Exactly two occurrences: issue form + edit form. `toBe(2)` (not `>=`)
+    // catches both omission and accidental triplication.
+    const escaped = expectedHint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const matches = html.match(new RegExp(escaped, 'g')) ?? [];
+    expect(matches.length).toBe(2);
+  });
+
+  test('readonly inputs render with visual differentiation (CSS rule present)', () => {
+    const html = renderAdminHtml(baseSnap());
+    // First-timer persona: a bare readonly input looks identical to a
+    // disabled input, so operators waste time wondering why the field
+    // refuses focus. The CSS rule below changes background + cursor so
+    // readonly state is visibly different from the normal editable state.
+    expect(html).toContain('form.stack input[readonly]');
+    expect(html).toContain('cursor:not-allowed');
+  });
+
+  test('rename toggle setter restores pristine value when unchecked', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Adversary persona finding (PR #29 round 1): unchecking the rename
+    // toggle restored the readonly attribute but kept the edited value, so
+    // submit silently performed the rename the operator thought they
+    // cancelled. The setter now snapshots pristine on unlock and restores
+    // it on re-lock.
+    expect(html).toContain('editNamePristine');
+    expect(html).toMatch(/editName\.value = editNamePristine/);
+  });
+
+  test('rename toggle missing element surfaces visible diagnostic', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Chaos persona finding (PR #29 round 1): a missing rename-toggle DOM
+    // element would otherwise silently leave name readonly forever with no
+    // operator-visible signal. The fallback branch surfaces a status-span
+    // diagnostic so the operator can take action instead of fighting a
+    // mysteriously inert input.
+    expect(html).toContain('rename UI is wired but the toggle element is missing');
+  });
+
+  test('env-only guidance mentions a concrete redeploy command', () => {
+    const html = renderAdminHtml(baseSnap({ apiKeyRows: [] }));
+    // First-timer persona: "redeploy instead" left operators stuck on the
+    // next step. We now name `docker compose restart app` for the common
+    // case and acknowledge bare-metal restart as the alternative.
+    expect(html).toContain('docker compose restart app');
   });
 
   test('env-only-keys section names the env format and links to user-guide', () => {
