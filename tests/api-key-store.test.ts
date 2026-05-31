@@ -2,7 +2,13 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApiKeyStore } from '../src/auth/api-key-store.js';
+import {
+  createApiKeyStore,
+  MAX_ALLOWED_MODELS_PER_KEY,
+} from '../src/auth/api-key-store.js';
+
+const OVER_CAP = MAX_ALLOWED_MODELS_PER_KEY + 1;
+const AT_CAP = MAX_ALLOWED_MODELS_PER_KEY;
 
 let workdir: string;
 beforeEach(async () => {
@@ -132,10 +138,9 @@ describe('createApiKeyStore', () => {
       envKeys: [],
       filePath: join(workdir, 'api-keys.json'),
     });
-    // 51 patterns trips MAX_ALLOWED_MODELS_PER_KEY (=50). The cap protects
-    // the hot auth path (isModelAllowed runs `patterns.some(...)` per
-    // request) from authenticated-admin DoS.
-    const overCap = Array.from({ length: 51 }, (_, i) => `claude-${i}-*`);
+    // The cap protects the hot auth path (isModelAllowed runs
+    // `patterns.some(...)` per request) from authenticated-admin DoS.
+    const overCap = Array.from({ length: OVER_CAP }, (_, i) => `claude-${i}-*`);
     expect(store.add('carol', { allowedModels: overCap })).rejects.toThrow(
       /too many entries/,
     );
@@ -146,12 +151,45 @@ describe('createApiKeyStore', () => {
       envKeys: [],
       filePath: join(workdir, 'api-keys.json'),
     });
-    // 50 patterns sits exactly at the cap — must round-trip cleanly. This
-    // is the regression guard against accidentally tightening the cap via
-    // off-by-one in a future refactor.
-    const atCap = Array.from({ length: 50 }, (_, i) => `claude-${i}-*`);
+    // Exactly at the cap — must round-trip cleanly. Regression guard
+    // against accidentally tightening via off-by-one in a future refactor.
+    const atCap = Array.from({ length: AT_CAP }, (_, i) => `claude-${i}-*`);
     const created = await store.add('dave', { allowedModels: atCap });
-    expect(created.allowedModels).toHaveLength(50);
+    expect(created.allowedModels).toHaveLength(AT_CAP);
+  });
+
+  test('add() reports useful error for non-string slots (sparse arrays)', async () => {
+    const store = createApiKeyStore({
+      envKeys: [],
+      filePath: join(workdir, 'api-keys.json'),
+    });
+    // A sparse array or JSON-parsed payload with a null/undefined slot
+    // previously reached p.length and threw a cryptic TypeError. Now the
+    // typeof guard in assertValidModelPattern catches it with a readable
+    // message before the cap loop runs.
+    const sparse = ['claude-haiku-*', undefined as unknown as string];
+    expect(store.add('elaine', { allowedModels: sparse })).rejects.toThrow(
+      /must be a string/,
+    );
+  });
+
+  test('add() preserves cap-check precedence over invalid-pattern check', async () => {
+    const store = createApiKeyStore({
+      envKeys: [],
+      filePath: join(workdir, 'api-keys.json'),
+    });
+    // Mixed payload: oversized AND containing an invalid pattern. The cap
+    // guard runs BEFORE the per-pattern validation, so the operator sees
+    // the structural problem first (which makes them re-think the whole
+    // submission) instead of debugging a single bad pattern only to be
+    // rejected again for length.
+    const mixed = [
+      ...Array.from({ length: AT_CAP }, (_, i) => `claude-${i}-*`),
+      'invalid-*-pattern-*',
+    ];
+    expect(store.add('frank', { allowedModels: mixed })).rejects.toThrow(
+      /too many entries/,
+    );
   });
 
   test('env-baked keys carry no allowedModels (env format has no slot)', () => {
@@ -285,10 +323,9 @@ describe('createApiKeyStore', () => {
     test('rejects allowedModels arrays over the per-key cap', async () => {
       const store = createApiKeyStore({ envKeys: [], filePath: join(workdir, 'api-keys.json') });
       await store.add('bob');
-      // Same MAX_ALLOWED_MODELS_PER_KEY enforcement as add() — update() is
-      // the other write path so a missed check here would let an attacker
-      // bypass via PATCH.
-      const overCap = Array.from({ length: 51 }, (_, i) => `claude-${i}-*`);
+      // Same enforcement as add() — update() is the other write path so a
+      // missed check here would let an attacker bypass via PATCH.
+      const overCap = Array.from({ length: OVER_CAP }, (_, i) => `claude-${i}-*`);
       expect(store.update('bob', { allowedModels: overCap })).rejects.toThrow(
         /too many entries/,
       );
@@ -505,44 +542,84 @@ describe('createApiKeyStore', () => {
   });
 
   describe('legacy file migration (per-key cap)', () => {
+    const oversizedLegacy = () => ({
+      keys: [
+        {
+          name: 'legacy',
+          key: longerKey,
+          createdAt: '2026-01-01T00:00:00Z',
+          allowedModels: Array.from(
+            { length: MAX_ALLOWED_MODELS_PER_KEY + 10 },
+            (_, i) => `claude-${i}-*`,
+          ),
+        },
+      ],
+      revoked: [],
+    });
+
     test('loads existing rows over MAX_ALLOWED_MODELS_PER_KEY without crashing', async () => {
       // Operator-friendly migration: a file written before the cap existed
-      // (60 patterns on disk) must continue to load so an upgrade does not
-      // crash-loop the proxy. The cap is enforced at WRITE only.
+      // must continue to load so an upgrade does not crash-loop the proxy.
+      // The cap is enforced at WRITE only.
       const path = join(workdir, 'api-keys.json');
-      const oversized = Array.from({ length: 60 }, (_, i) => `claude-${i}-*`);
-      const legacy = {
-        keys: [
-          { name: 'legacy', key: longerKey, createdAt: '2026-01-01T00:00:00Z', allowedModels: oversized },
-        ],
-        revoked: [],
-      };
-      await Bun.write(path, JSON.stringify(legacy));
+      await Bun.write(path, JSON.stringify(oversizedLegacy()));
 
       const store = createApiKeyStore({ envKeys: [], filePath: path });
       const entry = store.list().find((e) => e.name === 'legacy');
-      expect(entry?.allowedModels).toHaveLength(60);
+      expect(entry?.allowedModels).toHaveLength(MAX_ALLOWED_MODELS_PER_KEY + 10);
     });
 
-    test('write path still enforces cap after loading a legacy oversized row', async () => {
+    test('write path still enforces cap on explicit re-supply', async () => {
       // The cap is per-write, not per-row. A legacy oversized row should
-      // load fine, but ANY subsequent update() — including a no-op on a
-      // different field — that re-supplies allowedModels over the cap must
-      // reject. This catches a subtle hole where someone tries to "fix" the
-      // legacy row by PATCHing it back to itself.
+      // load fine, but supplying the same oversized array to update() must
+      // reject — closes the "PATCH it back to itself" loophole.
       const path = join(workdir, 'api-keys.json');
-      const oversized = Array.from({ length: 60 }, (_, i) => `claude-${i}-*`);
-      const legacy = {
+      const legacy = oversizedLegacy();
+      await Bun.write(path, JSON.stringify(legacy));
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      expect(
+        store.update('legacy', { allowedModels: legacy.keys[0]!.allowedModels }),
+      ).rejects.toThrow(/too many entries/);
+    });
+
+    test('rename-only PATCH on a legacy oversized row also rejects', async () => {
+      // ADVERSARY persona finding (PR #28 round 1). The pre-lock cap check
+      // only fires when patch.allowedModels is supplied. A rename-only PATCH
+      // would inherit current.allowedModels verbatim and silently re-persist
+      // the legacy oversized array under the new name — DoS surface stays
+      // alive forever, just under a different identifier. The post-lock
+      // final-state check closes this hole.
+      const path = join(workdir, 'api-keys.json');
+      await Bun.write(path, JSON.stringify(oversizedLegacy()));
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      expect(store.update('legacy', { newName: 'renamed' })).rejects.toThrow(
+        /cannot persist allowedModels/,
+      );
+    });
+
+    test('rejects file load when allowedModels is malformed (non-array)', async () => {
+      // CHAOS persona finding (PR #28 round 1). A file with
+      // `allowedModels: {0: "x", length: 1}` would pass the type cast at
+      // JSON.parse, get loaded into memory, and crash every authenticated
+      // request inside isModelAllowed via `patterns.some is not a function`.
+      // Better to refuse to boot than to silently break auth — the operator
+      // sees the error immediately and can fix the file.
+      const path = join(workdir, 'api-keys.json');
+      const malformed = {
         keys: [
-          { name: 'legacy', key: longerKey, createdAt: '2026-01-01T00:00:00Z', allowedModels: oversized },
+          {
+            name: 'broken',
+            key: longerKey,
+            createdAt: '2026-01-01T00:00:00Z',
+            allowedModels: 'not-an-array',
+          },
         ],
         revoked: [],
       };
-      await Bun.write(path, JSON.stringify(legacy));
-      const store = createApiKeyStore({ envKeys: [], filePath: path });
-      expect(store.update('legacy', { allowedModels: oversized })).rejects.toThrow(
-        /too many entries/,
-      );
+      await Bun.write(path, JSON.stringify(malformed));
+      expect(() =>
+        createApiKeyStore({ envKeys: [], filePath: path }),
+      ).toThrow(/allowedModels of type string/);
     });
   });
 });

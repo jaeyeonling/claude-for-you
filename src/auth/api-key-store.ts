@@ -48,7 +48,7 @@ const MIN_KEY_LENGTH = 16;
  * `loadFile` for the boot-time warning that surfaces them to the operator.
  * This keeps an upgrade from crash-looping any legacy deployment.
  */
-const MAX_ALLOWED_MODELS_PER_KEY = 50;
+export const MAX_ALLOWED_MODELS_PER_KEY = 50;
 
 /**
  * `role` is derived from `source`, not stored in the file:
@@ -129,17 +129,35 @@ const loadFile = (path: string): ApiKeyFile => {
     if (!Array.isArray(parsed.keys) || !Array.isArray(parsed.revoked)) {
       throw new Error('missing keys[] or revoked[]');
     }
-    // Surface (but do not reject) rows that pre-date MAX_ALLOWED_MODELS_PER_KEY.
-    // The hot-path cost is unchanged from before the cap landed — we just want
-    // the operator to know which rows are above policy so they can revoke +
-    // re-issue at their own pace. Crashing on load would break upgrade paths.
+    // Validate per-entry allowedModels shape. We separate two cases here:
+    //
+    // 1. MALFORMED (not array, not undefined): fail-fast with ConfigError.
+    //    isModelAllowed calls `.some()` on the value at request time, which
+    //    would TypeError on a string or array-like object and crash every
+    //    authenticated request for this key. Better to crash at boot than
+    //    to mask the file corruption until the next auth attempt.
+    //
+    // 2. OVERSIZED (array > cap): warn and keep as-is. PR #23/#24 added the
+    //    cap; pre-existing rows that exceed it stay loaded so an upgrade
+    //    never crash-loops a legacy deployment. New writes still enforce.
     for (const entry of parsed.keys) {
-      const allowed = (entry as { allowedModels?: readonly string[] }).allowedModels;
+      const allowed = entry.allowedModels;
+      if (allowed !== undefined && !Array.isArray(allowed)) {
+        throw new Error(
+          `entry "${entry.name}" has allowedModels of type ${typeof allowed} ` +
+            `(expected array or absent) — fix the file before restart`,
+        );
+      }
       if (Array.isArray(allowed) && allowed.length > MAX_ALLOWED_MODELS_PER_KEY) {
+        // JSON.stringify on the name escapes embedded quotes / newlines /
+        // controls so a malicious file edit (`name: "alice\nFAKE: ..."`)
+        // can't forge log lines. It already wraps the value in quotes — no
+        // outer quotes needed in the template.
         console.warn(
-          `[api-key] entry "${entry.name}" has ${allowed.length} allowedModels ` +
-            `(cap=${MAX_ALLOWED_MODELS_PER_KEY}) — predates the cap, kept as-is. ` +
-            `Re-issue the key to trim, or ignore if intentional.`,
+          `[api-key] entry ${JSON.stringify(entry.name)} has ${allowed.length} ` +
+            `allowedModels (cap=${MAX_ALLOWED_MODELS_PER_KEY}) — predates the cap, ` +
+            `kept as-is. To trim: PATCH /admin/keys/<name> with a ≤${MAX_ALLOWED_MODELS_PER_KEY}-` +
+            `entry allowedModels array, or revoke + re-issue via POST /admin/keys.`,
         );
       }
     }
@@ -546,6 +564,24 @@ export const createApiKeyStore = (params: {
             createdAt: current.createdAt,
             allowedModels: current.allowedModels,
           });
+        }
+
+        // Final-state cap re-check. The pre-lock check on `patchedAllowed`
+        // catches explicit re-supply, but a rename-only PATCH that omits
+        // allowedModels would otherwise inherit `current.allowedModels`
+        // verbatim — including a legacy oversized array that pre-dated the
+        // cap. The migration policy is "lenient at read, strict at write":
+        // any write that re-persists the row must satisfy the cap, even if
+        // the over-cap array came from disk rather than the patch payload.
+        // No-op fast path above already returned, so we know we're writing.
+        if (nextAllowed && nextAllowed.length > MAX_ALLOWED_MODELS_PER_KEY) {
+          throw InvalidRequest(
+            `cannot persist allowedModels with ${nextAllowed.length} entries ` +
+              `(cap=${MAX_ALLOWED_MODELS_PER_KEY}). The current row carries a ` +
+              `legacy oversized array; supply allowedModels ≤${MAX_ALLOWED_MODELS_PER_KEY} ` +
+              `in the same PATCH to clear it.`,
+            'allowed_models_too_many',
+          );
         }
 
         const nextEntry: ApiKeyFile['keys'][number] = nextAllowed
