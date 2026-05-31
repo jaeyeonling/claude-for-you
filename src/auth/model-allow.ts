@@ -26,6 +26,14 @@ export const isModelAllowed = (
 };
 
 /**
+ * Upper bound on a stored pattern. Real Anthropic ids top out around 30 chars
+ * (e.g. `claude-haiku-4-5-20251001`); 128 gives ~4× headroom for future
+ * naming changes while keeping `isModelAllowed`'s per-call cost bounded —
+ * patterns run on every authenticated request.
+ */
+const MAX_MODEL_PATTERN_LENGTH = 128;
+
+/**
  * Validate a pattern shape before persisting it. Catches stray internal `*`
  * or empty strings at write time so we never store an unmatchable rule that
  * silently locks the user out.
@@ -33,6 +41,11 @@ export const isModelAllowed = (
 export const assertValidModelPattern = (p: string): void => {
   if (p.length === 0) {
     throw new Error('model pattern must be non-empty');
+  }
+  if (p.length > MAX_MODEL_PATTERN_LENGTH) {
+    throw new Error(
+      `model pattern too long (${p.length} > ${MAX_MODEL_PATTERN_LENGTH} chars)`,
+    );
   }
   const starCount = (p.match(/\*/g) ?? []).length;
   if (starCount > 1) {

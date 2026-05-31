@@ -312,6 +312,22 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     expect(html).toContain("payload.kind === 'updated'");
   });
 
+  test('paintResult sanitizes server-echoed error strings before render', () => {
+    const html = renderAdminHtml(baseSnap());
+    // textContent already neutralises HTML, but the server may relay
+    // upstream-proxy text containing control chars / bidi overrides that
+    // would corrupt the operator's terminal on copy-paste. The error branch
+    // must run a length-bounded, control-stripping helper before
+    // concatenation.
+    expect(html).toContain('safeText');
+    // The Unicode "Other" category covers C0/C1 controls, format chars, etc.
+    expect(html).toContain('\\p{C}');
+    // Bidi-override range must also be stripped (RLO/LRO confusables).
+    expect(html).toContain('\\u202A-\\u202E');
+    // Length cap with ellipsis marker — pattern '+ ' …''.
+    expect(html).toMatch(/slice\(0, max\) \+ '…'/);
+  });
+
   test('editMeta uses null-prototype object (prototype pollution defense)', () => {
     const html = renderAdminHtml(baseSnap());
     expect(html).toContain('Object.create(null)');

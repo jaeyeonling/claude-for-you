@@ -489,14 +489,28 @@ const LIVE_SCRIPT = `
     if (payload.error && typeof payload.error === 'object') {
       slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
       slot.style.color = 'var(--bad)';
-      const base = '✗ ' + (payload.error.type || 'error') + ': ' + (payload.error.message || '');
+      // Defensive sanitization: textContent already escapes HTML, but the
+      // server can echo strings (http 500 bodies, upstream proxy text) that
+      // contain control chars or bidi overrides — those would corrupt the
+      // operator's terminal/log when copy-pasted. We strip non-printables
+      // and cap length while preserving legible Unicode (Korean, etc).
+      const safeText = (s, max) => {
+        if (typeof s !== 'string') return '';
+        // Drop C0/C1 controls, zero-width, and bidi-override characters.
+        // \\p{C} is the Unicode "Other" category (control/format/private/unused).
+        const cleaned = s.replace(/[\\p{C}\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2069\\uFEFF]/gu, '');
+        return cleaned.length > max ? cleaned.slice(0, max) + '…' : cleaned;
+      };
+      const type = safeText(payload.error.type, 40) || 'error';
+      const message = safeText(payload.error.message, 200);
+      const base = message ? '✗ ' + type + ': ' + message : '✗ ' + type;
       // key_not_found on a PATCH is almost always a lost-race outcome: a
       // concurrent edit renamed (or revoked) the row between the operator
       // loading the form and submitting it. Surface the operator-facing
       // recovery action explicitly — otherwise the message reads like the
       // key was destroyed.
       const hint =
-        payload.error.type === 'key_not_found'
+        type === 'key_not_found'
           ? ' — another edit may have renamed or revoked this key; reload and retry'
           : '';
       slot.textContent = base + hint;
