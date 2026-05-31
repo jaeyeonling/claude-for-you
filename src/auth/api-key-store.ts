@@ -31,6 +31,26 @@ import { assertValidModelPattern } from './model-allow.js';
 const MIN_KEY_LENGTH = 16;
 
 /**
+ * Per-key cap on `allowedModels` entries. PR #23 capped each pattern's
+ * length (`MAX_MODEL_PATTERN_LENGTH = 128`) but the array itself was
+ * unbounded — an authenticated admin (or a compromised session) could
+ * install 100k patterns and every authenticated request would then iterate
+ * them via `isModelAllowed`'s `patterns.some(...)` on the hot auth path.
+ *
+ * 50 sits at ~2.5× the realistic ceiling (Anthropic currently runs ~6 model
+ * families × wildcards × occasional dated pins ≈ 20 patterns to cover
+ * everything an operator might want). Revisit if (a) Anthropic ships a new
+ * generation that pushes the realistic max past ~30, or (b) admin logs show
+ * legitimate `allowed_models_too_many` rejections.
+ *
+ * Migration: the cap is enforced at WRITE only (`add` / `update`). Existing
+ * `api-keys.json` rows that already exceed it continue to load — see
+ * `loadFile` for the boot-time warning that surfaces them to the operator.
+ * This keeps an upgrade from crash-looping any legacy deployment.
+ */
+const MAX_ALLOWED_MODELS_PER_KEY = 50;
+
+/**
  * `role` is derived from `source`, not stored in the file:
  *   - env-baked keys  → 'admin' (the operator who deployed the proxy)
  *   - file-added keys → 'user'  (issued via /admin/keys for regular consumers)
@@ -108,6 +128,20 @@ const loadFile = (path: string): ApiKeyFile => {
     const parsed = JSON.parse(raw) as ApiKeyFile;
     if (!Array.isArray(parsed.keys) || !Array.isArray(parsed.revoked)) {
       throw new Error('missing keys[] or revoked[]');
+    }
+    // Surface (but do not reject) rows that pre-date MAX_ALLOWED_MODELS_PER_KEY.
+    // The hot-path cost is unchanged from before the cap landed — we just want
+    // the operator to know which rows are above policy so they can revoke +
+    // re-issue at their own pace. Crashing on load would break upgrade paths.
+    for (const entry of parsed.keys) {
+      const allowed = (entry as { allowedModels?: readonly string[] }).allowedModels;
+      if (Array.isArray(allowed) && allowed.length > MAX_ALLOWED_MODELS_PER_KEY) {
+        console.warn(
+          `[api-key] entry "${entry.name}" has ${allowed.length} allowedModels ` +
+            `(cap=${MAX_ALLOWED_MODELS_PER_KEY}) — predates the cap, kept as-is. ` +
+            `Re-issue the key to trim, or ignore if intentional.`,
+        );
+      }
     }
     return parsed;
   } catch (e: unknown) {
@@ -318,6 +352,12 @@ export const createApiKeyStore = (params: {
         ? [...options.allowedModels]
         : undefined;
       if (capturedAllowed) {
+        if (capturedAllowed.length > MAX_ALLOWED_MODELS_PER_KEY) {
+          throw InvalidRequest(
+            `allowedModels too many entries (${capturedAllowed.length} > ${MAX_ALLOWED_MODELS_PER_KEY})`,
+            'allowed_models_too_many',
+          );
+        }
         try {
           for (const p of capturedAllowed) assertValidModelPattern(p);
         } catch (e: unknown) {
@@ -413,6 +453,12 @@ export const createApiKeyStore = (params: {
         patchedAllowed !== null &&
         patchedAllowed.length > 0
       ) {
+        if (patchedAllowed.length > MAX_ALLOWED_MODELS_PER_KEY) {
+          throw InvalidRequest(
+            `allowedModels too many entries (${patchedAllowed.length} > ${MAX_ALLOWED_MODELS_PER_KEY})`,
+            'allowed_models_too_many',
+          );
+        }
         try {
           for (const p of patchedAllowed) assertValidModelPattern(p);
         } catch (e: unknown) {
