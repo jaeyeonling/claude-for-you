@@ -6,6 +6,15 @@ import type { BillingMonitorSnapshot } from '../usage/billing-monitor.js';
 import type { GlobalGuardSnapshot } from '../usage/global.js';
 import type { TestKind, TestResult } from './test-runners.js';
 
+// Display-hint imports: these constants are read ONLY to populate UI label
+// text. Primary enforcement lives in src/auth/api-key-store.ts (add/update
+// cap guards) and src/auth/model-allow.ts (assertValidModelPattern). The
+// admin renderer must NOT pre-validate input against these — let the server
+// gate be the single source of truth, otherwise a future cap change in one
+// place silently diverges from the other.
+import { MAX_ALLOWED_MODELS_PER_KEY } from '../auth/api-key-store.js';
+import { MAX_MODEL_PATTERN_LENGTH } from '../auth/model-allow.js';
+
 /**
  * Pure renderer for the /admin dashboard.
  *
@@ -103,6 +112,8 @@ form{display:inline}
 form.stack{display:flex;flex-direction:column;gap:.5rem;margin-top:.7rem}
 form.stack label{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
 form.stack input[type=text],form.stack input[type=password],form.stack input[type=url]{font-family:inherit;font-size:.8rem;padding:.4rem .55rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;width:100%}
+form.stack input[readonly]{background:var(--surface);color:var(--muted);cursor:not-allowed;border-style:dashed}
+form.stack input[readonly]::placeholder{color:var(--muted)}
 form.stack input:focus{outline:none;border-color:var(--accent)}
 form.stack button{align-self:flex-start;margin-top:.2rem}
 code{background:oklch(28% 0 0 / 0.5);padding:.05rem .35rem;border-radius:2px;font-size:.78rem;word-break:break-all}
@@ -331,7 +342,7 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     <form class="stack" action="/admin/keys" method="post">
       <label for="newkey-name">name <span class="tag">(no spaces/colons/commas)</span></label>
       <input id="newkey-name" type="text" name="name" required minlength="1" autocomplete="off">
-      <label for="newkey-models">allowedModels <span class="tag">(optional, comma-separated; empty = no restriction)</span></label>
+      <label for="newkey-models">allowedModels <span class="tag">(optional, comma-separated; empty = no restriction; max ${MAX_ALLOWED_MODELS_PER_KEY} entries, each pattern ≤${MAX_MODEL_PATTERN_LENGTH} chars)</span></label>
       <input id="newkey-models" type="text" name="allowedModels" placeholder="claude-haiku-*, claude-sonnet-4-6" autocomplete="off">
       <button type="submit">issue key</button>
     </form>
@@ -344,7 +355,7 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     if (editable.length === 0) {
       return `<section>
     <h2>edit api key</h2>
-    <p class="tag">No file-issued keys to edit. Env-baked keys cannot be modified here — change <code>API_KEYS</code> and redeploy instead.</p>
+    <p class="tag">No file-issued keys to edit. Env-baked keys cannot be modified here — change <code>API_KEYS</code> (format: <code>name1:key1,name2:key2</code>) and restart the proxy so the new env is read (Docker Compose: <code>docker compose restart app</code> · systemd: <code>systemctl restart claude-for-you</code> · Kubernetes: <code>kubectl rollout restart deploy/claude-for-you</code> · bare bun: restart the process). To avoid env redeploys, set <code>API_KEYS_PATH</code> and issue file-backed keys via the form above. See <a href="https://github.com/jaeyeonling/claude-for-you/blob/main/docs/user-guide.md#api-keys" style="color:var(--accent)">docs/user-guide.md</a> for the full key layout.</p>
   </section>`;
     }
     const editOptions = editable
@@ -358,13 +369,19 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     return `<section>
     <h2>edit api key</h2>
     <p class="tag">Rename or change <code>allowedModels</code> on a file-issued key. An empty <code>allowedModels</code> field removes the restriction (any model allowed).</p>
-    <noscript><p class="tag" style="color:var(--bad)">⚠ JavaScript is required to edit keys safely — the selector and prefilled inputs stay in sync via JS. Enable JS or edit <code>api-keys.json</code> on disk directly.</p></noscript>
+    <noscript><p class="tag" style="color:var(--bad)">⚠ JavaScript is required to edit keys safely — the selector and prefilled inputs stay in sync via JS. Enable JS, or edit the keystore file on disk directly (path = whatever <code>API_KEYS_PATH</code> points to; no default — operator-supplied).</p></noscript>
     <form id="edit-key-form" class="stack" action="/admin/keys/${esc(first.name)}/update" method="post">
       <label for="edit-key-target">key</label>
       <select id="edit-key-target" style="${selectStyle}">${editOptions}</select>
-      <label for="edit-key-name">name <span class="tag">(rename — keep current to leave unchanged)</span></label>
-      <input id="edit-key-name" type="text" name="name" value="${esc(first.name)}" autocomplete="off">
-      <label for="edit-key-models">allowedModels <span class="tag">(comma-separated; empty = no restriction)</span></label>
+      <label for="edit-key-name">name <span class="tag">(locked — tick the <strong style="color:var(--accent)">rename</strong> checkbox on the right to edit)</span></label>
+      <div style="display:flex;align-items:center;gap:.6rem">
+        <input id="edit-key-name" type="text" name="name" value="${esc(first.name)}" autocomplete="off" readonly style="flex:1">
+        <label style="display:flex;align-items:center;gap:.3rem;font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;cursor:pointer">
+          <input id="edit-key-rename-toggle" type="checkbox" style="margin:0">
+          rename
+        </label>
+      </div>
+      <label for="edit-key-models">allowedModels <span class="tag">(comma-separated; empty = no restriction; max ${MAX_ALLOWED_MODELS_PER_KEY} entries, each pattern ≤${MAX_MODEL_PATTERN_LENGTH} chars)</span></label>
       <input id="edit-key-models" type="text" name="allowedModels" value="${esc(firstModels)}" placeholder="claude-haiku-*, claude-sonnet-4-6" autocomplete="off">
       <div style="display:flex;align-items:center;gap:.6rem">
         <button id="edit-key-save" type="submit" disabled>save</button>
@@ -595,15 +612,66 @@ const LIVE_SCRIPT = `
   const editModels = document.getElementById('edit-key-models');
   const editSave = document.getElementById('edit-key-save');
   const editStatus = document.getElementById('edit-key-status');
-  // Null-prototype object so a (hypothetical, server-side rejected) key name
-  // of '__proto__' / 'constructor' cannot pollute the lookup map.
-  let editMeta = Object.create(null);
-  let editMetaReady = false;
+  const renameToggle = document.getElementById('edit-key-rename-toggle');
+  // setEditStatus is defined here (not below) because the rename-toggle
+  // init block calls it for the missing-element diagnostic. Keeping the
+  // helper close to its element grant also makes the dependency obvious.
   const setEditStatus = (text, color) => {
     if (!editStatus) return;
     editStatus.textContent = text;
     editStatus.style.color = color || 'var(--muted)';
   };
+  // Rename safety: name field stays readonly by default so a misclick or
+  // tab-and-type on the prefilled value can't trigger an accidental rename.
+  // Operator opts in via the checkbox. We also reset the toggle whenever
+  // the selection changes — selecting a different key shouldn't carry over
+  // the "rename" intent from the previous one.
+  //
+  // Pristine value is captured per-selection so unchecking the toggle
+  // restores the input to whatever applyEditSelection() last wrote. Without
+  // this, an operator who toggles rename → edits → unchecks ends up with
+  // the readonly attribute restored but the edited string still in value,
+  // so submit silently performs the rename they thought they cancelled.
+  let editNamePristine = editName ? editName.value : '';
+  const setRenameUnlocked = (unlocked) => {
+    if (!editName) return;
+    if (unlocked) {
+      editNamePristine = editName.value;
+      editName.removeAttribute('readonly');
+    } else {
+      editName.setAttribute('readonly', '');
+      editName.value = editNamePristine;
+    }
+  };
+  if (renameToggle && editName) {
+    setRenameUnlocked(false);
+    renameToggle.addEventListener('change', () => {
+      setRenameUnlocked(renameToggle.checked);
+      if (renameToggle.checked) editName.focus();
+    });
+  } else if (editName && !renameToggle) {
+    // DOM is missing the rename toggle but the readonly input is present —
+    // a silent failure (operator clicks an inert name field with no
+    // checkbox in sight) is worse than a loud one. Surface a visible
+    // diagnostic via the existing edit-key-status span so the operator
+    // knows the form is degraded rather than blaming the network.
+    setEditStatus(
+      '⚠ rename UI is wired but the toggle element is missing — name field will stay readonly. Reload the page; if the issue persists, the admin template is out of sync.',
+      'var(--bad)',
+    );
+  }
+  // The mirror case (renameToggle present, editName missing) is deliberately
+  // silent: setRenameUnlocked has an early-return guard on the missing
+  // element so the toggle becomes a noop, with no input to display a
+  // diagnostic next to.
+  // The edit form renders only when at least one file key exists, so this
+  // branch can only fire if the template is structurally inconsistent —
+  // worth surfacing in a future structural check, but no operator
+  // recovery action exists here.
+  // Null-prototype object so a (hypothetical, server-side rejected) key name
+  // of '__proto__' / 'constructor' cannot pollute the lookup map.
+  let editMeta = Object.create(null);
+  let editMetaReady = false;
   const refreshEditMeta = () => {
     setEditStatus('loading key data…', 'var(--muted)');
     return fetch('/admin/keys', { credentials: 'same-origin', headers: { accept: 'application/json' } })
@@ -659,6 +727,10 @@ const LIVE_SCRIPT = `
       // selection landing on a key that was externally renamed/revoked doesn't
       // prefill stale values from the cached map.
       if (editSave) editSave.disabled = true;
+      // Reset rename intent on selection change — operator picking a
+      // different key shouldn't inherit the previous row's "rename" state.
+      if (renameToggle && renameToggle.checked) renameToggle.checked = false;
+      setRenameUnlocked(false);
       refreshEditMeta().then(applyEditSelection);
     });
     refreshEditMeta().then(applyEditSelection);
@@ -705,8 +777,25 @@ const LIVE_SCRIPT = `
         // Keep the edit-key select + prefill in sync after any /admin/keys
         // mutation (create / update). Revoke goes through a different form
         // that submits with a full reload, so no refresh needed there.
+        //
+        // Submit-success reset for the rename toggle (chaos persona round 2):
+        // a successful update leaves the toggle ON with pristine = the OLD
+        // name. Later toggle-OFF would visually undo the rename just
+        // confirmed. We reset *inside* the refresh chain so pristine is
+        // synced to the freshly-fetched value before the toggle re-locks
+        // — avoids a flash of the old name during the lock animation.
+        // Failed updates intentionally leave the toggle ON so the operator
+        // can fix and retry without re-checking it.
+        const isUpdate =
+          form.action.includes('/admin/keys/') && form.action.endsWith('/update');
         if (form.action.includes('/admin/keys')) {
-          refreshEditMeta().then(applyEditSelection);
+          refreshEditMeta().then(() => {
+            applyEditSelection();
+            if (res.ok && isUpdate && renameToggle && renameToggle.checked) {
+              renameToggle.checked = false;
+              setRenameUnlocked(false);
+            }
+          });
         }
       })
       .catch((err) => {

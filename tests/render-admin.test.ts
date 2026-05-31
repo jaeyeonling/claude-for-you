@@ -4,6 +4,8 @@ import {
   renderLiveSections,
   type AdminPageSnapshot,
 } from '../src/admin/render.js';
+import { MAX_ALLOWED_MODELS_PER_KEY } from '../src/auth/api-key-store.js';
+import { MAX_MODEL_PATTERN_LENGTH } from '../src/auth/model-allow.js';
 
 const baseSnap = (overrides: Partial<AdminPageSnapshot> = {}): AdminPageSnapshot => ({
   poolSnap: {
@@ -283,6 +285,204 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     // don't blow away the typed values via a full page nav.
     expect(html).toContain("/admin/keys/'");
     expect(html).toContain("endsWith('/update')");
+  });
+
+  test('edit-key name field is readonly by default with rename toggle', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Rename safety: prefilled name input must start with `readonly` so a
+    // misclick can't trigger an accidental rename. The toggle next to it
+    // unlocks the field when the operator explicitly opts in.
+    expect(html).toMatch(/id="edit-key-name"[^>]*readonly/);
+    expect(html).toContain('id="edit-key-rename-toggle"');
+    // Label hints at the gating mechanism so a noscript / first-time
+    // operator immediately understands why the field looks disabled. The
+    // explicit "tick the rename checkbox" wording (with accent-colored
+    // emphasis) replaced the original muted hint after round 2 first-timer
+    // feedback that readonly looked identical to disabled.
+    expect(html).toMatch(/tick the .+rename.+ checkbox on the right to edit/);
+  });
+
+  test('issue + edit forms surface allowedModels caps in label hints', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Hint wording is derived dynamically from the imported source-of-truth
+    // constants — if either cap changes in src/auth/*, this test fires only
+    // when the rendered UI fails to track it. The literal "50/128" is not
+    // baked into the assertion.
+    const expectedHint = `max ${MAX_ALLOWED_MODELS_PER_KEY} entries, each pattern ≤${MAX_MODEL_PATTERN_LENGTH} chars`;
+    expect(html).toContain(expectedHint);
+    // Exactly two occurrences: issue form + edit form. `toBe(2)` (not `>=`)
+    // catches both omission and accidental triplication.
+    const escaped = expectedHint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const matches = html.match(new RegExp(escaped, 'g')) ?? [];
+    expect(matches.length).toBe(2);
+  });
+
+  test('readonly inputs render with visual differentiation (CSS rule present)', () => {
+    const html = renderAdminHtml(baseSnap());
+    // First-timer persona: a bare readonly input looks identical to a
+    // disabled input, so operators waste time wondering why the field
+    // refuses focus. The CSS rule below changes background + cursor +
+    // border-style so readonly state is visibly different from the normal
+    // editable state AND from a disabled-forever state (dashed border is
+    // the universal "this is unlockable, just not right now" affordance).
+    expect(html).toContain('form.stack input[readonly]');
+    expect(html).toContain('cursor:not-allowed');
+    expect(html).toContain('border-style:dashed');
+  });
+
+  test('edit-key name label cues the rename checkbox explicitly', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // First-timer round 2: the previous "(readonly — check rename to edit)"
+    // hint sat in muted tag text next to a muted-styled input, which a
+    // first-time operator scanned as "disabled" and never noticed the
+    // checkbox. Highlight `rename` in accent color so the label visually
+    // points at the unlock control.
+    expect(html).toContain('tick the <strong style="color:var(--accent)">rename</strong>');
+  });
+
+  test('env-only fallback names the redeploy command for the major orchestrators', () => {
+    const html = renderAdminHtml(baseSnap({ apiKeyRows: [] }));
+    // First-timer round 2: "bare metal" alone left K8s / systemd operators
+    // stranded. Surface concrete commands for each common deployment shape
+    // so the operator can copy-paste without context switching to docs.
+    expect(html).toContain('docker compose restart app');
+    expect(html).toContain('systemctl restart claude-for-you');
+    expect(html).toContain('kubectl rollout restart deploy/claude-for-you');
+  });
+
+  test('rename toggle setter restores pristine value when unchecked', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Adversary persona finding (PR #29 round 1): unchecking the rename
+    // toggle restored the readonly attribute but kept the edited value, so
+    // submit silently performed the rename the operator thought they
+    // cancelled. The setter now snapshots pristine on unlock and restores
+    // it on re-lock.
+    expect(html).toContain('editNamePristine');
+    expect(html).toMatch(/editName\.value = editNamePristine/);
+  });
+
+  test('rename toggle resets after a successful update PATCH submit', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Chaos persona round 2: after a successful rename PATCH the toggle
+    // stayed checked with pristine = the OLD name. A subsequent toggle-OFF
+    // would visually undo the rename just confirmed. The reset must happen
+    // INSIDE the refresh chain so pristine syncs to the new name first.
+    expect(html).toMatch(/refreshEditMeta\(\)\.then\(\s*\(\)\s*=>/);
+    expect(html).toContain('renameToggle.checked = false');
+    expect(html).toContain('setRenameUnlocked(false)');
+  });
+
+  test('rename toggle missing element surfaces visible diagnostic', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Chaos persona finding (PR #29 round 1): a missing rename-toggle DOM
+    // element would otherwise silently leave name readonly forever with no
+    // operator-visible signal. The fallback branch surfaces a status-span
+    // diagnostic so the operator can take action instead of fighting a
+    // mysteriously inert input.
+    expect(html).toContain('rename UI is wired but the toggle element is missing');
+  });
+
+  test('env-only guidance mentions a concrete redeploy command', () => {
+    const html = renderAdminHtml(baseSnap({ apiKeyRows: [] }));
+    // First-timer persona: "redeploy instead" left operators stuck on the
+    // next step. We now name `docker compose restart app` for the common
+    // case and acknowledge bare-metal restart as the alternative.
+    expect(html).toContain('docker compose restart app');
+  });
+
+  test('env-only-keys section names the env format and links to user-guide', () => {
+    const html = renderAdminHtml(baseSnap({ apiKeyRows: [] }));
+    // With no file keys, the edit section degrades to operator guidance.
+    // It must (a) show the API_KEYS format so an operator who only has
+    // env-baked keys can configure new ones without grep, and (b) link to
+    // the user guide for the full layout.
+    expect(html).toContain('name1:key1,name2:key2');
+    expect(html).toContain('docs/user-guide.md');
+  });
+
+  test('noscript fallback mentions API_KEYS_PATH instead of bare filename', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // A noscript operator can't use the inline JS edit flow. The fallback
+    // points them at the env var that defines the file path rather than a
+    // bare filename — operators may run the proxy with a custom path.
+    expect(html).toContain('API_KEYS_PATH');
   });
 
   test('edit-api-key Save button starts disabled and noscript warns', () => {

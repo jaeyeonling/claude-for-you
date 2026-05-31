@@ -48,6 +48,10 @@ const MIN_KEY_LENGTH = 16;
  * `loadFile` for the boot-time warning that surfaces them to the operator.
  * This keeps an upgrade from crash-looping any legacy deployment.
  */
+// CAP-DOCS: this value is referenced verbatim in README.md and README.ko.md
+// (search those files for "CAP-DOCS"). UI labels auto-update via render.ts
+// import, but the README curl snippets do not — adjust both READMEs when
+// changing this number.
 export const MAX_ALLOWED_MODELS_PER_KEY = 50;
 
 /**
