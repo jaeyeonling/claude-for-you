@@ -112,7 +112,8 @@ form{display:inline}
 form.stack{display:flex;flex-direction:column;gap:.5rem;margin-top:.7rem}
 form.stack label{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
 form.stack input[type=text],form.stack input[type=password],form.stack input[type=url]{font-family:inherit;font-size:.8rem;padding:.4rem .55rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;width:100%}
-form.stack input[readonly]{background:var(--surface);color:var(--muted);cursor:not-allowed}
+form.stack input[readonly]{background:var(--surface);color:var(--muted);cursor:not-allowed;border-style:dashed}
+form.stack input[readonly]::placeholder{color:var(--muted)}
 form.stack input:focus{outline:none;border-color:var(--accent)}
 form.stack button{align-self:flex-start;margin-top:.2rem}
 code{background:oklch(28% 0 0 / 0.5);padding:.05rem .35rem;border-radius:2px;font-size:.78rem;word-break:break-all}
@@ -354,7 +355,7 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     if (editable.length === 0) {
       return `<section>
     <h2>edit api key</h2>
-    <p class="tag">No file-issued keys to edit. Env-baked keys cannot be modified here — change <code>API_KEYS</code> (format: <code>name1:key1,name2:key2</code>) and redeploy (Docker Compose: <code>docker compose restart app</code>; bare metal: restart the proxy process). To issue editable keys instead, set <code>API_KEYS_PATH</code> and use the form above. See <a href="https://github.com/jaeyeonling/claude-for-you/blob/main/docs/user-guide.md#api-keys" style="color:var(--accent)">docs/user-guide.md</a> for the full key layout.</p>
+    <p class="tag">No file-issued keys to edit. Env-baked keys cannot be modified here — change <code>API_KEYS</code> (format: <code>name1:key1,name2:key2</code>) and restart the proxy so the new env is read (Docker Compose: <code>docker compose restart app</code> · systemd: <code>systemctl restart claude-for-you</code> · Kubernetes: <code>kubectl rollout restart deploy/claude-for-you</code> · bare bun: restart the process). To avoid env redeploys, set <code>API_KEYS_PATH</code> and issue file-backed keys via the form above. See <a href="https://github.com/jaeyeonling/claude-for-you/blob/main/docs/user-guide.md#api-keys" style="color:var(--accent)">docs/user-guide.md</a> for the full key layout.</p>
   </section>`;
     }
     const editOptions = editable
@@ -372,7 +373,7 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
     <form id="edit-key-form" class="stack" action="/admin/keys/${esc(first.name)}/update" method="post">
       <label for="edit-key-target">key</label>
       <select id="edit-key-target" style="${selectStyle}">${editOptions}</select>
-      <label for="edit-key-name">name <span class="tag">(readonly — check "rename" to edit)</span></label>
+      <label for="edit-key-name">name <span class="tag">(locked — tick the <strong style="color:var(--accent)">rename</strong> checkbox on the right to edit)</span></label>
       <div style="display:flex;align-items:center;gap:.6rem">
         <input id="edit-key-name" type="text" name="name" value="${esc(first.name)}" autocomplete="off" readonly style="flex:1">
         <label style="display:flex;align-items:center;gap:.3rem;font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;cursor:pointer">
@@ -659,6 +660,14 @@ const LIVE_SCRIPT = `
       'var(--bad)',
     );
   }
+  // The mirror case (renameToggle present, editName missing) is deliberately
+  // silent: setRenameUnlocked has an early-return guard on the missing
+  // element so the toggle becomes a noop, with no input to display a
+  // diagnostic next to.
+  // The edit form renders only when at least one file key exists, so this
+  // branch can only fire if the template is structurally inconsistent —
+  // worth surfacing in a future structural check, but no operator
+  // recovery action exists here.
   // Null-prototype object so a (hypothetical, server-side rejected) key name
   // of '__proto__' / 'constructor' cannot pollute the lookup map.
   let editMeta = Object.create(null);
@@ -768,8 +777,25 @@ const LIVE_SCRIPT = `
         // Keep the edit-key select + prefill in sync after any /admin/keys
         // mutation (create / update). Revoke goes through a different form
         // that submits with a full reload, so no refresh needed there.
+        //
+        // Submit-success reset for the rename toggle (chaos persona round 2):
+        // a successful update leaves the toggle ON with pristine = the OLD
+        // name. Later toggle-OFF would visually undo the rename just
+        // confirmed. We reset *inside* the refresh chain so pristine is
+        // synced to the freshly-fetched value before the toggle re-locks
+        // — avoids a flash of the old name during the lock animation.
+        // Failed updates intentionally leave the toggle ON so the operator
+        // can fix and retry without re-checking it.
+        const isUpdate =
+          form.action.includes('/admin/keys/') && form.action.endsWith('/update');
         if (form.action.includes('/admin/keys')) {
-          refreshEditMeta().then(applyEditSelection);
+          refreshEditMeta().then(() => {
+            applyEditSelection();
+            if (res.ok && isUpdate && renameToggle && renameToggle.checked) {
+              renameToggle.checked = false;
+              setRenameUnlocked(false);
+            }
+          });
         }
       })
       .catch((err) => {

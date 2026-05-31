@@ -41,6 +41,11 @@ export const isModelAllowed = (
  * from a legitimate operator (grep `[admin]` lines in proxy stdout / docker
  * logs — there is no dedicated metric, see issue #24 follow-up for adding
  * one if this becomes load-bearing).
+ *
+ * CAP-DOCS: this value is referenced verbatim in README.md and README.ko.md
+ * (search those files for "CAP-DOCS"). UI labels auto-update via render.ts
+ * import, but the README curl snippets do not — adjust both READMEs when
+ * changing this number.
  */
 export const MAX_MODEL_PATTERN_LENGTH = 128;
 

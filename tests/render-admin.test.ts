@@ -306,8 +306,11 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     expect(html).toMatch(/id="edit-key-name"[^>]*readonly/);
     expect(html).toContain('id="edit-key-rename-toggle"');
     // Label hints at the gating mechanism so a noscript / first-time
-    // operator immediately understands why the field looks disabled.
-    expect(html).toMatch(/readonly — check "rename" to edit/);
+    // operator immediately understands why the field looks disabled. The
+    // explicit "tick the rename checkbox" wording (with accent-colored
+    // emphasis) replaced the original muted hint after round 2 first-timer
+    // feedback that readonly looked identical to disabled.
+    expect(html).toMatch(/tick the .+rename.+ checkbox on the right to edit/);
   });
 
   test('issue + edit forms surface allowedModels caps in label hints', () => {
@@ -340,10 +343,44 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     const html = renderAdminHtml(baseSnap());
     // First-timer persona: a bare readonly input looks identical to a
     // disabled input, so operators waste time wondering why the field
-    // refuses focus. The CSS rule below changes background + cursor so
-    // readonly state is visibly different from the normal editable state.
+    // refuses focus. The CSS rule below changes background + cursor +
+    // border-style so readonly state is visibly different from the normal
+    // editable state AND from a disabled-forever state (dashed border is
+    // the universal "this is unlockable, just not right now" affordance).
     expect(html).toContain('form.stack input[readonly]');
     expect(html).toContain('cursor:not-allowed');
+    expect(html).toContain('border-style:dashed');
+  });
+
+  test('edit-key name label cues the rename checkbox explicitly', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // First-timer round 2: the previous "(readonly — check rename to edit)"
+    // hint sat in muted tag text next to a muted-styled input, which a
+    // first-time operator scanned as "disabled" and never noticed the
+    // checkbox. Highlight `rename` in accent color so the label visually
+    // points at the unlock control.
+    expect(html).toContain('tick the <strong style="color:var(--accent)">rename</strong>');
+  });
+
+  test('env-only fallback names the redeploy command for the major orchestrators', () => {
+    const html = renderAdminHtml(baseSnap({ apiKeyRows: [] }));
+    // First-timer round 2: "bare metal" alone left K8s / systemd operators
+    // stranded. Surface concrete commands for each common deployment shape
+    // so the operator can copy-paste without context switching to docs.
+    expect(html).toContain('docker compose restart app');
+    expect(html).toContain('systemctl restart claude-for-you');
+    expect(html).toContain('kubectl rollout restart deploy/claude-for-you');
   });
 
   test('rename toggle setter restores pristine value when unchecked', () => {
@@ -366,6 +403,28 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     // it on re-lock.
     expect(html).toContain('editNamePristine');
     expect(html).toMatch(/editName\.value = editNamePristine/);
+  });
+
+  test('rename toggle resets after a successful update PATCH submit', () => {
+    const html = renderAdminHtml(
+      baseSnap({
+        apiKeyRows: [
+          {
+            name: 'bob',
+            source: 'file',
+            key: 'longkey0123456789longkey0123456789',
+            createdAt: '2026-05-30T00:00:00Z',
+          },
+        ],
+      }),
+    );
+    // Chaos persona round 2: after a successful rename PATCH the toggle
+    // stayed checked with pristine = the OLD name. A subsequent toggle-OFF
+    // would visually undo the rename just confirmed. The reset must happen
+    // INSIDE the refresh chain so pristine syncs to the new name first.
+    expect(html).toMatch(/refreshEditMeta\(\)\.then\(\s*\(\)\s*=>/);
+    expect(html).toContain('renameToggle.checked = false');
+    expect(html).toContain('setRenameUnlocked(false)');
   });
 
   test('rename toggle missing element surfaces visible diagnostic', () => {
