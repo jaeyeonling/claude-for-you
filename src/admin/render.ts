@@ -489,14 +489,53 @@ const LIVE_SCRIPT = `
     if (payload.error && typeof payload.error === 'object') {
       slot.style.background = 'oklch(70% 0.22 25 / 0.2)';
       slot.style.color = 'var(--bad)';
-      const base = '✗ ' + (payload.error.type || 'error') + ': ' + (payload.error.message || '');
+      // Defensive sanitization is asymmetric: only the error branch runs
+      // safeText. The key-issuance and key-update branches render values
+      // (payload.name, payload.allowedModels) that the operator just typed —
+      // they're round-tripped, not relayed. The error branch is the only
+      // path where upstream text (500-body, proxy-relayed message) can reach
+      // textContent verbatim.
+      //
+      // textContent already escapes HTML, but copy-paste from an error toast
+      // into a terminal would carry control chars / bidi overrides. We strip
+      // those while preserving legible Unicode (Korean etc) and \\t \\n \\r so
+      // multi-line stack traces stay readable when an upstream relays them.
+      const safeText = (s, max) => {
+        if (typeof s !== 'string') return '';
+        // \\p{Cf} covers zero-width, bidi-override, BOM (no need to list
+        // U+200B-200F / U+202A-202E / U+2060-2069 / U+FEFF separately).
+        // \\p{Co}/\\p{Cs} drop private-use and lone surrogates. We explicitly
+        // strip C0 controls except \\t \\n \\r and the C1 range — narrower than
+        // a blanket \\p{C} which would also remove \\t/\\n.
+        const cleaned = s.replace(
+          /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F\\p{Cf}\\p{Co}\\p{Cs}]/gu,
+          ''
+        );
+        // Codepoint-aware slice so an emoji at the cap boundary doesn't get
+        // sliced inside its surrogate pair, leaving a lone surrogate that
+        // would render as a replacement char in the terminal.
+        const cps = Array.from(cleaned);
+        return cps.length > max ? cps.slice(0, max).join('') + '…' : cleaned;
+      };
+      // Two failure modes collapse to the same 'error' fallback, which is
+      // intentional — both leave the operator with no actionable type code,
+      // and admin UI's /admin/messages link is the recovery path either way.
+      // The guard is explicit so a future change to safeText's empty-string
+      // behavior cannot silently move this boundary.
+      const sanitizedType =
+        typeof payload.error.type === 'string'
+          ? safeText(payload.error.type, 40)
+          : '';
+      const type = sanitizedType === '' ? 'error' : sanitizedType;
+      const message = safeText(payload.error.message, 200);
+      const base = message ? '✗ ' + type + ': ' + message : '✗ ' + type;
       // key_not_found on a PATCH is almost always a lost-race outcome: a
       // concurrent edit renamed (or revoked) the row between the operator
       // loading the form and submitting it. Surface the operator-facing
       // recovery action explicitly — otherwise the message reads like the
       // key was destroyed.
       const hint =
-        payload.error.type === 'key_not_found'
+        type === 'key_not_found'
           ? ' — another edit may have renamed or revoked this key; reload and retry'
           : '';
       slot.textContent = base + hint;

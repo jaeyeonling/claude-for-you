@@ -312,6 +312,36 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     expect(html).toContain("payload.kind === 'updated'");
   });
 
+  test('paintResult sanitizes server-echoed error strings before render', () => {
+    const html = renderAdminHtml(baseSnap());
+    // textContent already neutralises HTML, but the server may relay
+    // upstream-proxy text containing control chars / bidi overrides that
+    // would corrupt the operator's terminal on copy-paste. The error branch
+    // must run a length-bounded, control-stripping helper before
+    // concatenation.
+    //
+    // We assert that the sanitizer is *applied to* the values, not how it's
+    // spelled internally — that's the actual security invariant for static
+    // inspection. (Behavioral coverage requires LIVE_SCRIPT extraction to a
+    // real module so safeText can be unit-tested; tracked in issue #26.)
+    //
+    // What we CAN check statically: payload.error.type is read, safeText is
+    // called on the message path, and the rendered base uses the local
+    // `type` variable. Quote-agnostic regex so source formatting (single vs
+    // double quotes) does not break the test.
+    expect(html).toContain('payload.error.type');
+    expect(html).toMatch(/safeText\(\s*payload\.error\.message/);
+    expect(html).toMatch(/['"]✗ ['"]\s*\+\s*type\b/);
+    // Format-character class (zero-width, bidi-override, BOM) MUST be in the
+    // strip set — \\p{Cf} covers the whole family.
+    expect(html).toContain('\\p{Cf}');
+    // C0 controls must be stripped EXCEPT \\t \\n \\r so multi-line stack
+    // traces survive when an upstream relays them. The regex achieves this
+    // by listing the explicit ranges around 0x09/0x0A/0x0D.
+    expect(html).toContain('\\u0000-\\u0008');
+    expect(html).toContain('\\u000E-\\u001F');
+  });
+
   test('editMeta uses null-prototype object (prototype pollution defense)', () => {
     const html = renderAdminHtml(baseSnap());
     expect(html).toContain('Object.create(null)');

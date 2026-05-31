@@ -55,4 +55,14 @@ describe('assertValidModelPattern', () => {
     expect(() => assertValidModelPattern('claude-*-opus')).toThrow(/trailing suffix/);
     expect(() => assertValidModelPattern('*-opus')).toThrow(/trailing suffix/);
   });
+
+  test('accepts pattern at the 128-char boundary, rejects 129+', () => {
+    // Real Anthropic ids top out near 30 chars; the cap exists to keep
+    // isModelAllowed bounded on the hot auth path, not to constrain
+    // legitimate naming. A pattern just below the cap should pass.
+    const at = 'a'.repeat(128);
+    const over = 'a'.repeat(129);
+    expect(() => assertValidModelPattern(at)).not.toThrow();
+    expect(() => assertValidModelPattern(over)).toThrow(/too long/);
+  });
 });
