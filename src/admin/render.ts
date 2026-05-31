@@ -517,9 +517,16 @@ const LIVE_SCRIPT = `
         const cps = Array.from(cleaned);
         return cps.length > max ? cps.slice(0, max).join('') + '…' : cleaned;
       };
-      const rawType = payload.error.type;
-      const type =
-        (typeof rawType === 'string' && safeText(rawType, 40)) || 'error';
+      // Two failure modes collapse to the same 'error' fallback, which is
+      // intentional — both leave the operator with no actionable type code,
+      // and admin UI's /admin/messages link is the recovery path either way.
+      // The guard is explicit so a future change to safeText's empty-string
+      // behavior cannot silently move this boundary.
+      const sanitizedType =
+        typeof payload.error.type === 'string'
+          ? safeText(payload.error.type, 40)
+          : '';
+      const type = sanitizedType === '' ? 'error' : sanitizedType;
       const message = safeText(payload.error.message, 200);
       const base = message ? '✗ ' + type + ': ' + message : '✗ ' + type;
       // key_not_found on a PATCH is almost always a lost-race outcome: a

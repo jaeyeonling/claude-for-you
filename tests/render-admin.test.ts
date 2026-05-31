@@ -321,14 +321,17 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     // concatenation.
     //
     // We assert that the sanitizer is *applied to* the values, not how it's
-    // spelled internally — that's the actual security invariant. Implementation
-    // details (function name, regex form) can move without breaking this test.
-    // type may be aliased through a local (rawType etc.) — assert by data
-    // path: payload.error.type is read, then safeText runs on something that
-    // ultimately becomes `type`, and `type` reaches base/hint.
+    // spelled internally — that's the actual security invariant for static
+    // inspection. (Behavioral coverage requires LIVE_SCRIPT extraction to a
+    // real module so safeText can be unit-tested; tracked in issue #26.)
+    //
+    // What we CAN check statically: payload.error.type is read, safeText is
+    // called on the message path, and the rendered base uses the local
+    // `type` variable. Quote-agnostic regex so source formatting (single vs
+    // double quotes) does not break the test.
     expect(html).toContain('payload.error.type');
-    expect(html).toContain('safeText(payload.error.message');
-    expect(html).toMatch(/'✗ ' \+ type/);
+    expect(html).toMatch(/safeText\(\s*payload\.error\.message/);
+    expect(html).toMatch(/['"]✗ ['"]\s*\+\s*type\b/);
     // Format-character class (zero-width, bidi-override, BOM) MUST be in the
     // strip set — \\p{Cf} covers the whole family.
     expect(html).toContain('\\p{Cf}');

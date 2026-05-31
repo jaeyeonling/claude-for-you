@@ -34,8 +34,13 @@ export const isModelAllowed = (
  * Units are UTF-16 code units (`String.prototype.length`), not codepoints or
  * grapheme clusters. This is intentional — the cap exists to bound memory
  * and `startsWith` cost, both of which scale with code units, not characters.
- * Revisit when (a) Anthropic ships an id ≥ ~64 chars, or (b) admin telemetry
- * shows `invalid_model_pattern` rejections from legitimate users.
+ *
+ * Revisit when (a) Anthropic ships an id ≥ ~64 chars (check their changelog
+ * before bumping), or (b) the admin proxy logs show repeated
+ * `invalid_model_pattern` 400s with `pattern too long` in the message field
+ * from a legitimate operator (grep `[admin]` lines in proxy stdout / docker
+ * logs — there is no dedicated metric, see issue #24 follow-up for adding
+ * one if this becomes load-bearing).
  */
 const MAX_MODEL_PATTERN_LENGTH = 128;
 
