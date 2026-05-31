@@ -327,4 +327,78 @@ describe('createApiKeyStore', () => {
       expect(entry?.allowedModels).toEqual(['claude-haiku-*']);
     });
   });
+
+  describe('concurrency (issue #14)', () => {
+    // Without serialization, two writes that both read the same in-memory
+    // `file` snapshot and then `await persist(next)` end up with last-write-
+    // wins — the earlier mutation is silently lost. Each test below fires
+    // two writes via Promise.all; both must survive.
+
+    test('two updates on different keys both persist', async () => {
+      const path = join(workdir, 'api-keys.json');
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      await store.add('alice', { allowedModels: ['claude-haiku-*'] });
+      await store.add('bob', { allowedModels: ['claude-haiku-*'] });
+
+      await Promise.all([
+        store.update('alice', { allowedModels: ['claude-sonnet-*'] }),
+        store.update('bob', { allowedModels: ['claude-opus-*'] }),
+      ]);
+
+      // Re-read from disk so we exercise the persisted state, not the
+      // in-memory closure.
+      const reread = createApiKeyStore({ envKeys: [], filePath: path });
+      const alice = reread.list().find((e) => e.name === 'alice');
+      const bob = reread.list().find((e) => e.name === 'bob');
+      expect(alice?.allowedModels).toEqual(['claude-sonnet-*']);
+      expect(bob?.allowedModels).toEqual(['claude-opus-*']);
+    });
+
+    test('two updates on the same key — second sees the first and fails visibly, no silent loss', async () => {
+      const path = join(workdir, 'api-keys.json');
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      await store.add('bob');
+
+      // Two clients both think the key is "bob" and submit different patches.
+      // The mutex serializes them in submission order. The first commits a
+      // rename to "robert"; the second still references "bob" and so must
+      // observe a fresh snapshot — not the stale pre-lock one — and fail
+      // visibly with key_not_found.
+      //
+      // The point of the fix is *not* "both writes land" (impossible without
+      // a merge resolver — the second client has no idea bob was renamed).
+      // The point is "loss is surfaced to the caller as a rejection rather
+      // than silently dropped by a last-write-wins overwrite."
+      const results = await Promise.allSettled([
+        store.update('bob', { newName: 'robert' }),
+        store.update('bob', { allowedModels: ['claude-haiku-*'] }),
+      ]);
+
+      expect(results[0].status).toBe('fulfilled');
+      expect(results[1].status).toBe('rejected');
+      if (results[1].status === 'rejected') {
+        expect(String(results[1].reason)).toMatch(/not found/);
+      }
+
+      // Persisted state reflects the first (rename) write; the second was
+      // rejected before any disk mutation.
+      const reread = createApiKeyStore({ envKeys: [], filePath: path });
+      const final = reread.list().find((e) => e.name === 'robert');
+      expect(final).toBeDefined();
+      expect(final?.allowedModels).toBeUndefined();
+    });
+
+    test('concurrent add() + revoke() both land', async () => {
+      const path = join(workdir, 'api-keys.json');
+      const store = createApiKeyStore({ envKeys: [], filePath: path });
+      await store.add('alice');
+
+      await Promise.all([store.add('bob'), store.revoke('alice')]);
+
+      const reread = createApiKeyStore({ envKeys: [], filePath: path });
+      const names = reread.list().map((e) => e.name);
+      expect(names).toEqual(['bob']);
+      expect(reread.isRevoked('alice')).toBe(true);
+    });
+  });
 });
