@@ -101,7 +101,12 @@ If `/matrix` is not installed, every stage maps to a manual gh + git equivalent 
 
 ### What stays manual
 
-- `scripts/deploy.sh` — the actual EC2 roll via SSM. `/matrix-deploy` only verifies the GitHub-side workflow; the operator still runs `bash scripts/deploy.sh` locally. **Ordering matters**: run `scripts/deploy.sh` first, then `git push origin main:deploy`. If `deploy.yml` then comes back red, the EC2 instance is already on the bad commit — roll forward (`git push origin <prev-sha>:deploy` after `git reset` + `scripts/deploy.sh` on the previous SHA), don't try to "undo" the workflow.
+- `scripts/deploy.sh` — the actual EC2 roll via SSM. `/matrix-deploy` only verifies the GitHub-side workflow; the operator still runs `bash scripts/deploy.sh` locally. **Ordering matters**: run `scripts/deploy.sh` first, then `git push origin main:deploy`. If `deploy.yml` then comes back red, the EC2 instance is already on the bad commit — **roll forward** to the previous known-good SHA:
+  1. `git fetch origin && git worktree add ../rollback <prev-sha>` (or `git checkout <prev-sha>` if you don't want a worktree — but worktree keeps `main` clean)
+  2. `cd ../rollback && bash scripts/deploy.sh` — rolls EC2 back to the previous SHA via SSM
+  3. `git push origin <prev-sha>:deploy` — updates the deploy ref to match what's actually running on EC2
+
+  Don't `git reset` the deploy branch or try to "undo" the workflow — the only state that matters is what's on EC2, and `scripts/deploy.sh` is the lever for that.
 - `capture-ai-session` — call it manually post-deploy (see above).
 - Production smoke (paste payload via `/admin/test/key-invoke`, observe toast, etc.) — happens after `scripts/deploy.sh` and feeds the next iteration.
 
