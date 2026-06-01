@@ -23,3 +23,6 @@ terraform/tfplan
 captures/
 
 .env.bak
+
+# matrix workflow — per-author session files, captured to vault via capture-ai-session
+.claude/matrix-sessions/
