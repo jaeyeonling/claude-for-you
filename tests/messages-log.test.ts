@@ -259,6 +259,19 @@ describe("sanitizeJsonValue", () => {
     const out = sanitizeJsonValue(input) as Record<string, unknown>;
     expect(Object.keys(out)).toEqual(["safe"]);
   });
+
+  test("preview derived from sanitized body has no NUL (regression: PR #43 review)", () => {
+    // The `preview` TEXT column is subject to the same Postgres NUL rejection
+    // as JSONB. PG impl must derive preview from the sanitized body, not the
+    // raw entry.requestBody. This test guards that ordering.
+    const body = {
+      messages: [{ role: "user", content: `prompt with embedded ${NUL} byte` }],
+    };
+    const safe = sanitizeJsonValue(body);
+    const preview = extractPreview(safe);
+    expect(preview).not.toContain(NUL);
+    expect(preview).toContain(FFFD);
+  });
 });
 
 describe("createNullMessageLogStore", () => {

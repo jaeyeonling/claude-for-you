@@ -281,20 +281,20 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 **원인**: PostgreSQL JSONB는 underlying TEXT 컬럼이 NUL(U+0000) 바이트를 저장하지 못한다. Claude로 보내는 요청/응답 body에 NUL이 섞이면 (예: 사용자가 binary blob을 prompt에 붙여넣음, tool output에 NUL이 들어감) `sql.json(...)` 직렬화는 통과하지만 INSERT가 거부된다. 컬럼은 `TEXT`로 정의된 키도 동일하게 거부.
 
-**복구**: `src/usage/messages-log.ts:replaceNulCharactersDeep` 헬퍼가 record 호출 직전에 NUL을 U+FFFD로 치환한다. 패치(2026-06-04, PR #N) 이후로는 자동 처리. admin UI에서 ``로 보이는 글자가 곧 "원본에 NUL이 있었음" 증거.
+**복구**: `src/usage/messages-log.ts:sanitizeJsonValue` 헬퍼가 record 호출 직전에 NUL을 U+FFFD로 치환한다. 패치(2026-06-04, PR #43) 이후로는 자동 처리. admin UI에서 `�`(U+FFFD)로 보이는 글자가 곧 "원본에 NUL이 있었음" 증거. `preview` TEXT 컬럼도 sanitize된 body에서 뽑아지므로 동일하게 보호된다.
 
 **검증 절차** (운영자가 미래에 또 보이면):
 
-1. admin/messages 에서 status=400/500 + error_message에 `unsupported Unicode` 패턴 검색
+1. admin/messages 에서 status=400/500 + error_message에 `unsupported Unicode escape sequence` 패턴 검색
 2. `bun test tests/messages-log.test.ts` — sanitizer 테스트 통과 여부
 3. PG 직접 `SELECT request_body::text FROM messages_log WHERE id=...` 으로 U+FFFD 흔적 확인 (sanitize가 작동 중이면 보임)
 
-**예방**: sanitize 헬퍼는 PG-impl record()에서만 호출된다. 미래에 다른 backend(SQLite/ClickHouse)가 추가되면 해당 impl도 헬퍼를 호출해야 한다. **헬퍼를 우회하는 직접 INSERT 경로를 만들지 말 것**.
+**예방**: sanitize 헬퍼는 PG-impl record()에서만 호출된다. 미래에 다른 backend(SQLite/ClickHouse)가 추가되면 해당 impl도 헬퍼를 호출해야 한다. **헬퍼를 우회하는 직접 INSERT 경로를 만들지 말 것**. `preview` 같은 derived TEXT 컬럼도 sanitize된 결과에서 파생해야 한다 (raw body에서 추출 후 INSERT는 NUL 누수 경로).
 
 **관련 보호 장치** (같은 헬퍼에서 함께 처리):
 
 - depth > 1024 재귀 → sentinel 반환 (악의적 깊은 nested JSON으로 stack overflow 방지)
-- `__proto__` / `constructor` / `prototype` 키 → drop (prototype pollution 흔적이 DB에 남지 않게)
+- `__proto__` / `constructor` / `prototype` / `__lookupGetter__` / `__lookupSetter__` / `__defineGetter__` / `__defineSetter__` 키 → drop (prototype pollution 흔적이 DB에 남지 않게)
 
 ---
 

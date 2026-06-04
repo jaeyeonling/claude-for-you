@@ -154,7 +154,6 @@ export const createPostgresMessageLogStore = async (
 
   return Object.freeze({
     async record(entry: MessageLogRecord): Promise<void> {
-      const preview = extractPreview(entry.requestBody);
       // Strip NUL (U+0000) before handing off to JSONB. Postgres TEXT/JSONB
       // cannot store NUL and rejects the entire row with `unsupported Unicode
       // escape sequence`. Replacement is intentionally visible (U+FFFD) so
@@ -164,6 +163,10 @@ export const createPostgresMessageLogStore = async (
         entry.responseBody === null
           ? null
           : sanitizeJsonValue(entry.responseBody);
+      // Extract preview *after* sanitize. The `preview` TEXT column is subject
+      // to the same NUL rejection as JSONB, and a NUL anywhere in the last
+      // user message would otherwise leak into the column unsanitized.
+      const preview = extractPreview(safeRequestBody);
       // `as never`: postgres.js `sql.json` is typed to accept its own
       // SerializableParameter set, not `unknown`. Our sanitizer returns
       // `unknown` by contract (it operates over arbitrary JSON shapes).
