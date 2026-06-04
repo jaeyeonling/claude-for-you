@@ -11,6 +11,7 @@
 **원인**: Claude.ai OAuth의 logout은 client-side 캐시 삭제가 아니라 **server-side revoke API 호출**. 같은 토큰이 어디 박혀있든 한 번에 죽음.
 
 **복구**:
+
 1. 본인 머신에서 `claude login` 재수행
 2. Keychain에서 새 자격증명 추출:
    ```bash
@@ -30,6 +31,7 @@
 **원인**: 본인 머신 Keychain에 OAuth 토큰이 있으면 CC가 그걸 우선 사용. `ANTHROPIC_API_KEY` env가 있어도 우리 프록시로 안 감.
 
 **해결** (위에서부터 권장):
+
 - **본인 머신을 영구적으로 프록시 클라이언트로 전환** — [`docs/user-guide.md`](./user-guide.md)의 **권장 설정**(Keychain 정리 → 프록시 키를 별도 Keychain 항목으로 → `apiKeyHelper` 절대경로). 본인이 운영자 겸 사용자라면 이게 정답. 함정 #11 참고.
 - 본인 OAuth를 유지해야 하면 **별도 머신 / VM / 다른 user account**에서 검증.
 - 1회성 검증만 필요하면 임시 HOME 격리:
@@ -51,11 +53,13 @@
 **원인**: `-v` 플래그가 named volume까지 삭제.
 
 **복구**:
+
 - tokens.json: env로 다시 채우기 (OAuth env 또는 `accounts.json` 재배치)
 - usage.sqlite: 못 복구 (quota 카운트 0부터 다시)
 - api-keys.json: 못 복구 (자체 발급한 키 다 무효 — env 키만 살아남음)
 
 **예방**: 평상시 `docker compose down` 사용 (볼륨 유지). 진짜로 정리하고 싶을 때만 `-v`. 백업 먼저:
+
 ```bash
 docker run --rm -v claude-for-you_tokens:/d -v $PWD:/b alpine \
   tar czf /b/data-backup-$(date +%F).tar.gz -C /d .
@@ -70,6 +74,7 @@ docker run --rm -v claude-for-you_tokens:/d -v $PWD:/b alpine \
 **원인**: Let's Encrypt `http-01` 챌린지는 외부에서 80번 포트에 도달해야 함. EC2 보안 그룹이 80을 닫아두거나, DNS A 레코드가 아직 전파 안 됨.
 
 **복구**:
+
 1. EC2 보안 그룹에서 80, 443 모두 `0.0.0.0/0` 인바운드
 2. `dig your-domain.com` → EC2 public IP 확인
 3. DNS 전파 대기 (5~30분)
@@ -92,6 +97,7 @@ docker run --rm -v claude-for-you_tokens:/d -v $PWD:/b alpine \
 **증상**: 새 candidate snapshot이 service_tier를 깨면 `CANARY_PERCENT%`만큼의 트래픽이 종량제로 청구.
 
 **예방**:
+
 - 처음에는 5% (default 권장)
 - 며칠 모니터링 후 점진 증가 (10% → 30% → 100%)
 - 또는 candidate 통과 확인되면 그냥 promote (`docker compose restart` 안에서 100% 전환)
@@ -117,6 +123,7 @@ docker run --rm -v claude-for-you_tokens:/d -v $PWD:/b alpine \
 **원인**: CC가 새 body 필드(예: `cache_diagnosis`)를 보내고 그에 대응하는 anthropic-beta가 우리 snapshot에 없음.
 
 **복구**:
+
 1. 본인 머신에서 `bun scripts/cron-capture.sh` 실행 (또는 weekly cron)
 2. 생성된 snapshot diff 검토
 3. `cc-snapshot.candidate.json`으로 두고 canary 5%로 검증
@@ -131,6 +138,7 @@ docker run --rm -v claude-for-you_tokens:/d -v $PWD:/b alpine \
 **증상**: `git log -p`에 sk-ant-oat01-... / sk-ant-ort01-... 같은 토큰 노출.
 
 **예방**:
+
 - `.gitignore`에 `.env`, `.env.bak`, `.env.*.local` 포함 확인
 - `git status`에서 `.env`가 untracked X (ignored)
 - 실수로 commit했으면 즉시:
@@ -147,6 +155,7 @@ docker run --rm -v claude-for-you_tokens:/d -v $PWD:/b alpine \
 **증상**: 본인 행위와 무관하게 어느 날 502 `invalid_grant`. logout한 적 없는데.
 
 **원인 후보**:
+
 - 보안 이벤트 (Anthropic 측에서 의심 활동 감지)
 - TOS 위반 의심
 - Anthropic 정책 변경
@@ -183,6 +192,7 @@ docker run --rm -v claude-for-you_tokens:/d -v $PWD:/b alpine \
 OAuth가 살아 있으면서 `apiKeyHelper`/`ANTHROPIC_BASE_URL`도 프록시를 가리키는 상태 = #11 시나리오. 본인이 두 holder 역할을 동시에 하고 있는 것.
 
 **복구**:
+
 1. EC2 프록시 로그에서 사고 규모 확인:
    ```bash
    # on the proxy host
@@ -204,6 +214,7 @@ OAuth가 살아 있으면서 `apiKeyHelper`/`ANTHROPIC_BASE_URL`도 프록시를
 **현재 동작**: 클라이언트가 `context-1m-2025-08-07` 베타와 함께 1M 요청을 보내면 프록시는 그대로 forward, 본사가 200으로 응답한다 (mitmproxy로 직접 확인: 385K 입력 토큰, `service_tier: standard`).
 
 **필수 조건**:
+
 - URL: `/v1/messages?beta=true` (이게 핵심 — beta-flag 게이트가 query param에 걸려있음)
 - `anthropic-beta`에 `context-1m-2025-08-07` 포함
 - 모델 field: 평문 (`claude-sonnet-4-6`, `claude-opus-4-7` 등) — CC의 `[1m]` suffix는 클라이언트 내부 용으로만 사용되고 wire에는 plain name으로 전송
@@ -217,6 +228,7 @@ OAuth가 살아 있으면서 `apiKeyHelper`/`ANTHROPIC_BASE_URL`도 프록시를
 `static.ts:5`의 주석("`?beta=true` is required by upstream")이 정답을 가리키고 있었는데, "production이 그 URL 없이도 sonnet/opus 200K 트래픽 잘 처리하니까 주석이 outdated하다"고 잘못 기각.
 
 **검증 절차** (운영자가 미래에 또 의심 들 때):
+
 ```bash
 # 본인 머신에서 mitmproxy 캡쳐
 mitmdump --listen-port 8765 --ssl-insecure -w /tmp/flow.bin &
@@ -241,6 +253,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 **현재 동작**: `src/proxy/messages.ts`의 `ensureSystem`이 모든 호출에 대해 caller 입력에 관계없이 CC 시그니처 블록을 `system` array의 첫 블록으로 강제 prepend한다. caller가 보낸 string/array는 두 번째 이후 블록으로 그대로 보존된다 (cache_control 포함). transparent 분기는 없음 — caller가 본문에 `"You are Claude Code"`로 시작하는 텍스트를 박아 identity를 위장하는 abuse도 차단된다.
 
 **필수 조건**:
+
 - `system` array의 첫 블록은 **정확히** `"You are Claude Code, Anthropic's official CLI for Claude."` — 이 marker가 entitlement 게이트 통과 조건. Anthropic이 이 prefix를 한 글자라도 바꾸면 우리 가드가 무너지고 sonnet/opus가 다시 429로 떨어진다.
 - proxy가 박는 헤더 (`user-agent: claude-cli/...`, `anthropic-beta: claude-code-...`) 는 `src/template/static.ts:34-65`에서 클라이언트 헤더 무관하게 자체적으로 박는다. system body만 변수.
 
@@ -251,6 +264,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 **실제 원인**: Anthropic의 entitlement 검증은 **system 본문의 leading text가 CC marker로 시작하는지**를 본다. tomodachi처럼 정상 system 본문이 들어있으면 우리 가드는 `length > 0`이라 통과시키지만 upstream은 거절. 응답 type이 `rate_limit_error`라서 quota 소진으로 한 번 더 오독되기 쉬움 — 사실은 entitlement 위반의 마스킹된 시그니처.
 
 **검증 절차** (운영자가 미래에 또 의심 들 때):
+
 1. `/admin/messages` 에서 status=429 + model=claude-sonnet-4-6 필터. 같은 시간대 haiku 호출도 같이 본다.
 2. **haiku는 200, sonnet은 429 + responseBody에 `type: "rate_limit_error"`** 패턴이면 entitlement 게이트. quota 아님.
 3. message detail에서 system 본문 첫 200자가 `"You are Claude Code"`로 시작하는지 확인. 아니면 #13 함정 재발 (또는 marker 자체가 바뀌었거나).
@@ -258,6 +272,29 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 **메타 교훈**: 함정 #12와 동일 — Anthropic 응답 메시지(`rate_limit_error`)의 문자 그대로 해석에 매달리지 말 것. 같은 OAuth 토큰으로 모델만 바꿔 (sonnet vs haiku) A/B하는 게 가장 빠른 ground truth. `src/template/extracted.ts:102`에 명시된 cousin misdiagnosis(같은 함정, 다른 위치)를 한 번 더 반복한 사례.
 
 **관련**: [[project_oauth-entitlement-shape-gate]] (12, 13은 같은 메타 패턴 — 응답 메시지가 진짜 원인을 가리지 않음).
+
+---
+
+## 14. messages_log INSERT가 `unsupported Unicode escape sequence`로 거부됨 — NUL 바이트
+
+**증상**: `[messages-log] write failed: unsupported Unicode escape sequence` 가 sink로 흘러옴. 해당 요청의 admin 대시보드 row가 없음. 사용자 응답은 멀쩡 (fire-and-forget).
+
+**원인**: PostgreSQL JSONB는 underlying TEXT 컬럼이 NUL(U+0000) 바이트를 저장하지 못한다. Claude로 보내는 요청/응답 body에 NUL이 섞이면 (예: 사용자가 binary blob을 prompt에 붙여넣음, tool output에 NUL이 들어감) `sql.json(...)` 직렬화는 통과하지만 INSERT가 거부된다. 컬럼은 `TEXT`로 정의된 키도 동일하게 거부.
+
+**복구**: `src/usage/messages-log.ts:replaceNulCharactersDeep` 헬퍼가 record 호출 직전에 NUL을 U+FFFD로 치환한다. 패치(2026-06-04, PR #N) 이후로는 자동 처리. admin UI에서 ``로 보이는 글자가 곧 "원본에 NUL이 있었음" 증거.
+
+**검증 절차** (운영자가 미래에 또 보이면):
+
+1. admin/messages 에서 status=400/500 + error_message에 `unsupported Unicode` 패턴 검색
+2. `bun test tests/messages-log.test.ts` — sanitizer 테스트 통과 여부
+3. PG 직접 `SELECT request_body::text FROM messages_log WHERE id=...` 으로 U+FFFD 흔적 확인 (sanitize가 작동 중이면 보임)
+
+**예방**: sanitize 헬퍼는 PG-impl record()에서만 호출된다. 미래에 다른 backend(SQLite/ClickHouse)가 추가되면 해당 impl도 헬퍼를 호출해야 한다. **헬퍼를 우회하는 직접 INSERT 경로를 만들지 말 것**.
+
+**관련 보호 장치** (같은 헬퍼에서 함께 처리):
+
+- depth > 1024 재귀 → sentinel 반환 (악의적 깊은 nested JSON으로 stack overflow 방지)
+- `__proto__` / `constructor` / `prototype` 키 → drop (prototype pollution 흔적이 DB에 남지 않게)
 
 ---
 
