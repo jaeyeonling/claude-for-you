@@ -19,7 +19,12 @@ import { CC_SYSTEM_PREFIX } from '../proxy/messages.js';
  * diagnostics, not telemetry.
  */
 
-export type TestKind = 'oauth-probe' | 'self-ping' | 'key-invoke' | 'upstream-direct';
+export type TestKind =
+  | 'oauth-probe'
+  | 'self-ping'
+  | 'key-invoke'
+  | 'upstream-direct'
+  | 'verify-entitlement';
 
 export interface TestResult {
   readonly kind: TestKind;
@@ -43,6 +48,7 @@ export const createTestResultStore = (): TestResultStore => {
     'self-ping': null,
     'key-invoke': null,
     'upstream-direct': null,
+    'verify-entitlement': null,
   };
   return {
     record(result) {
@@ -422,6 +428,181 @@ export const createUpstreamDirectHandler =
       const reason = err instanceof Error ? err.message : String(err);
       result = {
         kind: 'upstream-direct',
+        ok: false,
+        at: Date.now(),
+        latencyMs: Date.now() - startedAt,
+        summary: `NET · ${excerpt(reason, 80)}`,
+        detail: reason,
+      };
+    }
+    store.record(result);
+    return respond(c, result);
+  };
+
+// ---------- Verify entitlement (marker drift detection) ----------
+
+/**
+ * #40: Anthropic could change the entitlement gate semantics at any time.
+ * If they do, the existing `upstream-direct` probe — which always sends
+ * `system: CC_SYSTEM_PREFIX` — keeps returning 200 OK and we lose the
+ * signal. This probe fires TWO calls back-to-back:
+ *
+ *   A) sonnet + `system: CC_SYSTEM_PREFIX`         → expected 200
+ *   B) sonnet + no system block                    → expected 429 rate_limit_error
+ *
+ * The (statusA, statusB) pair maps to one of five verdicts. Only `ok`
+ * means the marker is doing its job; `marker-drift` is the deterministic
+ * regression signal that #41 patched against.
+ */
+
+export type EntitlementVerdict =
+  | 'ok'
+  | 'marker-drift'
+  | 'account-issue'
+  | 'reversed'
+  | 'inconclusive';
+
+export interface EntitlementClassification {
+  readonly verdict: EntitlementVerdict;
+  readonly ok: boolean;
+}
+
+export const classifyEntitlement = (
+  statusA: number,
+  statusB: number,
+  errorA?: string,
+  errorB?: string,
+): EntitlementClassification => {
+  // Transport failure on either side collapses the comparison to noise.
+  // status=0 is our sentinel for "network error before HTTP status".
+  if (
+    errorA !== undefined ||
+    errorB !== undefined ||
+    statusA === 0 ||
+    statusB === 0
+  ) {
+    return { verdict: 'inconclusive', ok: false };
+  }
+  if (statusA === 200 && statusB === 429) return { verdict: 'ok', ok: true };
+  if (statusA === 200 && statusB === 200)
+    return { verdict: 'marker-drift', ok: false };
+  if (statusA === 429 && statusB === 429)
+    return { verdict: 'account-issue', ok: false };
+  if (statusA === 429 && statusB === 200)
+    return { verdict: 'reversed', ok: false };
+  // Any other status code combination (5xx, 400, …) is also inconclusive —
+  // we cannot say anything about marker effectiveness from a non-200/429 pair.
+  return { verdict: 'inconclusive', ok: false };
+};
+
+const PING_BODY_WITH_MARKER = (model: string): string =>
+  JSON.stringify({
+    model,
+    max_tokens: 16,
+    system: CC_SYSTEM_PREFIX,
+    messages: [{ role: 'user', content: 'reply with the single word: pong' }],
+  });
+
+const PING_BODY_WITHOUT_MARKER = (model: string): string =>
+  JSON.stringify({
+    model,
+    max_tokens: 16,
+    // No `system` key — this is the whole point of the probe.
+    messages: [{ role: 'user', content: 'reply with the single word: pong' }],
+  });
+
+interface DirectCallResult {
+  readonly status: number;
+  readonly bodyText: string;
+  readonly error?: string;
+}
+
+const callAnthropicDirect = async (
+  token: string,
+  body: string,
+): Promise<DirectCallResult> => {
+  try {
+    const res = await fetch(ANTHROPIC_DIRECT_URL, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+      body,
+      signal: AbortSignal.timeout(20_000),
+    });
+    return { status: res.status, bodyText: await res.text() };
+  } catch (err: unknown) {
+    return {
+      status: 0,
+      bodyText: '',
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+};
+
+export const createVerifyEntitlementHandler =
+  (pool: AccountPool, store: TestResultStore) =>
+  async (c: Context): Promise<Response> => {
+    const raw = await parseFormOrJson(c).catch(() => null);
+    const model = asString(raw?.model) || DEFAULT_MODEL;
+
+    const startedAt = Date.now();
+    let result: TestResult;
+    try {
+      const { token, name: servedBy } = await pool.getAccessToken(undefined);
+
+      // Fire both calls in parallel. Sequential would widen the time gap and
+      // let upstream state (rate-limit window boundary, account-level quota
+      // refresh) shift between A and B, which would muddy the comparison.
+      const [withMarker, withoutMarker] = await Promise.all([
+        callAnthropicDirect(token, PING_BODY_WITH_MARKER(model)),
+        callAnthropicDirect(token, PING_BODY_WITHOUT_MARKER(model)),
+      ]);
+
+      const { verdict, ok } = classifyEntitlement(
+        withMarker.status,
+        withoutMarker.status,
+        withMarker.error,
+        withoutMarker.error,
+      );
+      const latencyMs = Date.now() - startedAt;
+
+      const summarizeSide = (
+        label: 'A' | 'B',
+        kind: 'with marker' | 'without marker',
+        side: DirectCallResult,
+      ): string => {
+        const head =
+          side.error !== undefined
+            ? `${label} (${kind}): NET error="${excerpt(side.error, 120)}"`
+            : `${label} (${kind}): status=${side.status}`;
+        const body =
+          side.bodyText.length > 0 ? `\n${excerpt(side.bodyText, 240)}` : '';
+        return `${head}${body}`;
+      };
+
+      result = {
+        kind: 'verify-entitlement',
+        ok,
+        at: Date.now(),
+        latencyMs,
+        summary: `${verdict} · A=${withMarker.status || 'NET'} B=${withoutMarker.status || 'NET'} · ${latencyMs}ms · model=${model} (member=${servedBy})`,
+        detail: [
+          `verdict=${verdict} (A,B)=(${withMarker.status || 'NET'},${withoutMarker.status || 'NET'})`,
+          `latency=${latencyMs}ms member=${servedBy}`,
+          ``,
+          summarizeSide('A', 'with marker', withMarker),
+          ``,
+          summarizeSide('B', 'without marker', withoutMarker),
+        ].join('\n'),
+      };
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      result = {
+        kind: 'verify-entitlement',
         ok: false,
         at: Date.now(),
         latencyMs: Date.now() - startedAt,
