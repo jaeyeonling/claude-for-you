@@ -1,12 +1,12 @@
-import postgres from 'postgres';
+import postgres from "postgres";
 import type {
   ListFilters,
   MessageLogRecord,
   MessageLogStore,
   MessageLogSummary,
   ResponseBody,
-} from './messages-log.js';
-import { extractPreview } from './messages-log.js';
+} from "./messages-log.js";
+import { extractPreview, sanitizeJsonValue } from "./messages-log.js";
 
 /**
  * Postgres-backed MessageLogStore.
@@ -154,7 +154,23 @@ export const createPostgresMessageLogStore = async (
 
   return Object.freeze({
     async record(entry: MessageLogRecord): Promise<void> {
-      const preview = extractPreview(entry.requestBody);
+      // Strip NUL (U+0000) before handing off to JSONB. Postgres TEXT/JSONB
+      // cannot store NUL and rejects the entire row with `unsupported Unicode
+      // escape sequence`. Replacement is intentionally visible (U+FFFD) so
+      // admin operators can spot tainted payloads in the dashboard.
+      const safeRequestBody = sanitizeJsonValue(entry.requestBody);
+      const safeResponseBody =
+        entry.responseBody === null
+          ? null
+          : sanitizeJsonValue(entry.responseBody);
+      // Extract preview *after* sanitize. The `preview` TEXT column is subject
+      // to the same NUL rejection as JSONB, and a NUL anywhere in the last
+      // user message would otherwise leak into the column unsanitized.
+      const preview = extractPreview(safeRequestBody);
+      // `as never`: postgres.js `sql.json` is typed to accept its own
+      // SerializableParameter set, not `unknown`. Our sanitizer returns
+      // `unknown` by contract (it operates over arbitrary JSON shapes).
+      // The runtime contract is JSON-serializable, so the cast is sound.
       await sql`
         INSERT INTO messages_log (
           id, ts, user_name, model, status, streaming, duration_ms,
@@ -167,8 +183,8 @@ export const createPostgresMessageLogStore = async (
           ${entry.inputTokens}, ${entry.outputTokens},
           ${entry.cacheReadTokens}, ${entry.cacheCreationTokens},
           ${entry.serviceTier}, ${entry.stopReason}, ${entry.clientIp}, ${entry.userAgent},
-          ${sql.json(entry.requestBody as never)},
-          ${entry.responseBody === null ? null : sql.json(entry.responseBody as never)},
+          ${sql.json(safeRequestBody as never)},
+          ${safeResponseBody === null ? null : sql.json(safeResponseBody as never)},
           ${preview},
           ${entry.errorMessage}
         )
@@ -181,8 +197,9 @@ export const createPostgresMessageLogStore = async (
       // we avoid runtime fragment composition.
       const userName = filters.userName ?? null;
       const model = filters.model ?? null;
-      const statusClass = filters.statusClass ?? 'all';
-      const search = filters.search && filters.search.length > 0 ? filters.search : null;
+      const statusClass = filters.statusClass ?? "all";
+      const search =
+        filters.search && filters.search.length > 0 ? filters.search : null;
       const before = filters.before ?? null;
       const limit = Math.max(1, Math.min(filters.limit, 500));
 
