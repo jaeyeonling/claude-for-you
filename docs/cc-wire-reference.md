@@ -226,11 +226,30 @@ Before acting on `marker-drift`, inspect the **A body** in the result detail —
 
 Coded mitigation is deferred: observed Anthropic behavior is "non-200 status for rate-limit errors". If `classifyEntitlement` ever needs body sniffing, this section is the trigger to re-evaluate.
 
+### ⚠️ Why this probe is rare-fire — abuse signal cost
+
+Call B intentionally sends a sonnet/opus request **without** the CC identity marker. That is, by design, a request shape that a legitimate Claude.ai-OAuth client would never emit — the marker is always prepended by CC. From Anthropic's side, that is indistinguishable from probing / reconnaissance / "trying to bypass entitlement gating". The 429 we receive is not a quota hit — it is the gate refusing an unauthorized identity.
+
+Running this probe frequently means asking our own OAuth token to do that repeatedly. Plausible consequences (ordered by likelihood, not by severity):
+
+- **Per-token trust score downgrade.** The token starts looking like an anomalous client. Other calls through the same token may be subjected to stricter gates.
+- **Cool-down on the token.** Anthropic could rate-limit *other* legitimate calls from the same token for a window after a burst of marker-less requests.
+- **Abuse-monitoring alert + human review.** Anthropic security may need to be told this is a self-test, not an attempted gate bypass. Justifying the pattern after the fact is more expensive than not triggering it.
+- **Worst case: token revocation.** Low probability but non-zero — repeated automated marker-less traffic from one token over time fits no legitimate usage pattern we can think of.
+
+**Operational rule of thumb**: treat each `verify-entitlement` click like a manual rate-limit-bypass probe — because that is what it looks like from the upstream's perspective. Do not script it. Do not put it on a cron. Use the schedule below.
+
 ### When to run
 
 - **After every CC version bump.** New CC versions may carry new identity expectations that we synthesize into the snapshot but not into this invariant.
 - **Quarterly baseline.** Catches silent gate changes that don't correlate to any visible release.
 - **Before blaming the proxy for a 429 incident.** If `verify-entitlement` returns `ok` while a separate probe returns 429, the issue is account-level, not marker-level. Caveat: a verdict of `ok` can still hide an `account-issue` when A returns 200 with a `rate_limit_error` body — see the sub-case 2 in the caveat above. If `ok` and the incident persists, cross-check with `oauth-probe` or `self-ping` before treating the result as authoritative.
+
+**Do NOT**:
+
+- Bind this probe to a periodic cron job. The whole point of the cadence above is that humans decide each invocation.
+- Run it across the pool — one click probes the served pool member, which is enough signal.
+- Re-click to "double check". A single result + a follow-up `oauth-probe` or `self-ping` is more informative and costs zero abuse signal.
 
 ---
 
