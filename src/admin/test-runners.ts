@@ -460,6 +460,11 @@ export const createUpstreamDirectHandler =
         // 200 only — fetch's res.ok covers 200-299, but the entitlement /
         // direct probe is only meaningful when Anthropic returns the
         // canonical 200; 201/202/204 are not part of the upstream contract.
+        // Note: `recordPingResult` writes `res.ok && res.status === 200`
+        // because its `res` is the LOOPBACK fetch (already proxy-wrapped);
+        // here `call.status` is the RAW Anthropic status, so the redundant
+        // `res.ok` check is unnecessary — the two paths look different on
+        // purpose, not by drift.
         result = {
           kind: 'upstream-direct',
           ok: call.status === 200,
@@ -559,8 +564,13 @@ const PING_BODY_WITHOUT_MARKER = (model: string): string =>
 // models like opus 4.5 in a loop. Patterns are anchored AND tail-length
 // capped — partial matches like "claude-haiku-sonnet-something" and
 // pathological long tails ("claude-sonnet-" + 10kB of 'a') are rejected.
-// {1,40} comfortably covers known model ids (e.g. claude-sonnet-4-6-1m → 8
-// chars, claude-opus-4-7[1m] → 9) while keeping the upper bound deterministic.
+//
+// Tail length rationale: current model ids fit in ~9 chars (e.g. `4-6-1m`,
+// `4-7[1m]` → 8-9). {1,40} gives roughly 4x headroom for future naming
+// (date-stamped builds like `4-7-20261231-extended` ~22 chars still pass)
+// while keeping a hard ceiling against payload-amplification abuse. If
+// Anthropic ships an id that exceeds 40 chars, the cap is the trigger
+// for an explicit review, not silent acceptance.
 const ENTITLEMENT_MODEL_PATTERN = /^claude-(sonnet|opus)-[a-z0-9-]{1,40}$/i;
 
 export const isEntitlementModelAllowed = (model: string): boolean =>
@@ -580,12 +590,22 @@ export const createVerifyEntitlementHandler =
     const model = asString(raw?.model) || DEFAULT_MODEL;
 
     // H1 quota-abuse guard: reject anything that isn't sonnet/opus before we
-    // burn even a single upstream call. Returning 400 makes the rejection
-    // explicit to the operator instead of recording an "inconclusive" result.
+    // burn even a single upstream call. We ALSO record the rejection into
+    // TestResultStore so the admin live region surfaces "why nothing
+    // happened" — otherwise the 400 returns to the form, the SSE region
+    // stays silent, and the operator clicks again expecting different
+    // behavior (Chaos R3 finding).
     if (!isEntitlementModelAllowed(model)) {
-      throw InvalidRequest(
-        `verify-entitlement only accepts sonnet/opus models (got "${excerpt(model, 60)}"). haiku is not gated and other models would burn account quota without producing a usable verdict.`,
-      );
+      const reason = `verify-entitlement only accepts sonnet/opus models (got "${excerpt(model, 60)}"). haiku is not gated and other models would burn account quota without producing a usable verdict.`;
+      store.record({
+        kind: 'verify-entitlement',
+        ok: false,
+        at: Date.now(),
+        latencyMs: 0,
+        summary: `rejected · model "${excerpt(model, 40)}" not in allowlist`,
+        detail: `phase=model-guard\n${reason}`,
+      });
+      throw InvalidRequest(reason);
     }
 
     const startedAt = Date.now();

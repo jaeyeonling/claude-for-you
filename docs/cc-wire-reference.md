@@ -230,7 +230,7 @@ Coded mitigation is deferred: observed Anthropic behavior is "non-200 status for
 
 - **After every CC version bump.** New CC versions may carry new identity expectations that we synthesize into the snapshot but not into this invariant.
 - **Quarterly baseline.** Catches silent gate changes that don't correlate to any visible release.
-- **Before blaming the proxy for a 429 incident.** If `verify-entitlement` returns `ok` while a separate probe returns 429, the issue is account-level, not marker-level.
+- **Before blaming the proxy for a 429 incident.** If `verify-entitlement` returns `ok` while a separate probe returns 429, the issue is account-level, not marker-level. Caveat: a verdict of `ok` can still hide an `account-issue` when A returns 200 with a `rate_limit_error` body — see the sub-case 2 in the caveat above. If `ok` and the incident persists, cross-check with `oauth-probe` or `self-ping` before treating the result as authoritative.
 
 ---
 
