@@ -215,6 +215,10 @@ Result summary format: `{verdict} · A={statusA} B={statusB} · {latencyMs}ms ·
 - `reversed` — wire reference is stale. Section 2a's invariant value no longer matches what Anthropic checks. Recapture before drawing conclusions.
 - `inconclusive` — transport hiccup or unexpected status. Re-run. If it persists, treat as `account-issue` until the network stabilizes.
 
+### Caveat: 200 OK with a rate_limit_error body
+
+`classifyEntitlement` reads HTTP status only. In the (rare) case Anthropic returns `HTTP 200 OK` while the response body carries a `rate_limit_error` JSON, the verdict will be `marker-drift` (200/200) or `ok` (200/429) when the *real* state is `account-issue`. Before acting on a `marker-drift` verdict, inspect the **A body** in the result detail — if it contains `"type":"rate_limit_error"`, treat as `account-issue` and re-run after the rate-limit window resets. We did not encode this in code because the observed Anthropic behavior is "non-200 status for rate-limit errors"; if that changes, update `classifyEntitlement` to sniff the body.
+
 ### When to run
 
 - **After every CC version bump.** New CC versions may carry new identity expectations that we synthesize into the snapshot but not into this invariant.
