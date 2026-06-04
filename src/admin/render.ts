@@ -277,6 +277,7 @@ export const renderLiveSections = (s: AdminPageSnapshot): string => {
       ${renderTestResult('self-ping', s.testResults['self-ping'])}
       ${renderTestResult('key invoke', s.testResults['key-invoke'])}
       ${renderTestResult('upstream direct', s.testResults['upstream-direct'])}
+      ${renderTestResult('verify entitlement', s.testResults['verify-entitlement'])}
     </dl>
   </section>
   <section style="grid-column: 1 / -1">
@@ -334,6 +335,11 @@ const renderFormSections = (s: AdminPageSnapshot): string => {
       <label for="direct-model">upstream direct <span class="tag">(bypasses proxy template — minimal headers)</span></label>
       <input id="direct-model" type="text" name="model" placeholder="claude-sonnet-4-6" value="claude-sonnet-4-6">
       <button type="submit">call api.anthropic.com</button>
+    </form>
+    <form class="stack" action="/admin/test/verify-entitlement" method="post">
+      <label for="verify-model">verify entitlement <span class="tag">(sonnet/opus only — id form claude-(sonnet|opus)-X-Y, e.g. claude-sonnet-4-6. 2 calls compare with/without CC identity marker, see docs/cc-wire-reference.md §8)</span></label>
+      <input id="verify-model" type="text" name="model" placeholder="claude-sonnet-4-6" value="claude-sonnet-4-6">
+      <button type="submit">probe marker</button>
     </form>
   </section>
   <section>

@@ -53,6 +53,49 @@ CC sends `system` as **array of 3 text blocks** in every observed capture (none 
 
 ---
 
+## 2a. Entitlement marker invariant
+
+Section 2 above describes the `system` array that **callers** send. This section describes a separate, proxy-owned block that **we prepend** to that array before forwarding upstream. Do not conflate the two — Section 2's `x-anthropic-billing-header:` block is caller-emitted; the invariant block below is proxy-emitted.
+
+### Why this exists
+
+Anthropic's Claude.ai-OAuth-issued tokens require the upstream `system` array to start with a specific identity block when calling sonnet/opus. Without it, sonnet returns `rate_limit_error` (HTTP 429) — same response shape as a real quota hit, which is exactly what caused the 2026-06-02 misdiagnosis fixed in PR #41. haiku does not enforce this.
+
+### The invariant value
+
+`src/proxy/messages.ts`, the `CC_SYSTEM_PREFIX` constant:
+
+```
+You are Claude Code, Anthropic's official CLI for Claude.
+```
+
+`ensureSystem()` always prepends `{ type: 'text', text: CC_SYSTEM_PREFIX }` as the **first** element of the outbound `system` array, regardless of what the caller sent. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction.
+
+### Drift signature
+
+If Anthropic changes the gate (different required text, additional metadata, removed requirement, etc.), the entitlement check stops matching and sonnet/opus regress to `rate_limit_error` (429). This is **byte-identical** to a real quota error in the response body, which makes it indistinguishable in logs without the drift probe.
+
+### Drift verdict matrix
+
+The admin `verify-entitlement` probe fires two calls back-to-back against sonnet:
+
+- **A**: `system: CC_SYSTEM_PREFIX` (expected 200)
+- **B**: no `system` block (expected 429)
+
+The (statusA, statusB) pair maps to one of five verdicts:
+
+| status_A | status_B | verdict | meaning |
+|---|---|---|---|
+| 200 | 429 | `ok` | marker is gating sonnet correctly |
+| 200 | 200 | `marker-drift` | gate passes without marker — #41 regression signature |
+| 429 | 429 | `account-issue` | entitlement-orthogonal failure (quota / account state) |
+| 429 | 200 | `reversed` | signal inverted — wire reference needs recapture |
+| any other (5xx, 4xx, transport error) | — | `inconclusive` | not safe to conclude |
+
+Only `ok` sets the operator-facing `ok=true`. See Section 8 for how to run this probe.
+
+---
+
 ## 3. `body.tools` distributions
 
 Tool count varies by request:
@@ -148,6 +191,46 @@ Anthropic responses contain these wire-fidelity-relevant headers (we already for
 | `request-id` | `req_011…` |
 
 `service_tier` lives in body's `usage.service_tier`, not in headers.
+
+---
+
+## 8. Periodic entitlement verification
+
+The marker invariant in Section 2a is a hard-coded string that Anthropic could change at any time. Without periodic verification, the next drift event repeats the 2026-06-02 misdiagnosis — same 429 `rate_limit_error` shape, same look as a quota hit.
+
+### How to run
+
+1. Open `/admin`.
+2. In the **self-test** section, find the `verify entitlement` form.
+3. Optionally change the model (default `claude-sonnet-4-6`). The probe only works against models that enforce the gate — haiku will not produce a useful comparison.
+4. Click **probe marker**. The probe sends two parallel calls to `api.anthropic.com` (one with the marker, one without) and records the verdict in the live region above.
+
+### How to interpret
+
+Result summary format: `{verdict} · A={statusA} B={statusB} · {latencyMs}ms · model={model} (member={poolMember})`
+
+- `ok` — keep going. Re-run after the next CC version bump or quarterly, whichever comes first.
+- `marker-drift` — **immediate action**. The proxy's gate-passing assumption is dead. Recapture wire (`CAPTURE_MODE=true`, fresh CC session, diff against `src/template/cc-snapshot.json`), find the new identity requirement, update `CC_SYSTEM_PREFIX`.
+- `account-issue` — entitlement is fine. Check pool member health (`oauth-probe`), quota, and `anthropic-ratelimit-*` headers.
+- `reversed` — wire reference is stale. Section 2a's invariant value no longer matches what Anthropic checks. Recapture before drawing conclusions.
+- `inconclusive` — transport hiccup or unexpected status. Re-run. If it persists, treat as `account-issue` until the network stabilizes.
+
+### Caveat: 200 OK with a rate_limit_error body
+
+`classifyEntitlement` reads HTTP status only. In the (rare) case Anthropic returns `HTTP 200 OK` while the response body carries a `rate_limit_error` JSON, the recorded verdict diverges from reality. Two sub-cases:
+
+1. **Both calls 200 OK, both bodies are rate_limit_error JSON** → verdict shows `marker-drift`, real state is `account-issue`.
+2. **A returns 200 (rate_limit_error body), B returns 429** → verdict shows `ok`, real state is also `account-issue` (A's success was illusory).
+
+Before acting on `marker-drift`, inspect the **A body** in the result detail — if it contains `"type":"rate_limit_error"`, treat as `account-issue` and re-run after the rate-limit window resets. The `ok` sub-case is silently misleading; a quarterly cross-check against `oauth-probe` or `self-ping` is the practical defence.
+
+Coded mitigation is deferred: observed Anthropic behavior is "non-200 status for rate-limit errors". If `classifyEntitlement` ever needs body sniffing, this section is the trigger to re-evaluate.
+
+### When to run
+
+- **After every CC version bump.** New CC versions may carry new identity expectations that we synthesize into the snapshot but not into this invariant.
+- **Quarterly baseline.** Catches silent gate changes that don't correlate to any visible release.
+- **Before blaming the proxy for a 429 incident.** If `verify-entitlement` returns `ok` while a separate probe returns 429, the issue is account-level, not marker-level. Caveat: a verdict of `ok` can still hide an `account-issue` when A returns 200 with a `rate_limit_error` body — see the sub-case 2 in the caveat above. If `ok` and the incident persists, cross-check with `oauth-probe` or `self-ping` before treating the result as authoritative.
 
 ---
 
