@@ -63,7 +63,7 @@ Anthropic's Claude.ai-OAuth-issued tokens require the upstream `system` array to
 
 ### The invariant value
 
-`src/proxy/messages.ts:44` (`CC_SYSTEM_PREFIX`):
+`src/proxy/messages.ts`, the `CC_SYSTEM_PREFIX` constant:
 
 ```
 You are Claude Code, Anthropic's official CLI for Claude.
@@ -217,7 +217,14 @@ Result summary format: `{verdict} · A={statusA} B={statusB} · {latencyMs}ms ·
 
 ### Caveat: 200 OK with a rate_limit_error body
 
-`classifyEntitlement` reads HTTP status only. In the (rare) case Anthropic returns `HTTP 200 OK` while the response body carries a `rate_limit_error` JSON, the verdict will be `marker-drift` (200/200) or `ok` (200/429) when the *real* state is `account-issue`. Before acting on a `marker-drift` verdict, inspect the **A body** in the result detail — if it contains `"type":"rate_limit_error"`, treat as `account-issue` and re-run after the rate-limit window resets. We did not encode this in code because the observed Anthropic behavior is "non-200 status for rate-limit errors"; if that changes, update `classifyEntitlement` to sniff the body.
+`classifyEntitlement` reads HTTP status only. In the (rare) case Anthropic returns `HTTP 200 OK` while the response body carries a `rate_limit_error` JSON, the recorded verdict diverges from reality. Two sub-cases:
+
+1. **Both calls 200 OK, both bodies are rate_limit_error JSON** → verdict shows `marker-drift`, real state is `account-issue`.
+2. **A returns 200 (rate_limit_error body), B returns 429** → verdict shows `ok`, real state is also `account-issue` (A's success was illusory).
+
+Before acting on `marker-drift`, inspect the **A body** in the result detail — if it contains `"type":"rate_limit_error"`, treat as `account-issue` and re-run after the rate-limit window resets. The `ok` sub-case is silently misleading; a quarterly cross-check against `oauth-probe` or `self-ping` is the practical defence.
+
+Coded mitigation is deferred: observed Anthropic behavior is "non-200 status for rate-limit errors". If `classifyEntitlement` ever needs body sniffing, this section is the trigger to re-evaluate.
 
 ### When to run
 

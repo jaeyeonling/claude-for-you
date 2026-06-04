@@ -34,6 +34,29 @@ describe('isEntitlementModelAllowed', () => {
       false,
     );
   });
+
+  test('rejects pathological long tails (length cap)', () => {
+    // Adversary R2 finding: unlimited tail could be abused for log noise
+    // or accidental quota burn before the body-shape error returns.
+    const longTail = 'a'.repeat(100);
+    expect(isEntitlementModelAllowed(`claude-sonnet-${longTail}`)).toBe(false);
+    expect(isEntitlementModelAllowed(`claude-opus-${longTail}`)).toBe(false);
+  });
+
+  test('accepts uppercase variants under /i flag', () => {
+    // The /i flag is intentional — Anthropic could ship case-mixed ids
+    // (e.g. claude-Sonnet-4-6) in the future. Test it explicitly so the
+    // intent is not lost in a future "tighten regex" PR.
+    expect(isEntitlementModelAllowed('claude-Sonnet-4-6')).toBe(true);
+    expect(isEntitlementModelAllowed('claude-OPUS-4-7')).toBe(true);
+  });
+
+  test('accepts short tails like claude-sonnet-4', () => {
+    // Maintainer R2 finding: short single-segment tails were not covered
+    // by the original test set, leaving the pattern boundary unverified.
+    expect(isEntitlementModelAllowed('claude-sonnet-4')).toBe(true);
+    expect(isEntitlementModelAllowed('claude-opus-4')).toBe(true);
+  });
 });
 
 describe('classifyEntitlement', () => {

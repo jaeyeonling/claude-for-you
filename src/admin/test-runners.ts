@@ -7,11 +7,13 @@ import { CC_SYSTEM_PREFIX } from '../proxy/messages.js';
 /**
  * Phase 21 — admin self-test panel.
  *
- * Four operator-triggered probes, results held in-memory (last one per kind).
+ * Operator-triggered probes, results held in-memory (last one per kind).
  *
- *   POST /admin/test/oauth-probe   — forceRefresh on a pool member
- *   POST /admin/test/self-ping     — loop /v1/messages through this proxy
- *   POST /admin/test/key-invoke    — same as self-ping but with a chosen key
+ *   POST /admin/test/oauth-probe        — forceRefresh on a pool member
+ *   POST /admin/test/self-ping          — loop /v1/messages through this proxy
+ *   POST /admin/test/key-invoke         — same as self-ping but with a chosen key
+ *   POST /admin/test/upstream-direct    — bypass proxy template, call Anthropic directly
+ *   POST /admin/test/verify-entitlement — two-call drift probe (#40)
  *   (Token store inspector is render-only — see render.ts)
  *
  * Results live in `TestResultStore` and bleed into the admin live region on
@@ -423,23 +425,23 @@ export const createUpstreamDirectHandler =
 
     const startedAt = Date.now();
     let result: TestResult;
-    let tokenPhaseDone = false;
     try {
       const { token, name: servedBy } = await pool.getAccessToken(undefined);
-      tokenPhaseDone = true;
+      // callAnthropicDirect never throws (it normalises transport errors
+      // into { status:0, error }), so reaching the outer catch below
+      // unambiguously means token-fetch failed — see #40 R2.
       const call = await callAnthropicDirect(token, PING_BODY(model));
       const latencyMs = Date.now() - startedAt;
       if (call.error !== undefined) {
-        // Fetch-phase transport error. Distinguish from token-fetch failure
-        // by means of `tokenPhaseDone` — operator should know whether the
-        // pool or the network is the culprit.
+        // Fetch-phase transport error — pool gave us a token but Anthropic
+        // is unreachable.
         result = {
           kind: 'upstream-direct',
           ok: false,
           at: Date.now(),
           latencyMs,
-          summary: `NET · ${excerpt(call.error, 80)}`,
-          detail: `phase=fetch (token ok, member=${servedBy}) error=${call.error}`,
+          summary: `NET · phase=fetch · ${excerpt(call.error, 80)}`,
+          detail: `phase=fetch member=${servedBy} error=${call.error}`,
         };
       } else {
         let bodySummary: string;
@@ -455,6 +457,9 @@ export const createUpstreamDirectHandler =
           call.bodyText.length > 0
             ? `\n--- body ---\n${excerpt(call.bodyText, 600)}`
             : '';
+        // 200 only — fetch's res.ok covers 200-299, but the entitlement /
+        // direct probe is only meaningful when Anthropic returns the
+        // canonical 200; 201/202/204 are not part of the upstream contract.
         result = {
           kind: 'upstream-direct',
           ok: call.status === 200,
@@ -465,15 +470,15 @@ export const createUpstreamDirectHandler =
         };
       }
     } catch (err: unknown) {
-      // Reached only when pool.getAccessToken throws (tokenPhaseDone === false).
+      // Only reachable when pool.getAccessToken throws — see comment above.
       const reason = err instanceof Error ? err.message : String(err);
       result = {
         kind: 'upstream-direct',
         ok: false,
         at: Date.now(),
         latencyMs: Date.now() - startedAt,
-        summary: `NET · ${excerpt(reason, 80)}`,
-        detail: `phase=${tokenPhaseDone ? 'fetch' : 'token-fetch'} error=${reason}`,
+        summary: `NET · phase=token-fetch · ${excerpt(reason, 80)}`,
+        detail: `phase=token-fetch error=${reason}`,
       };
     }
     store.record(result);
@@ -551,9 +556,12 @@ const PING_BODY_WITHOUT_MARKER = (model: string): string =>
 // (haiku has no gate). Other models would produce a useless `inconclusive`
 // pair at best and burn OAuth-account quota at worst. We refuse upfront so
 // operators can't accidentally (or maliciously) point this at expensive
-// models like opus 4.5 in a loop. Patterns are anchored — partial matches
-// like "claude-haiku-sonnet-something" are rejected.
-const ENTITLEMENT_MODEL_PATTERN = /^claude-(sonnet|opus)-[a-z0-9-]+$/i;
+// models like opus 4.5 in a loop. Patterns are anchored AND tail-length
+// capped — partial matches like "claude-haiku-sonnet-something" and
+// pathological long tails ("claude-sonnet-" + 10kB of 'a') are rejected.
+// {1,40} comfortably covers known model ids (e.g. claude-sonnet-4-6-1m → 8
+// chars, claude-opus-4-7[1m] → 9) while keeping the upper bound deterministic.
+const ENTITLEMENT_MODEL_PATTERN = /^claude-(sonnet|opus)-[a-z0-9-]{1,40}$/i;
 
 export const isEntitlementModelAllowed = (model: string): boolean =>
   ENTITLEMENT_MODEL_PATTERN.test(model);
@@ -582,10 +590,11 @@ export const createVerifyEntitlementHandler =
 
     const startedAt = Date.now();
     let result: TestResult;
-    let tokenPhaseDone = false;
     try {
       const { token, name: servedBy } = await pool.getAccessToken(undefined);
-      tokenPhaseDone = true;
+      // callAnthropicDirect normalises transport errors to status=0/error
+      // so the outer catch is only reachable from pool.getAccessToken —
+      // phase=token-fetch is the only reachable label there.
 
       // Fire both calls in parallel. Sequential would widen the time gap and
       // let upstream state (rate-limit window boundary, account-level quota
@@ -636,18 +645,16 @@ export const createVerifyEntitlementHandler =
       };
     } catch (err: unknown) {
       // Reached only when pool.getAccessToken throws — fetch errors are
-      // swallowed inside callAnthropicDirect and surface as status=0/error.
-      // We tag the phase so operators can tell "OAuth pool is broken" from
-      // "Anthropic is unreachable" without grepping the proxy logs.
+      // swallowed inside callAnthropicDirect and surface as status=0/error
+      // via the verdict path. Phase is therefore unambiguous: token-fetch.
       const reason = err instanceof Error ? err.message : String(err);
-      const phase = tokenPhaseDone ? 'fetch' : 'token-fetch';
       result = {
         kind: 'verify-entitlement',
         ok: false,
         at: Date.now(),
         latencyMs: Date.now() - startedAt,
-        summary: `NET · phase=${phase} · ${excerpt(reason, 80)}`,
-        detail: `phase=${phase} error=${reason}`,
+        summary: `NET · phase=token-fetch · ${excerpt(reason, 80)}`,
+        detail: `phase=token-fetch error=${reason}`,
       };
     }
     store.record(result);
