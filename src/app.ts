@@ -17,6 +17,7 @@ import {
   createSelfPingHandler,
   createTestResultStore,
   createUpstreamDirectHandler,
+  createVerifyEntitlementHandler,
   honoLoopback,
 } from './admin/test-runners.js';
 import { createDynamicSink, withCooldown } from './alerts.js';
@@ -279,6 +280,10 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   app.post(
     '/admin/test/upstream-direct',
     createUpstreamDirectHandler(pool, testResultStore),
+  );
+  app.post(
+    '/admin/test/verify-entitlement',
+    createVerifyEntitlementHandler(pool, testResultStore),
   );
 
   const keysH = createKeysHandlers(apiKeyStore);
