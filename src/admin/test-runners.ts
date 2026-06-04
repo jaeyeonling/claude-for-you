@@ -375,6 +375,46 @@ export const createKeyInvokeHandler =
  */
 const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com/v1/messages';
 
+/**
+ * Single source of truth for direct (no-template) calls to api.anthropic.com.
+ * Used by BOTH `upstream-direct` and `verify-entitlement` so a future change
+ * to the beta flag, version header, or timeout lands in one place — preventing
+ * the kind of silent drift that #41 fixed at the proxy layer.
+ */
+const callAnthropicDirect = async (
+  token: string,
+  body: string,
+): Promise<DirectCallResult> => {
+  try {
+    const res = await fetch(ANTHROPIC_DIRECT_URL, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+        // Beta flag REQUIRED for Claude.ai OAuth-issued tokens — without it
+        // the upstream rejects the call regardless of model. This is the
+        // smallest set; everything else (x-stainless-*, claude-code-* beta
+        // flags, user-agent) is omitted to isolate whether THAT extra set
+        // is what's tripping sonnet/opus.
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+      body,
+      // Short-lived admin probe — full-fetch wall-clock cap is correct here.
+      // proxy/upstream.ts is the SSE exception that needs TTFB-only.
+      signal: AbortSignal.timeout(20_000),
+    });
+    return { status: res.status, bodyText: await res.text(), headers: res.headers };
+  } catch (err: unknown) {
+    return {
+      status: 0,
+      bodyText: '',
+      headers: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+};
+
 export const createUpstreamDirectHandler =
   (pool: AccountPool, store: TestResultStore) =>
   async (c: Context): Promise<Response> => {
@@ -383,48 +423,49 @@ export const createUpstreamDirectHandler =
 
     const startedAt = Date.now();
     let result: TestResult;
+    let tokenPhaseDone = false;
     try {
       const { token, name: servedBy } = await pool.getAccessToken(undefined);
-      const res = await fetch(ANTHROPIC_DIRECT_URL, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${token}`,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-          // Beta flag REQUIRED for Claude.ai OAuth-issued tokens — without it
-          // the upstream rejects the call regardless of model. This is the
-          // smallest set; everything else (x-stainless-*, claude-code-* beta
-          // flags, user-agent) is omitted to isolate whether THAT extra set
-          // is what's tripping sonnet/opus.
-          'anthropic-beta': 'oauth-2025-04-20',
-        },
-        body: PING_BODY(model),
-        // Short-lived admin probe (upstream-direct variant) — full-fetch
-        // wall-clock cap is correct. proxy/upstream.ts is the SSE exception.
-        signal: AbortSignal.timeout(20_000),
-      });
-      const bodyText = await res.text();
+      tokenPhaseDone = true;
+      const call = await callAnthropicDirect(token, PING_BODY(model));
       const latencyMs = Date.now() - startedAt;
-      let bodySummary: string;
-      try {
-        bodySummary = summarizeMessageBody(JSON.parse(bodyText));
-      } catch {
-        bodySummary = excerpt(bodyText, 80);
+      if (call.error !== undefined) {
+        // Fetch-phase transport error. Distinguish from token-fetch failure
+        // by means of `tokenPhaseDone` — operator should know whether the
+        // pool or the network is the culprit.
+        result = {
+          kind: 'upstream-direct',
+          ok: false,
+          at: Date.now(),
+          latencyMs,
+          summary: `NET · ${excerpt(call.error, 80)}`,
+          detail: `phase=fetch (token ok, member=${servedBy}) error=${call.error}`,
+        };
+      } else {
+        let bodySummary: string;
+        try {
+          bodySummary = summarizeMessageBody(JSON.parse(call.bodyText));
+        } catch {
+          bodySummary = excerpt(call.bodyText, 80);
+        }
+        const diag = call.headers ? captureDiagHeaders(call.headers) : '';
+        const headersBlock =
+          diag.length > 0 ? `\n--- response headers ---\n${diag}` : '';
+        const bodyBlock =
+          call.bodyText.length > 0
+            ? `\n--- body ---\n${excerpt(call.bodyText, 600)}`
+            : '';
+        result = {
+          kind: 'upstream-direct',
+          ok: call.status === 200,
+          at: Date.now(),
+          latencyMs,
+          summary: `${call.status} · ${latencyMs}ms · model=${model} (member=${servedBy}, no template) · ${bodySummary}`,
+          detail: `status=${call.status} latency=${latencyMs}ms${headersBlock}${bodyBlock}`,
+        };
       }
-      const diag = captureDiagHeaders(res.headers);
-      const headersBlock =
-        diag.length > 0 ? `\n--- response headers ---\n${diag}` : '';
-      const bodyBlock =
-        bodyText.length > 0 ? `\n--- body ---\n${excerpt(bodyText, 600)}` : '';
-      result = {
-        kind: 'upstream-direct',
-        ok: res.ok && res.status === 200,
-        at: Date.now(),
-        latencyMs,
-        summary: `${res.status} · ${latencyMs}ms · model=${model} (member=${servedBy}, no template) · ${bodySummary}`,
-        detail: `status=${res.status} latency=${latencyMs}ms${headersBlock}${bodyBlock}`,
-      };
     } catch (err: unknown) {
+      // Reached only when pool.getAccessToken throws (tokenPhaseDone === false).
       const reason = err instanceof Error ? err.message : String(err);
       result = {
         kind: 'upstream-direct',
@@ -432,7 +473,7 @@ export const createUpstreamDirectHandler =
         at: Date.now(),
         latencyMs: Date.now() - startedAt,
         summary: `NET · ${excerpt(reason, 80)}`,
-        detail: reason,
+        detail: `phase=${tokenPhaseDone ? 'fetch' : 'token-fetch'} error=${reason}`,
       };
     }
     store.record(result);
@@ -495,14 +536,9 @@ export const classifyEntitlement = (
   return { verdict: 'inconclusive', ok: false };
 };
 
-const PING_BODY_WITH_MARKER = (model: string): string =>
-  JSON.stringify({
-    model,
-    max_tokens: 16,
-    system: CC_SYSTEM_PREFIX,
-    messages: [{ role: 'user', content: 'reply with the single word: pong' }],
-  });
-
+// PING_BODY (defined above for sonnet+marker self-tests) already produces the
+// "with marker" body — reuse it instead of duplicating. The "without marker"
+// variant only differs by omitting the `system` key.
 const PING_BODY_WITHOUT_MARKER = (model: string): string =>
   JSON.stringify({
     model,
@@ -511,37 +547,23 @@ const PING_BODY_WITHOUT_MARKER = (model: string): string =>
     messages: [{ role: 'user', content: 'reply with the single word: pong' }],
   });
 
+// The entitlement gate only applies to sonnet/opus on Claude.ai-OAuth tokens
+// (haiku has no gate). Other models would produce a useless `inconclusive`
+// pair at best and burn OAuth-account quota at worst. We refuse upfront so
+// operators can't accidentally (or maliciously) point this at expensive
+// models like opus 4.5 in a loop. Patterns are anchored — partial matches
+// like "claude-haiku-sonnet-something" are rejected.
+const ENTITLEMENT_MODEL_PATTERN = /^claude-(sonnet|opus)-[a-z0-9-]+$/i;
+
+export const isEntitlementModelAllowed = (model: string): boolean =>
+  ENTITLEMENT_MODEL_PATTERN.test(model);
+
 interface DirectCallResult {
   readonly status: number;
   readonly bodyText: string;
+  readonly headers: Headers | null;
   readonly error?: string;
 }
-
-const callAnthropicDirect = async (
-  token: string,
-  body: string,
-): Promise<DirectCallResult> => {
-  try {
-    const res = await fetch(ANTHROPIC_DIRECT_URL, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${token}`,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-        'anthropic-beta': 'oauth-2025-04-20',
-      },
-      body,
-      signal: AbortSignal.timeout(20_000),
-    });
-    return { status: res.status, bodyText: await res.text() };
-  } catch (err: unknown) {
-    return {
-      status: 0,
-      bodyText: '',
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-};
 
 export const createVerifyEntitlementHandler =
   (pool: AccountPool, store: TestResultStore) =>
@@ -549,16 +571,29 @@ export const createVerifyEntitlementHandler =
     const raw = await parseFormOrJson(c).catch(() => null);
     const model = asString(raw?.model) || DEFAULT_MODEL;
 
+    // H1 quota-abuse guard: reject anything that isn't sonnet/opus before we
+    // burn even a single upstream call. Returning 400 makes the rejection
+    // explicit to the operator instead of recording an "inconclusive" result.
+    if (!isEntitlementModelAllowed(model)) {
+      throw InvalidRequest(
+        `verify-entitlement only accepts sonnet/opus models (got "${excerpt(model, 60)}"). haiku is not gated and other models would burn account quota without producing a usable verdict.`,
+      );
+    }
+
     const startedAt = Date.now();
     let result: TestResult;
+    let tokenPhaseDone = false;
     try {
       const { token, name: servedBy } = await pool.getAccessToken(undefined);
+      tokenPhaseDone = true;
 
       // Fire both calls in parallel. Sequential would widen the time gap and
       // let upstream state (rate-limit window boundary, account-level quota
       // refresh) shift between A and B, which would muddy the comparison.
+      // Reusing PING_BODY for the marker side keeps a single source of truth
+      // for the body shape — see #40 H3 (no PING_BODY_WITH_MARKER duplicate).
       const [withMarker, withoutMarker] = await Promise.all([
-        callAnthropicDirect(token, PING_BODY_WITH_MARKER(model)),
+        callAnthropicDirect(token, PING_BODY(model)),
         callAnthropicDirect(token, PING_BODY_WITHOUT_MARKER(model)),
       ]);
 
@@ -592,7 +627,7 @@ export const createVerifyEntitlementHandler =
         summary: `${verdict} · A=${withMarker.status || 'NET'} B=${withoutMarker.status || 'NET'} · ${latencyMs}ms · model=${model} (member=${servedBy})`,
         detail: [
           `verdict=${verdict} (A,B)=(${withMarker.status || 'NET'},${withoutMarker.status || 'NET'})`,
-          `latency=${latencyMs}ms member=${servedBy}`,
+          `latency=${latencyMs}ms member=${servedBy} phase=fetch`,
           ``,
           summarizeSide('A', 'with marker', withMarker),
           ``,
@@ -600,14 +635,19 @@ export const createVerifyEntitlementHandler =
         ].join('\n'),
       };
     } catch (err: unknown) {
+      // Reached only when pool.getAccessToken throws — fetch errors are
+      // swallowed inside callAnthropicDirect and surface as status=0/error.
+      // We tag the phase so operators can tell "OAuth pool is broken" from
+      // "Anthropic is unreachable" without grepping the proxy logs.
       const reason = err instanceof Error ? err.message : String(err);
+      const phase = tokenPhaseDone ? 'fetch' : 'token-fetch';
       result = {
         kind: 'verify-entitlement',
         ok: false,
         at: Date.now(),
         latencyMs: Date.now() - startedAt,
-        summary: `NET · ${excerpt(reason, 80)}`,
-        detail: reason,
+        summary: `NET · phase=${phase} · ${excerpt(reason, 80)}`,
+        detail: `phase=${phase} error=${reason}`,
       };
     }
     store.record(result);

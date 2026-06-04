@@ -1,5 +1,40 @@
 import { describe, expect, test } from 'bun:test';
-import { classifyEntitlement } from '../src/admin/test-runners.js';
+import {
+  classifyEntitlement,
+  isEntitlementModelAllowed,
+} from '../src/admin/test-runners.js';
+
+describe('isEntitlementModelAllowed', () => {
+  // The gate only applies to sonnet/opus on Claude.ai-OAuth tokens. The
+  // whitelist is the quota-abuse guard from #40 H1 (Adversary + Watchdog).
+  test('allows current sonnet/opus model ids', () => {
+    expect(isEntitlementModelAllowed('claude-sonnet-4-6')).toBe(true);
+    expect(isEntitlementModelAllowed('claude-opus-4-7')).toBe(true);
+    expect(isEntitlementModelAllowed('claude-opus-4-5')).toBe(true);
+  });
+
+  test('rejects haiku (no gate, would always inconclusive)', () => {
+    expect(isEntitlementModelAllowed('claude-haiku-4-5')).toBe(false);
+    expect(isEntitlementModelAllowed('claude-haiku-4-5-20251001')).toBe(false);
+  });
+
+  test('rejects empty / placeholder / non-anthropic ids', () => {
+    expect(isEntitlementModelAllowed('')).toBe(false);
+    expect(isEntitlementModelAllowed('gpt-4')).toBe(false);
+    expect(isEntitlementModelAllowed('claude')).toBe(false);
+    expect(isEntitlementModelAllowed('claude-sonnet')).toBe(false); // missing tail
+  });
+
+  test('rejects sneaky partial matches (anchored regex)', () => {
+    // Without `^`/`$`, "claude-haiku-sonnet-something" or
+    // "x claude-sonnet-4-6 y" might slip through.
+    expect(isEntitlementModelAllowed('claude-haiku-sonnet-x')).toBe(false);
+    expect(isEntitlementModelAllowed('prefix-claude-sonnet-4-6')).toBe(false);
+    expect(isEntitlementModelAllowed('claude-sonnet-4-6 ; rm -rf /')).toBe(
+      false,
+    );
+  });
+});
 
 describe('classifyEntitlement', () => {
   // The four canonical quadrants from #40 plan.
