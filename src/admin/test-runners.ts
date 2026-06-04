@@ -2,6 +2,7 @@ import type { Context, Hono } from 'hono';
 import type { AccountPool } from '../auth/account-pool.js';
 import type { ApiKeyStore } from '../auth/api-key-store.js';
 import { InvalidRequest, NotFound } from '../lib/errors.js';
+import { CC_SYSTEM_PREFIX } from '../proxy/messages.js';
 
 /**
  * Phase 21 — admin self-test panel.
@@ -114,15 +115,15 @@ const summarizeMessageBody = (body: unknown): string => {
 };
 
 // `system` is required by upstream for sonnet/opus when the OAuth token was
-// issued via Claude.ai (CC flow). Without it: rate_limit_error. haiku passes
-// without. See proxy/messages.ts:ensureSystem for the same fix on the proxy
-// path; we duplicate it here so direct-upstream test (`upstream-direct`)
-// also sends a valid body.
+// issued via Claude.ai (CC flow). Without the CC identity marker: rate_limit_error.
+// haiku passes without. We reuse CC_SYSTEM_PREFIX from proxy/messages so the
+// marker has a single source of truth — silent drift between the two locations
+// is what produced the misdiagnosis fixed in 2026-06-02.
 const PING_BODY = (model: string): string =>
   JSON.stringify({
     model,
     max_tokens: 16,
-    system: "You are Claude Code, Anthropic's official CLI for Claude.",
+    system: CC_SYSTEM_PREFIX,
     messages: [{ role: 'user', content: 'reply with the single word: pong' }],
   });
 

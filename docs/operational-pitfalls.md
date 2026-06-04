@@ -234,6 +234,33 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 ---
 
+## 13. `system` 본문이 CC 시그니처가 아니면 sonnet/opus 만 `rate_limit_error` — entitlement 검증의 마스킹된 시그니처 (2026-06-02 정정)
+
+**상태**: 2026-06-02 패치. 그 이전에는 caller가 자체 system prompt (예: tomodachi 디스코드 봇 같은 워크로드)를 보내면 sonnet/opus는 즉시 429 `rate_limit_error`로 거절되고 haiku는 통과되는 시그니처가 운영 중에 발생했음.
+
+**현재 동작**: `src/proxy/messages.ts`의 `ensureSystem`이 모든 호출에 대해 caller 입력에 관계없이 CC 시그니처 블록을 `system` array의 첫 블록으로 강제 prepend한다. caller가 보낸 string/array는 두 번째 이후 블록으로 그대로 보존된다 (cache_control 포함). transparent 분기는 없음 — caller가 본문에 `"You are Claude Code"`로 시작하는 텍스트를 박아 identity를 위장하는 abuse도 차단된다.
+
+**필수 조건**:
+- `system` array의 첫 블록은 **정확히** `"You are Claude Code, Anthropic's official CLI for Claude."` — 이 marker가 entitlement 게이트 통과 조건. Anthropic이 이 prefix를 한 글자라도 바꾸면 우리 가드가 무너지고 sonnet/opus가 다시 429로 떨어진다.
+- proxy가 박는 헤더 (`user-agent: claude-cli/...`, `anthropic-beta: claude-code-...`) 는 `src/template/static.ts:34-65`에서 클라이언트 헤더 무관하게 자체적으로 박는다. system body만 변수.
+
+### 과거 잘못된 진단 (역사 기록, 같은 함정 재발 방지용)
+
+**잘못된 가설** (2026-05-27): "system 필드가 missing이면 sonnet/opus는 429. 그러니 `ensureSystem`이 system 없을 때만 minimal CC 시그니처 채워주면 됨." → binary (present/absent) 가드 작성. wire-level A/B도 binary로만 검증.
+
+**실제 원인**: Anthropic의 entitlement 검증은 **system 본문의 leading text가 CC marker로 시작하는지**를 본다. tomodachi처럼 정상 system 본문이 들어있으면 우리 가드는 `length > 0`이라 통과시키지만 upstream은 거절. 응답 type이 `rate_limit_error`라서 quota 소진으로 한 번 더 오독되기 쉬움 — 사실은 entitlement 위반의 마스킹된 시그니처.
+
+**검증 절차** (운영자가 미래에 또 의심 들 때):
+1. `/admin/messages` 에서 status=429 + model=claude-sonnet-4-6 필터. 같은 시간대 haiku 호출도 같이 본다.
+2. **haiku는 200, sonnet은 429 + responseBody에 `type: "rate_limit_error"`** 패턴이면 entitlement 게이트. quota 아님.
+3. message detail에서 system 본문 첫 200자가 `"You are Claude Code"`로 시작하는지 확인. 아니면 #13 함정 재발 (또는 marker 자체가 바뀌었거나).
+
+**메타 교훈**: 함정 #12와 동일 — Anthropic 응답 메시지(`rate_limit_error`)의 문자 그대로 해석에 매달리지 말 것. 같은 OAuth 토큰으로 모델만 바꿔 (sonnet vs haiku) A/B하는 게 가장 빠른 ground truth. `src/template/extracted.ts:102`에 명시된 cousin misdiagnosis(같은 함정, 다른 위치)를 한 번 더 반복한 사례.
+
+**관련**: [[project_oauth-entitlement-shape-gate]] (12, 13은 같은 메타 패턴 — 응답 메시지가 진짜 원인을 가리지 않음).
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```

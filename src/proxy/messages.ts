@@ -20,6 +20,64 @@ import { callUpstream } from './upstream.js';
 import { tapResponseBody } from './response-tap.js';
 
 /**
+ * Claude Code identity prefix that Anthropic's Claude.ai-OAuth entitlement
+ * gate looks for on sonnet/opus calls. Without it the upstream rejects with
+ * `rate_limit_error` (HTTP 429) — even when `system` is non-empty. haiku is
+ * exempt from this check.
+ *
+ * History:
+ *   2026-05-27 — original guard treated `system` as a binary (present/absent)
+ *     after a wire-level A/B that only varied presence. Tomodachi-style custom
+ *     `system` bodies still passed the proxy guard but were rejected upstream
+ *     because the prefix was missing. Logged as `rate_limit_error`, easy to
+ *     misread as a quota issue (see docs/operational-pitfalls.md for the
+ *     cousin misdiagnosis in template/extracted.ts:102).
+ *   2026-06-02 — guard rewritten to PREPEND the prefix as a separate `system`
+ *     block on every call, with no caller-side opt-out. We deliberately break
+ *     the older "transparent on every other field" invariant for `system`
+ *     only: the entitlement layer treats `system` as identity, so the proxy
+ *     must own the leading block to keep upstream from rejecting AND to keep
+ *     a caller from forging the identity by prefixing their own body with the
+ *     marker. Caller's original intent (custom persona, cache_control on
+ *     blocks) is preserved verbatim as the second+ blocks. See pitfalls #13.
+ */
+export const CC_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+interface SystemTextBlock {
+  readonly type: 'text';
+  readonly text: string;
+  readonly cache_control?: unknown;
+}
+
+/** Module-singleton — Object.freeze keeps V8's hidden class stable so the
+ * inline cache for the prepended block doesn't churn under hot-path load. */
+const CC_BLOCK: SystemTextBlock = Object.freeze({ type: 'text', text: CC_SYSTEM_PREFIX });
+
+/**
+ * Normalize `system` so the upstream entitlement gate always sees a proxy-owned
+ * CC identity block in the leading position. Caller's body is preserved as
+ * subsequent blocks.
+ *
+ * Shape rules:
+ *   - missing / empty / non-string non-array → `[CC_BLOCK]`
+ *   - non-empty string                       → `[CC_BLOCK, {type:'text', text: caller}]`
+ *   - non-empty array                        → `[CC_BLOCK, ...caller]` (blocks
+ *                                              preserved with their cache_control intact)
+ *
+ * Returns a new object — never mutates the input.
+ */
+export const ensureSystem = (b: Record<string, unknown>): Record<string, unknown> => {
+  const sys = b.system;
+  if (typeof sys === 'string' && sys.length > 0) {
+    return { ...b, system: [CC_BLOCK, { type: 'text', text: sys }] };
+  }
+  if (Array.isArray(sys) && sys.length > 0) {
+    return { ...b, system: [CC_BLOCK, ...sys] };
+  }
+  return { ...b, system: [CC_BLOCK] };
+};
+
+/**
  * Hop-by-hop headers (RFC 7230 §6.1) plus content-length / content-encoding
  * which are body-framing and must be recomputed by the local HTTP stack.
  */
@@ -107,20 +165,6 @@ export const createMessagesHandler =
         400,
       );
     }
-    // Upstream rejects Claude.ai-OAuth calls that omit `system` for premium
-    // models (sonnet/opus) with rate_limit_error — even though the API schema
-    // marks system as optional. haiku is exempt. Confirmed 2026-05-27 by
-    // wire-level A/B (same OAuth token, body w/ vs w/o system → 429 vs 200).
-    // The proxy is transparent on every other field; only synthesize a
-    // minimal system when the client truly didn't send one.
-    const ensureSystem = (b: Record<string, unknown>): Record<string, unknown> => {
-      const sys = b.system;
-      const present =
-        (typeof sys === 'string' && sys.length > 0) ||
-        (Array.isArray(sys) && sys.length > 0);
-      if (present) return b;
-      return { ...b, system: "You are Claude Code, Anthropic's official CLI for Claude." };
-    };
     const clientBody = ensureSystem(rawBody as Record<string, unknown>);
 
     // Per-key allowlist gate. Empty/missing allowlist = no restriction
