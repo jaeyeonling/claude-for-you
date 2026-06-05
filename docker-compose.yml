@@ -48,6 +48,15 @@ services:
       # Required by Caddy itself. Empty → Caddyfile syntax error at boot.
       # IP-only deployment can set DOMAIN=:80 to serve HTTP without ACME.
       DOMAIN: ${DOMAIN:-}
+    # caddyfile-hash propagates the SHA-256 of the bind-mounted Caddyfile
+    # into the compose service spec so `docker compose up -d` recreates this
+    # container whenever the file changes. Without this trigger the bind
+    # mount keeps pointing at the original inode and Caddyfile edits do not
+    # take effect until something else forces a recreate (see pitfall #15).
+    # The hash is set by scripts/deploy.sh; unset == local dev where the
+    # operator can `docker compose up -d --force-recreate caddy` manually.
+    labels:
+      - "caddyfile-hash=${CADDYFILE_SHA256:-unset}"
     ports:
       - '80:80'
       - '443:443'
