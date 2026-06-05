@@ -298,6 +298,28 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 ---
 
+## 15. CC_BLOCK 마커가 system[0]과 system[1]에 두 번 보임 — 이건 의도된 invariant, dedup 금지
+
+**증상**: 토큰 사용 진단 중 outbound payload의 `system` 배열에서 `"You are Claude Code, Anthropic's official CLI for Claude."` 문자열이 position 0과 1에 동일하게 박힌 걸 발견. 직접 ~12 tok/req 낭비처럼 보임. 1009 req/day 기준 ~12K tok/day, sonnet 단가 환산 약 $0.04/day.
+
+**원인 (그러나 버그 아님)**: `ensureSystem()` (`src/proxy/messages.ts:69-78`) 은 caller가 같은 prefix를 보내든 말든 **무조건 prepend**한다. Claude Code CLI의 첫 system 블록이 이미 동일 prefix로 시작하므로 결과적으로 duplicate. 이건 다음 세 가지를 동시에 보장하는 documented invariant다:
+
+1. **Adversary R1 forge protection** — `tests/messages-ensure-system.test.ts:41-75`의 두 forge 테스트가 명시. caller가 marker를 mimicking해서 보내도 proxy-owned block이 leading position을 가져가야 identity ownership이 가짜 caller로 넘어가지 않는다.
+2. **문서화된 wire invariant** — `docs/cc-wire-reference.md:72`: *"always prepends ... as the first element ... regardless of what the caller sent"*.
+3. **`#40` Entitlement drift probe** — `src/admin/test-runners.ts`의 `verify-entitlement`는 "proxy가 매번 marker를 박는다"를 가정으로 marker drift를 검출한다. dedup하면 이 진단 인프라의 신뢰성도 흔들린다.
+
+**왜 dedup으로 절약하지 않나**: 절약 ~$0.04/day vs 무너뜨릴 것 = adversary R1 hardening + 문서 invariant + drift probe 가정. trade-off가 한쪽으로 명확히 기운다.
+
+**진짜 토큰이 부풀어 보이면 어디부터 봐야 하나** (2026-06-05 진단 경로):
+
+1. `messages_log` 의 `cache_read_tokens` vs `cache_creation_tokens` 비율을 사용자/모델별로 본다. hit_pct < 30%는 캐시 비정상.
+2. 비정상의 진짜 원인은 보통 **Claude CLI 동적 system 콘텐츠** (오늘 날짜, 현재 git branch, recent commits, session 요약) 가 prefix bytes를 매 호출 바꿔서 cache_creation으로 다시 청구되는 패턴. proxy 책임 아님 — Anthropic CLI 측 설계.
+3. multi-tenant aggregation 효과도 별도 확인: 단일 OAuth 토큰이 N명을 서비스하면 Anthropic 콘솔은 N명 합산을 보여준다 (함정 #2의 "운영자=사용자" 모델 참고).
+
+**선례**: #48 (2026-06-05) — 같은 증상을 "idempotent fix"로 풀려다 위 invariant와 정면 충돌해 won't-fix로 close. 향후 재발견 시 본 항목으로 즉시 returns.
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```
