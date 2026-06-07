@@ -66,7 +66,7 @@ CMD_ID=$(aws ssm send-command \
     "if [ ! -d /home/ec2-user/claude-for-you ]; then sudo -u ec2-user git clone \"$CLONE_URL\" /home/ec2-user/claude-for-you; fi",
     "cd /home/ec2-user/claude-for-you && sudo -u ec2-user git remote set-url origin \"$CLONE_URL\" && sudo -u ec2-user git fetch --depth=1 origin main && sudo -u ec2-user git reset --hard origin/main",
     "sudo /usr/local/bin/fetch-env.sh",
-    "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && docker build -t claude-for-you:latest . && docker compose up -d"
+    "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && [ -n \"$CADDYFILE_SHA256\" ] && docker build -t claude-for-you:latest . && docker compose up -d"
   ]' \
   --query 'Command.CommandId' \
   --output text)

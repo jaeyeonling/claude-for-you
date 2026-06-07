@@ -38,7 +38,7 @@
 		# UPSTREAM_TTFB_TIMEOUT_MS in src/proxy/upstream.ts (currently 5m).
 		# If Caddy aborts before Bun gives up, the client sees a Caddy-origin 504
 		# with `net/http: timeout awaiting response headers` — see
-		# docs/operational-pitfalls.md #15 for the 2026-06-05 incident that put
+		# docs/operational-pitfalls.md #16 for the 2026-06-05 incident that put
 		# the two values out of sync (Caddy at 30s, Bun at 5m).
 		# read/write_timeout cover the streaming body and can stay longer than
 		# the Bun ceiling; they only matter once headers have arrived.

@@ -52,7 +52,7 @@ services:
     # into the compose service spec so `docker compose up -d` recreates this
     # container whenever the file changes. Without this trigger the bind
     # mount keeps pointing at the original inode and Caddyfile edits do not
-    # take effect until something else forces a recreate (see pitfall #15).
+    # take effect until something else forces a recreate (see pitfall #16).
     # The hash is set by scripts/deploy.sh; unset == local dev where the
     # operator can `docker compose up -d --force-recreate caddy` manually.
     labels:

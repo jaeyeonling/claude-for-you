@@ -329,7 +329,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 **복구**:
 - 두 값을 일치시킨다. `Caddyfile`의 `response_header_timeout`과 `src/proxy/upstream.ts`의 `UPSTREAM_TTFB_TIMEOUT_MS` 둘 다 같은 값(현재 5m).
 - Caddyfile commit 후 `docker compose up -d` — `caddyfile-hash` label trigger가 caddy 컨테이너를 자동 recreate한다(`docker-compose.yml` + `scripts/deploy.sh`의 `CADDYFILE_SHA256` export 체인).
-- 응급 hotfix가 필요하면 EC2에서: `cat /tmp/new-caddyfile > Caddyfile && docker compose up -d --force-recreate caddy`. `sed -i`는 새 inode를 만들어 bind mount를 무력화하므로 절대 쓰지 말 것 (truncate-write가 inode를 보존).
+- 응급 hotfix가 필요하면 EC2에서: `[ -s /tmp/new-caddyfile ] && cat /tmp/new-caddyfile > Caddyfile && docker compose up -d --force-recreate caddy`. **`[ -s ... ]` 가드 필수** — /tmp/new-caddyfile이 없거나 빈 파일이면 `cat`의 redirection이 Caddyfile을 0바이트로 truncate해 caddy boot 실패 + 스택 다운. `sed -i`는 새 inode를 만들어 bind mount를 무력화하므로 절대 쓰지 말 것 (truncate-write가 inode를 보존).
 
 **예방**: 두 timeout은 invariant. 한쪽만 변경하는 PR은 review에서 reject. `Caddyfile` 안에 invariant 주석으로 박제됨 — 다음 사람이 5m을 줄이거나 늘리려고 할 때 즉시 보임.
 
