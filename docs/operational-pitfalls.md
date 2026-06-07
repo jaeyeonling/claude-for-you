@@ -320,6 +320,25 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 ---
 
+## 16. Caddy `response_header_timeout`이 Bun `UPSTREAM_TTFB_TIMEOUT_MS`보다 짧으면 silent 504
+
+**증상**: `/v1/messages` 호출이 간헐적으로 504. 응답 헤더에 `Server: Caddy`만 있고 `cf-ray`/`anthropic-*`는 없음. Caddy 로그에 `net/http: timeout awaiting response headers` + `status: 504` + `duration: ~30s`로 클러스터링. 클라이언트 SDK retry로 대부분 마스킹되어 사용자는 가끔 한 번씩만 본다.
+
+**원인**: edge proxy(Caddy)의 `response_header_timeout`이 origin(Bun)의 TTFB ceiling(`UPSTREAM_TTFB_TIMEOUT_MS`, 5분)보다 짧으면, Bun이 응답을 만들기 전에 Caddy가 먼저 abort한다. 1M context prefill처럼 30초 넘는 정상 케이스가 모두 504로 둔갑한다. 2026-06-05 incident에서 24시간 동안 81건 발생, duration 분포는 ~30s에 모두 박혀있어 (변동 0) 운영자가 즉시 timeout임을 식별할 수 있었다.
+
+**복구**:
+- 두 값을 일치시킨다. `Caddyfile`의 `response_header_timeout`과 `src/proxy/upstream.ts`의 `UPSTREAM_TTFB_TIMEOUT_MS` 둘 다 같은 값(현재 5m).
+- Caddyfile commit 후 `docker compose up -d` — `caddyfile-hash` label trigger가 caddy 컨테이너를 자동 recreate한다(`docker-compose.yml` + `scripts/deploy.sh`의 `CADDYFILE_SHA256` export 체인).
+- 응급 hotfix가 필요하면 EC2에서: `cat /tmp/new-caddyfile > Caddyfile && docker compose up -d --force-recreate caddy`. `sed -i`는 새 inode를 만들어 bind mount를 무력화하므로 절대 쓰지 말 것 (truncate-write가 inode를 보존).
+
+**예방**: 두 timeout은 invariant. 한쪽만 변경하는 PR은 review에서 reject. `Caddyfile` 안에 invariant 주석으로 박제됨 — 다음 사람이 5m을 줄이거나 늘리려고 할 때 즉시 보임.
+
+**검증**: EC2에서 `docker compose exec caddy wget -qO- localhost:2019/config/ | grep response_header_timeout` → ns 값이 `UPSTREAM_TTFB_TIMEOUT_MS * 10^6`과 일치 (5m이면 `300000000000`).
+
+**결정적 교훈**: 이번 incident는 Caddyfile이 이미 tracked였음에도 30s 값 자체가 두 timeout 간 invariant violation의 source였다. 첫 진단에서 `find` 결과만 보고 "Caddyfile이 untracked"라고 결론낸 게 추가 cycle을 만들었다 — 진짜 문제는 파일의 존재 여부가 아니라 값의 정합성. 두 timeout 중 한쪽만 보는 review는 같은 incident를 다시 만든다.
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```
