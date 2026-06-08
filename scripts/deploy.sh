@@ -5,8 +5,18 @@
 #
 # Usage: bash scripts/deploy.sh
 #
-# Pre-conditions checked at the top: aws cli authed, instance is RUNNING,
-# repo is reachable (public OR EC2 has a deploy token).
+# Pre-conditions checked at the top: aws cli authed (with permission to
+# read /claude-for-you/github-deploy-key and to send SSM Run commands —
+# see terraform/README.md → Prerequisites), instance is RUNNING, and the
+# SSH deploy key is populated in SSM.
+#
+# This script clones via git@github.com using the SSH deploy key from
+# /claude-for-you/github-deploy-key — even for public repos. Operators
+# of a public fork who don't want to register a deploy key should clone
+# the code in an SSM session manually instead of running this script.
+# Cloud-init still falls back to anonymous HTTPS for public repos at
+# first boot; this redeploy path is intentionally SSH-only to avoid
+# branching auth modes.
 set -euo pipefail
 
 REGION="${AWS_REGION:-ap-northeast-2}"

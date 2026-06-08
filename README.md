@@ -112,7 +112,7 @@ $ sudo /usr/local/bin/fetch-env.sh
 $ cd /home/ec2-user/claude-for-you && sudo docker build -t claude-for-you:latest . && sudo docker compose up -d
 ```
 
-The terraform module provisions: EC2 (t3.micro, AL2023, IMDSv2 required, SSM-only access — no port 22), RDS Postgres (t4g.micro, single-AZ, encrypted), Elastic IP, IAM role scoped to the two SSM parameters this proxy owns.
+The terraform module provisions: EC2 (t3.micro, AL2023, IMDSv2 required, SSM-only access — no port 22), RDS Postgres (t4g.micro, single-AZ, encrypted), Elastic IP, IAM role scoped to the three SSM parameters this proxy owns (`/claude-for-you/env`, `/claude-for-you/database-url`, `/claude-for-you/github-deploy-key`).
 
 ## Configuration
 

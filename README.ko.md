@@ -112,7 +112,7 @@ $ sudo /usr/local/bin/fetch-env.sh
 $ cd /home/ec2-user/claude-for-you && sudo docker build -t claude-for-you:latest . && sudo docker compose up -d
 ```
 
-terraform 모듈이 프로비저닝하는 것: EC2 (t3.micro, AL2023, IMDSv2 강제, SSM 전용 접근 — 22번 포트 미개방), RDS Postgres (t4g.micro, single-AZ, 암호화), Elastic IP, SSM 파라미터 2개에만 한정된 IAM role.
+terraform 모듈이 프로비저닝하는 것: EC2 (t3.micro, AL2023, IMDSv2 강제, SSM 전용 접근 — 22번 포트 미개방), RDS Postgres (t4g.micro, single-AZ, 암호화), Elastic IP, SSM 파라미터 3개(`/claude-for-you/env`, `/claude-for-you/database-url`, `/claude-for-you/github-deploy-key`)에만 한정된 IAM role.
 
 ## 설정
 

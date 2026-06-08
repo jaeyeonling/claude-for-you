@@ -7,10 +7,10 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 ## Prerequisites
 
 - AWS CLI v2 (or v1 via `uv tool install awscli --python python3.13`)
-- `aws configure` with credentials that can manage EC2, RDS, IAM, SSM, and (optionally) Route53
+- `aws configure` with credentials that can manage EC2, RDS, IAM, SSM, and (optionally) Route53. Running `scripts/deploy.sh` additionally requires `ssm:GetParameter` (with `--with-decryption`) on `/claude-for-you/github-deploy-key`, `kms:Decrypt` on the SSM service KMS key, and `ssm:SendCommand` + `ssm:GetCommandInvocation` + `ssm:DescribeInstanceInformation` on the target instance. The default AdministratorAccess profile covers all of these; least-privilege deployments need an explicit grant.
 - `session-manager-plugin` (e.g., `brew install --cask session-manager-plugin`)
 - Terraform ≥ 1.6
-- GitHub CLI (`gh`, e.g., `brew install gh`) — only for the private-repo deploy-key registration step; not required for public repos.
+- GitHub CLI (`gh`, e.g., `brew install gh`) — needed for the deploy-key registration step; `scripts/deploy.sh` is SSH-only and requires the key to be populated even for public forks.
 
 ## What gets created
 
