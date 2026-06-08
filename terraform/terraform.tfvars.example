@@ -12,6 +12,11 @@
 # domain_zone_id = "Z1234567890ABC"
 # domain_name    = "claude.your-domain.com"
 
-# If you want EC2 to auto-clone the repo on boot (public repo only — for
-# private use git over HTTPS with a deploy token instead).
+# Set this to have cloud-init clone the repo at first boot. Keep it as the
+# HTTPS URL — terraform internally rewrites it to the SSH form
+# (git@github.com:owner/repo.git) before handing it to git, so cloud-init
+# authenticates with the SSH deploy key configured in
+# /claude-for-you/github-deploy-key (see terraform/README.md →
+# "Private-repo support"). For public repos with no deploy key populated,
+# cloud-init falls back to anonymous HTTPS clone.
 # git_repo_url = "https://github.com/your-handle/claude-for-you.git"

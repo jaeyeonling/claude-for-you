@@ -87,30 +87,32 @@ Then `curl -H "x-api-key: $YOUR_KEY" -X POST http://127.0.0.1:3456/v1/messages �
 
 ```bash
 # 1. SSH key pair for SSM is unnecessary — sessions go through AWS Systems Manager
-brew install --cask session-manager-plugin
-
-# (optional) for private-repo deployments, populate the PAT after `terraform apply`:
-#   aws ssm put-parameter --name /claude-for-you/github-pat \
-#     --value "ghp_xxx" --type SecureString --overwrite --region ap-northeast-2
+brew install --cask session-manager-plugin gh
 
 # 2. Customize terraform.tfvars (optional — defaults work for most cases)
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 cd terraform && terraform init && terraform apply
 
-# 3. Upload .env contents as an encrypted SSM parameter
+# 3. (Private repo only — required before deploy.sh) register an SSH deploy key.
+#    See terraform/README.md → "Private-repo support" for the full 4-step flow:
+#    ssh-keygen → aws ssm put-parameter /claude-for-you/github-deploy-key →
+#    gh repo deploy-key add → shred local copy.
+#    Public repos: skip this step; cloud-init clones anonymously.
+
+# 4. Upload .env contents as an encrypted SSM parameter
 aws ssm put-parameter \
   --name /claude-for-you/env \
   --value "$(cat .env)" \
   --type SecureString --overwrite \
   --region ap-northeast-2
 
-# 4. SSM-session into the instance and bring the stack up
+# 5. SSM-session into the instance and bring the stack up
 aws ssm start-session --target $(terraform output -raw instance_id) --region ap-northeast-2
 $ sudo /usr/local/bin/fetch-env.sh
 $ cd /home/ec2-user/claude-for-you && sudo docker build -t claude-for-you:latest . && sudo docker compose up -d
 ```
 
-The terraform module provisions: EC2 (t3.micro, AL2023, IMDSv2 required, SSM-only access — no port 22), RDS Postgres (t4g.micro, single-AZ, encrypted), Elastic IP, IAM role scoped to the two SSM parameters this proxy owns.
+The terraform module provisions: EC2 (t3.micro, AL2023, IMDSv2 required, SSM-only access — no port 22), RDS Postgres (t4g.micro, single-AZ, encrypted), Elastic IP, IAM role scoped to the three SSM parameters this proxy owns (`/claude-for-you/env`, `/claude-for-you/database-url`, `/claude-for-you/github-deploy-key`).
 
 ## Configuration
 

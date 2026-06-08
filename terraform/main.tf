@@ -18,12 +18,16 @@ data "aws_ami" "al2023" {
 data "aws_caller_identity" "current" {}
 
 locals {
-  env_parameter_name      = "/${var.name}/env"
-  database_parameter_name = "/${var.name}/database-url"
-  pat_parameter_name      = "/${var.name}/github-pat"
-  env_parameter_arn       = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.env_parameter_name}"
-  database_parameter_arn  = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.database_parameter_name}"
-  pat_parameter_arn       = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.pat_parameter_name}"
+  env_parameter_name        = "/${var.name}/env"
+  database_parameter_name   = "/${var.name}/database-url"
+  deploy_key_parameter_name = "/${var.name}/github-deploy-key"
+  env_parameter_arn         = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.env_parameter_name}"
+  database_parameter_arn    = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.database_parameter_name}"
+  deploy_key_parameter_arn  = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.deploy_key_parameter_name}"
+  # Transparently convert the HTTPS clone URL the operator supplies in var.git_repo_url
+  # (kept as HTTPS for UI/docs consistency) into the SSH form actually used at boot,
+  # now that the SSH deploy key replaces the GitHub PAT.
+  git_ssh_url = replace(var.git_repo_url, "https://github.com/", "git@github.com:")
 }
 
 resource "aws_iam_role" "app" {
@@ -64,7 +68,7 @@ resource "aws_iam_role_policy" "env_param_read" {
         Resource = [
           local.env_parameter_arn,
           local.database_parameter_arn,
-          local.pat_parameter_arn,
+          local.deploy_key_parameter_arn,
         ]
       },
       {
@@ -102,15 +106,24 @@ resource "aws_ssm_parameter" "env" {
   }
 }
 
-# ---------- Parameter Store: GitHub PAT (private repo support) ----------
-# Optional. Operator populates with:
-#   aws ssm put-parameter --name /claude-for-you/github-pat \
-#     --value "ghp_xxx" --type SecureString --overwrite --region <region>
-# When unpopulated (placeholder value), cloud-init and deploy.sh fall back
-# to anonymous git clone (works only if the repo is public).
-resource "aws_ssm_parameter" "github_pat" {
-  name        = local.pat_parameter_name
-  description = "Optional GitHub PAT for private-repo git clone. Populate via aws ssm put-parameter."
+# ---------- Parameter Store: GitHub deploy key (private repo support) ----------
+# Operator populates with the PRIVATE half of a freshly generated ED25519 deploy key:
+#   ssh-keygen -t ed25519 -f claude-for-you-deploy -N ''
+#   aws ssm put-parameter --name /claude-for-you/github-deploy-key \
+#     --value "$(cat claude-for-you-deploy)" --type SecureString --overwrite --region <region>
+# Then add the PUBLIC half as a GitHub repo deploy key:
+#   gh repo deploy-key add claude-for-you-deploy.pub --title "claude-for-you ec2 deploy" --repo <owner>/<repo>
+# Finally, shred the local private key file.
+#
+# When unpopulated (placeholder value), cloud-init and deploy.sh fall back to
+# anonymous git clone (works only if the repo is public). The PAT-based flow
+# is gone: the PAT never appeared on disk or in URLs, but it did appear in
+# the SSM commands[] payload and in git error stderr, which lands in
+# StandardErrorContent and downstream operator scrollback. The SSH deploy key
+# is fetched at runtime from SSM directly into ~/.ssh/, never embedded in URLs.
+resource "aws_ssm_parameter" "github_deploy_key" {
+  name        = local.deploy_key_parameter_name
+  description = "SSH private key for a GitHub repo deploy key (ED25519). Populate via aws ssm put-parameter --type SecureString."
   type        = "SecureString"
   value       = "PLACEHOLDER_RUN_PUT_PARAMETER"
 
@@ -304,22 +317,64 @@ locals {
     chmod +x /usr/local/bin/fetch-env.sh
 
     # ---- Optional auto-clone — only if git_repo_url is set ----
-    # Uses the GitHub PAT from SSM when populated (private-repo support);
-    # falls back to anonymous (public-repo only) when the placeholder is intact.
+    # SSH deploy key flow: fetch the private key from SSM, install it under
+    # /home/ec2-user/.ssh/, and clone via git@github.com:owner/repo.git.
+    # The previous PAT-in-URL flow leaked the PAT into git stderr →
+    # SSM StandardErrorContent → operator scrollback on any clone failure;
+    # the SSH key never appears in URLs or remote error output.
+    # Falls back to anonymous clone (public-repo only) when the SSM
+    # parameter is still the placeholder.
     %{if var.git_repo_url != ""~}
-    PAT=$(aws ssm get-parameter \
-      --name ${local.pat_parameter_name} \
+    DEPLOY_KEY=$(aws ssm get-parameter \
+      --name ${local.deploy_key_parameter_name} \
       --with-decryption \
       --region ${var.region} \
       --query 'Parameter.Value' \
       --output text 2>/dev/null || echo "PLACEHOLDER_RUN_PUT_PARAMETER")
-    CLONE_URL="${var.git_repo_url}"
-    if [ "$${PAT}" != "PLACEHOLDER_RUN_PUT_PARAMETER" ] && [ -n "$${PAT}" ]; then
-      # Inject PAT into HTTPS URL for private-repo support.
-      CLONE_URL=$(echo "${var.git_repo_url}" | sed "s#https://github.com/#https://oauth2:$${PAT}@github.com/#")
+
+    if [ "$${DEPLOY_KEY}" != "PLACEHOLDER_RUN_PUT_PARAMETER" ] && [ -n "$${DEPLOY_KEY}" ]; then
+      mkdir -p /home/ec2-user/.ssh
+      chmod 700 /home/ec2-user/.ssh
+
+      # Private key — only readable by ec2-user, never embedded in URLs.
+      # Subshell `umask 077` makes the file land at 0600 atomically, closing
+      # the brief 0644 window that a plain `printf > … ; chmod 600` opens.
+      (umask 077 && printf '%s\n' "$${DEPLOY_KEY}" > /home/ec2-user/.ssh/id_ed25519_claude_for_you)
+
+      # Pin the deploy key to github.com so it isn't offered to other hosts.
+      cat > /home/ec2-user/.ssh/config <<SSHCFG
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_claude_for_you
+  IdentitiesOnly yes
+SSHCFG
+      chmod 600 /home/ec2-user/.ssh/config
+
+      # Pin GitHub host keys explicitly — no first-contact TOFU discovery.
+      # The first SSH contact happens inside cloud-init / deploy.sh, on a path
+      # we do not assume to be MITM-free; trusting whatever the network returns
+      # at that moment would permanently install an attacker key in known_hosts.
+      # Source: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+      cat > /home/ec2-user/.ssh/known_hosts <<KNOWN
+github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+KNOWN
+      chmod 644 /home/ec2-user/.ssh/known_hosts
+
+      chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+
+      CLONE_URL="${local.git_ssh_url}"
+    else
+      # Placeholder SSM value — fall back to anonymous HTTPS (public-repo only).
+      CLONE_URL="${var.git_repo_url}"
     fi
-    sudo -u ec2-user bash -c "cd /home/ec2-user && git clone $${CLONE_URL} claude-for-you" || \
-      echo "[user-data] git clone failed (private repo without PAT?). Operator can clone manually after SSM-session entry."
+
+    # -H sets HOME=/home/ec2-user so SSH finds the deploy key under ~ec2-user/.ssh/.
+    # Without -H, sudo inherits root's HOME and SSH would look in /root/.ssh/.
+    sudo -Hu ec2-user bash -c "cd /home/ec2-user && git clone $${CLONE_URL} claude-for-you" || \
+      echo "[user-data] git clone failed (private repo without deploy key?). Operator can clone manually after SSM-session entry."
     %{endif~}
 
     echo "user-data finished" > /var/log/user-data-done
