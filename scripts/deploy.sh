@@ -167,20 +167,23 @@ echo "▸ Running remote setup (SSH key bootstrap, git pull, fetch-env, docker b
 # production since PR #54.
 #
 # Why unconditional `docker compose up -d --force-recreate --no-deps
-# claude-for-you` after `docker build` (issue #74): under the `:latest`
-# tag, `docker compose up -d` compares the compose service reference,
-# not the underlying image digest. A freshly built image with the same
-# tag leaves `docker compose up -d` as a no-op and the old container
-# keeps serving stale code. Issue #74 recommended a digest-compare
-# branch (P3), but a deterministic-cache `docker build` from a previous
-# SHA can produce a digest matching the currently running container
-# during a roll-forward, leaving the operator with a stale container
-# even though the rebuild succeeded. P1 (unconditional recreate) costs
-# ~2-3s per deploy but covers all paths uniformly. `--no-deps` keeps
-# Caddy out of the cascade — Caddy only needs recreation when its
+# app` after `docker build` (issue #74): under the `:latest` tag,
+# `docker compose up -d` compares the compose service reference, not
+# the underlying image digest. A freshly built image with the same tag
+# leaves `docker compose up -d` as a no-op and the old container keeps
+# serving stale code. Issue #74 recommended a digest-compare branch
+# (P3), but a deterministic-cache `docker build` from a previous SHA
+# can produce a digest matching the currently running container during
+# a roll-forward, leaving the operator with a stale container even
+# though the rebuild succeeded. P1 (unconditional recreate) costs ~2-3s
+# per deploy but covers all paths uniformly. `--no-deps` keeps Caddy
+# out of the cascade — Caddy only needs recreation when its
 # `caddyfile-hash` label changes, which the trailing `docker compose up
-# -d` handles idempotently. SSE stream drain during the recreate
-# window is tracked as a separate follow-up.
+# -d` handles idempotently. The argument is the compose **service
+# name** (`app` — `docker-compose.yml:2`), not the host container name
+# (`claude-for-you`, which is `container_name` and the image tag); see
+# issue #82. SSE stream drain during the recreate window is tracked as
+# a separate follow-up.
 CMD_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
@@ -206,7 +209,7 @@ CMD_ID=$(aws ssm send-command \
     "sudo -Hu ec2-user git reset --hard origin/main",
     "HEAD_LOCAL=$(sudo -Hu ec2-user git -C /home/ec2-user/claude-for-you rev-parse HEAD); HEAD_REMOTE=$(sudo -Hu ec2-user git -C /home/ec2-user/claude-for-you rev-parse origin/main); [ \"$HEAD_LOCAL\" = \"$HEAD_REMOTE\" ] || { echo \"[deploy] HEAD did not advance to origin/main ($HEAD_LOCAL != $HEAD_REMOTE) -- git fetch or reset silently failed. Aborting before docker build.\" >&2; exit 1; }",
     "sudo /usr/local/bin/fetch-env.sh",
-    "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && [ \"${#CADDYFILE_SHA256}\" -eq 64 ] && docker build -t claude-for-you:latest . && docker compose up -d --force-recreate --no-deps claude-for-you && docker compose up -d"
+    "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && [ \"${#CADDYFILE_SHA256}\" -eq 64 ] && docker build -t claude-for-you:latest . && docker compose up -d --force-recreate --no-deps app && docker compose up -d"
   ]' \
   --query 'Command.CommandId' \
   --output text)
