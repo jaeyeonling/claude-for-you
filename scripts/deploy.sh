@@ -75,6 +75,23 @@ if [ "$DEPLOY_KEY_VAL" = "PLACEHOLDER_RUN_PUT_PARAMETER" ] || [ -z "$DEPLOY_KEY_
   echo "      gh repo deploy-key add claude-for-you-deploy.pub --title 'claude-for-you ec2 deploy' --repo <owner>/<repo>"
   exit 1
 fi
+# Issue #68: `-z` only rejects an empty string; a whitespace-only value
+# (a stray newline or a few spaces from the SSM console copy-paste) and
+# a `.pub` file paste both slip through, get written verbatim to
+# `~/.ssh/id_ed25519_claude_for_you`, and produce a downstream
+# `error in libcrypto` from OpenSSH that doesn't name the SSM value as
+# the cause. The PEM-header check catches both at pre-flight with a
+# remediation pointer.
+case "$DEPLOY_KEY_VAL" in
+  "-----BEGIN OPENSSH PRIVATE KEY-----"*) : ;;
+  *)
+    echo "  ✗ SSM /claude-for-you/github-deploy-key does not start with '-----BEGIN OPENSSH PRIVATE KEY-----'."
+    echo "    Common causes: whitespace-only value (stray newline from console paste), the .pub file"
+    echo "    contents (starts with 'ssh-ed25519 ...'), or a non-OPENSSH key format. Re-upload the"
+    echo "    ed25519 private key — see terraform/README.md → \"Private-repo support\" for the steps."
+    exit 1
+    ;;
+esac
 unset DEPLOY_KEY_VAL  # don't keep the private key in the parent shell environment any longer than needed
 echo "  populated ✓"
 
@@ -112,6 +129,22 @@ echo "▸ Running remote setup (SSH key bootstrap, git pull, fetch-env, docker b
 # fails, HEAD won't advance to origin/main and the gate makes the SSM
 # command exit non-zero instead of proceeding to docker build with the
 # stale working tree.
+#
+# Why unconditional `docker compose up -d --force-recreate --no-deps
+# claude-for-you` after `docker build` (issue #74): under the `:latest`
+# tag, `docker compose up -d` compares the compose service reference,
+# not the underlying image digest. A freshly built image with the same
+# tag leaves `docker compose up -d` as a no-op and the old container
+# keeps serving stale code. Issue #74 recommended a digest-compare
+# branch (P3), but a deterministic-cache `docker build` from a previous
+# SHA can produce a digest matching the currently running container
+# during a roll-forward, leaving the operator with a stale container
+# even though the rebuild succeeded. P1 (unconditional recreate) costs
+# ~2-3s per deploy but covers all paths uniformly. `--no-deps` keeps
+# Caddy out of the cascade — Caddy only needs recreation when its
+# `caddyfile-hash` label changes, which the trailing `docker compose up
+# -d` handles idempotently. SSE stream drain during the recreate
+# window is tracked as a separate follow-up.
 CMD_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
@@ -121,6 +154,7 @@ CMD_ID=$(aws ssm send-command \
     "set -euo pipefail",
     "DEPLOY_KEY=$(aws ssm get-parameter --name /claude-for-you/github-deploy-key --with-decryption --region '"$REGION"' --query Parameter.Value --output text 2>/dev/null || echo PLACEHOLDER_RUN_PUT_PARAMETER)",
     "if [ \"$DEPLOY_KEY\" = \"PLACEHOLDER_RUN_PUT_PARAMETER\" ] || [ -z \"$DEPLOY_KEY\" ]; then echo \"[deploy] SSM /claude-for-you/github-deploy-key is empty/placeholder. Populate it before running deploy.sh.\" >&2; exit 1; fi",
+    "case \"$DEPLOY_KEY\" in -----BEGIN\\ OPENSSH\\ PRIVATE\\ KEY-----*) :;; *) echo \"[deploy] SSM /claude-for-you/github-deploy-key does not start with '-----BEGIN OPENSSH PRIVATE KEY-----'. Whitespace-only value, public key, or wrong format. Re-upload the ed25519 private key.\" >&2; exit 1;; esac",
     "install -d -m 700 -o ec2-user -g ec2-user /home/ec2-user/.ssh",
     "(umask 077 && echo \"$DEPLOY_KEY\" > /home/ec2-user/.ssh/id_ed25519_claude_for_you)",
     "chown ec2-user:ec2-user /home/ec2-user/.ssh/id_ed25519_claude_for_you && chmod 600 /home/ec2-user/.ssh/id_ed25519_claude_for_you",
@@ -130,10 +164,13 @@ CMD_ID=$(aws ssm send-command \
     "chown ec2-user:ec2-user /home/ec2-user/.ssh/known_hosts && chmod 644 /home/ec2-user/.ssh/known_hosts",
     "CLONE_URL=git@github.com:jaeyeonling/claude-for-you.git",
     "if [ ! -d /home/ec2-user/claude-for-you ]; then sudo -Hu ec2-user git clone \"$CLONE_URL\" /home/ec2-user/claude-for-you; fi",
-    "cd /home/ec2-user/claude-for-you && sudo -Hu ec2-user git remote set-url origin \"$CLONE_URL\" && sudo -Hu ec2-user git fetch --depth=1 origin main && sudo -Hu ec2-user git reset --hard origin/main",
+    "cd /home/ec2-user/claude-for-you",
+    "sudo -Hu ec2-user git remote set-url origin \"$CLONE_URL\"",
+    "sudo -Hu ec2-user git fetch --depth=1 origin main",
+    "sudo -Hu ec2-user git reset --hard origin/main",
     "HEAD_LOCAL=$(sudo -Hu ec2-user git -C /home/ec2-user/claude-for-you rev-parse HEAD); HEAD_REMOTE=$(sudo -Hu ec2-user git -C /home/ec2-user/claude-for-you rev-parse origin/main); [ \"$HEAD_LOCAL\" = \"$HEAD_REMOTE\" ] || { echo \"[deploy] HEAD did not advance to origin/main ($HEAD_LOCAL != $HEAD_REMOTE) -- git fetch or reset silently failed. Aborting before docker build.\" >&2; exit 1; }",
     "sudo /usr/local/bin/fetch-env.sh",
-    "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && [ \"${#CADDYFILE_SHA256}\" -eq 64 ] && docker build -t claude-for-you:latest . && docker compose up -d"
+    "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && [ \"${#CADDYFILE_SHA256}\" -eq 64 ] && docker build -t claude-for-you:latest . && docker compose up -d --force-recreate --no-deps claude-for-you && docker compose up -d"
   ]' \
   --query 'Command.CommandId' \
   --output text)
