@@ -1,11 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 import { ensureSystem, CC_SYSTEM_PREFIX } from '../src/proxy/messages.js';
 
-const isCcBlock = (block: unknown): boolean =>
-  block !== null &&
-  typeof block === 'object' &&
-  (block as { type?: unknown }).type === 'text' &&
-  (block as { text?: unknown }).text === CC_SYSTEM_PREFIX;
+const isCcBlock = (block: unknown): boolean => {
+  if (block === null || typeof block !== 'object') return false;
+  const b = block as { type?: unknown; text?: unknown; cache_control?: unknown };
+  if (b.type !== 'text' || b.text !== CC_SYSTEM_PREFIX) return false;
+  // The CC block must carry an ephemeral cache_control marker — without it
+  // the prepend silently pushes every caller cache_control one slot deeper
+  // and breaks Anthropic prompt cache prefix matching (issue #55).
+  const cc = b.cache_control;
+  if (cc === null || typeof cc !== 'object') return false;
+  return (cc as { type?: unknown }).type === 'ephemeral';
+};
 
 describe('ensureSystem', () => {
   test('missing system → single CC block', () => {
@@ -124,5 +130,17 @@ describe('ensureSystem', () => {
     const a = ensureSystem({ system: 'x' }).system as unknown[];
     const b = ensureSystem({ system: 'y' }).system as unknown[];
     expect(a[0]).toBe(b[0]);
+  });
+
+  test('CC block carries cache_control: ephemeral marker for prompt cache anchoring (#55)', () => {
+    // issue #55: without an explicit cache_control anchor, the prepend silently
+    // shifts every caller cache_control breakpoint one slot deeper and breaks
+    // Anthropic's content-hash prompt cache. The anchor + its inner object
+    // must both be frozen so external code can't mutate the singleton.
+    const out = ensureSystem({ system: 'persona' }) as { system: unknown[] };
+    const cc = (out.system[0] as { cache_control?: { type?: string } }).cache_control;
+    expect(cc).toEqual({ type: 'ephemeral' });
+    expect(Object.isFrozen(out.system[0])).toBe(true);
+    expect(Object.isFrozen(cc)).toBe(true);
   });
 });
