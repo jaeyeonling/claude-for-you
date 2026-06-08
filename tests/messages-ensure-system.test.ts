@@ -1,16 +1,24 @@
 import { describe, expect, test } from 'bun:test';
-import { ensureSystem, CC_SYSTEM_PREFIX } from '../src/proxy/messages.js';
+import { ensureSystem, CC_SYSTEM_PREFIX, CC_BLOCK } from '../src/proxy/messages.js';
+
+// Ground-truth anchor for tests. We pull `cache_control.type` from the live
+// CC_BLOCK singleton instead of hardcoding 'ephemeral' so that a deliberate
+// future change to the runtime constant (e.g. Anthropic adds a new
+// cache_control type and we switch) does NOT trip every isCcBlock assertion
+// — only the dedicated invariant test at the bottom is supposed to fail and
+// force the author to acknowledge the change. See issue #55 maintainer review.
+const expectedCacheControlType = (CC_BLOCK.cache_control as { type: string }).type;
 
 const isCcBlock = (block: unknown): boolean => {
   if (block === null || typeof block !== 'object') return false;
   const b = block as { type?: unknown; text?: unknown; cache_control?: unknown };
   if (b.type !== 'text' || b.text !== CC_SYSTEM_PREFIX) return false;
-  // The CC block must carry an ephemeral cache_control marker — without it
-  // the prepend silently pushes every caller cache_control one slot deeper
-  // and breaks Anthropic prompt cache prefix matching (issue #55).
+  // The CC block must carry a cache_control marker — without it the prepend
+  // silently pushes every caller cache_control one slot deeper and breaks
+  // Anthropic prompt cache prefix matching (issue #55).
   const cc = b.cache_control;
   if (cc === null || typeof cc !== 'object') return false;
-  return (cc as { type?: unknown }).type === 'ephemeral';
+  return (cc as { type?: unknown }).type === expectedCacheControlType;
 };
 
 describe('ensureSystem', () => {
@@ -137,6 +145,13 @@ describe('ensureSystem', () => {
     // shifts every caller cache_control breakpoint one slot deeper and breaks
     // Anthropic's content-hash prompt cache. The anchor + its inner object
     // must both be frozen so external code can't mutate the singleton.
+    //
+    // This is the ONLY test that hardcodes the literal 'ephemeral'. The rest
+    // of the suite reads CC_BLOCK.cache_control.type as ground truth — so a
+    // deliberate type change (e.g. Anthropic adds 'persistent') trips exactly
+    // this assertion, forcing the author to acknowledge the change here +
+    // update cc-wire-reference §2a + revisit the breakpoint-budget rationale
+    // in messages.ts. See maintainer review on issue #55.
     const out = ensureSystem({ system: 'persona' }) as { system: unknown[] };
     const cc = (out.system[0] as { cache_control?: { type?: string } }).cache_control;
     expect(cc).toEqual({ type: 'ephemeral' });

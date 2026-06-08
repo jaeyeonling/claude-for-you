@@ -51,9 +51,15 @@ import { tapResponseBody } from './response-tap.js';
  *     counts across system+messages+tools. Real CC traffic uses 2 → +1 is
  *     safe; SDK callers maxing out at 4 would now hit 400, tracked as a
  *     follow-up (caller-aware conditional prepend). Mechanism per Anthropic
- *     docs: prompt caching is content-hash based with a 20-block lookback
- *     window — adding our anchor segments the cumulative hash so the caller's
+ *     docs (https://platform.claude.com/docs/en/docs/build-with-claude/prompt-caching):
+ *     prompt caching is content-hash based with a 20-block lookback window
+ *     — adding our anchor segments the cumulative hash so the caller's
  *     larger entries match across calls instead of missing every time.
+ *     `'ephemeral'` is currently the only valid `cache_control.type` Anthropic
+ *     accepts; if the enum widens (e.g. `persistent`), revisit this constant
+ *     alongside cc-wire-reference §2a — `as const` + the doc-sync test guard
+ *     the runtime side, but the trade-off rationale needs a fresh evaluation
+ *     because a longer-TTL anchor changes the breakpoint-budget math.
  */
 export const CC_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -69,8 +75,12 @@ interface SystemTextBlock {
  * The inner `cache_control` object is frozen too: shallow-freeze would let
  * external code mutate `CC_BLOCK.cache_control.type` and silently invalidate
  * the prompt-cache anchor for every subsequent caller.
+ *
+ * Exported so tests can use the live runtime value as their assertion ground
+ * truth instead of duplicating string literals. Production code should not
+ * pull this directly — go through `ensureSystem`.
  */
-const CC_BLOCK: SystemTextBlock = Object.freeze({
+export const CC_BLOCK: SystemTextBlock = Object.freeze({
   type: 'text',
   text: CC_SYSTEM_PREFIX,
   cache_control: Object.freeze({ type: 'ephemeral' as const }),

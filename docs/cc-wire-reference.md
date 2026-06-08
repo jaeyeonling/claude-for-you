@@ -49,7 +49,7 @@ CC sends `system` as **array of 3 text blocks** in every observed capture (none 
 
 - **First block** starts with `x-anthropic-billing-header: cc_version=2.1.126.<HASH>;cc_…`. **The `<HASH>` differs per CC session** (`75e`, `88d`, `af5`, `e4b`, `198` across our captures). This is the build-time hash CC emits — a real fingerprint axis. Because we forward `body.system` verbatim, the hash naturally varies per CC session in our outbound, which matches what direct CC traffic looks like.
 - **Size distribution**: min 934 B, max 26662 B, mean **~19 KB**. Grows with multi-turn conversation context.
-- **Cache control**: blocks carry `cache_control: { type: "ephemeral" }` for prompt caching (not shown above — strip from synthesized values if reusing).
+- **Cache control**: caller-emitted blocks carry `cache_control: { type: "ephemeral" }` for prompt caching (not shown above — strip when reusing captured blocks as synthesized values). Note: §2a below covers a *separate* proxy-emitted CC_BLOCK that also carries `cache_control: { type: 'ephemeral' }` — same syntax, different owner. Do not confuse the two when reading wire captures.
 
 ---
 
