@@ -326,16 +326,16 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 **증상**: `/v1/messages` 호출이 간헐적으로 504. 응답 헤더에 `Server: Caddy`만 있고 `cf-ray`/`anthropic-*`는 없음. Caddy 로그에 `net/http: timeout awaiting response headers` + `status: 504` + `duration: ~30s`로 클러스터링. 클라이언트 SDK retry로 대부분 마스킹되어 사용자는 가끔 한 번씩만 본다.
 
-**원인**: edge proxy(Caddy)의 `response_header_timeout`이 origin(Bun)의 TTFB ceiling(`UPSTREAM_TTFB_TIMEOUT_MS`, 5분)보다 짧으면, Bun이 응답을 만들기 전에 Caddy가 먼저 abort한다. 1M context prefill처럼 30초 넘는 정상 케이스가 모두 504로 둔갑한다. 2026-06-05 incident에서 24시간 동안 81건 발생, duration 분포는 ~30s에 모두 박혀있어 (변동 0) 운영자가 즉시 timeout임을 식별할 수 있었다.
+**원인**: edge proxy(Caddy)의 `response_header_timeout`이 origin(Bun)의 TTFB ceiling(`UPSTREAM_TTFB_TIMEOUT_MS`, 현재 120s)보다 짧으면, Bun이 응답을 만들기 전에 Caddy가 먼저 abort한다. 1M context prefill처럼 30초 넘는 정상 케이스가 모두 504로 둔갑한다. 2026-06-05 incident에서 24시간 동안 81건 발생, duration 분포는 ~30s에 모두 박혀있어 (변동 0) 운영자가 즉시 timeout임을 식별할 수 있었다. (2026-06-09 #44: upstream.ts 5xx retry / 429 failover 제거 후 단일 round-trip이 wall-clock 상한이 되어 두 값을 5m → 120s로 동시 인하했다. invariant는 그대로다.)
 
 **복구**:
-- 두 값을 일치시킨다. `Caddyfile`의 `response_header_timeout`과 `src/proxy/upstream.ts`의 `UPSTREAM_TTFB_TIMEOUT_MS` 둘 다 같은 값(현재 5m).
+- 두 값을 일치시킨다. `Caddyfile`의 `response_header_timeout`과 `src/proxy/upstream.ts`의 `UPSTREAM_TTFB_TIMEOUT_MS` 둘 다 같은 값(현재 120s).
 - Caddyfile commit 후 `docker compose up -d` — `caddyfile-hash` label trigger가 caddy 컨테이너를 자동 recreate한다(`docker-compose.yml` + `scripts/deploy.sh`의 `CADDYFILE_SHA256` export 체인).
 - 응급 hotfix가 필요하면 EC2에서: `[ -s /tmp/new-caddyfile ] && cat /tmp/new-caddyfile > Caddyfile && docker compose up -d --force-recreate caddy`. **`[ -s ... ]` 가드 필수** — /tmp/new-caddyfile이 없거나 빈 파일이면 `cat`의 redirection이 Caddyfile을 0바이트로 truncate해 caddy boot 실패 + 스택 다운. 가드가 false이면 `&&` chain 전체가 **silent no-op**로 종료(아무 출력 없음, exit 1) — 운영자는 명령 실행 후 `docker compose ps caddy`로 컨테이너 실제 재시작 여부를 항상 확인해야 한다. `sed -i`는 새 inode를 만들어 bind mount를 무력화하므로 절대 쓰지 말 것 (truncate-write가 inode를 보존).
 
-**예방**: 두 timeout은 invariant. 한쪽만 변경하는 PR은 review에서 reject. `Caddyfile` 안에 invariant 주석으로 박제됨 — 다음 사람이 5m을 줄이거나 늘리려고 할 때 즉시 보임.
+**예방**: 두 timeout은 invariant. 한쪽만 변경하는 PR은 review에서 reject. `Caddyfile` 안에 invariant 주석으로 박제됨 — 다음 사람이 120s를 줄이거나 늘리려고 할 때 즉시 보임.
 
-**검증**: EC2에서 `docker compose exec caddy wget -qO- localhost:2019/config/ | grep response_header_timeout` → ns 값이 `UPSTREAM_TTFB_TIMEOUT_MS * 10^6`과 일치 (5m이면 `300000000000`).
+**검증**: EC2에서 `docker compose exec caddy wget -qO- localhost:2019/config/ | grep response_header_timeout` → ns 값이 `UPSTREAM_TTFB_TIMEOUT_MS * 10^6`과 일치 (120s면 `120000000000`).
 
 **결정적 교훈**: 이번 incident는 Caddyfile이 이미 tracked였음에도 30s 값 자체가 두 timeout 간 invariant violation의 source였다. 첫 진단에서 `find` 결과만 보고 "Caddyfile이 untracked"라고 결론낸 게 추가 cycle을 만들었다 — 진짜 문제는 파일의 존재 여부가 아니라 값의 정합성. 두 timeout 중 한쪽만 보는 review는 같은 incident를 다시 만든다.
 
@@ -358,6 +358,30 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 **검증**: src/ 파일을 한 줄이라도 수정한 PR을 머지 + deploy.sh 실행 → `docker ps --format 'table {{.Names}}\t{{.Status}}'`에서 `claude-for-you`의 `Up Xs/Xm` 값이 직전 deploy 이후 시각을 가리킨다. infra-only PR(terraform/, *.md 등) 후에도 동일하게 재생성됨이 P1 채택의 trade-off.
 
 **결정적 교훈**: 처음에는 issue #74 본문이 P3(digest 비교 후 조건부 recreate)를 권장했지만, plan 단계에서 페르소나 검증(impact-analyst)이 짚은 roll-forward digest fragility + Go template escape 위험으로 P1(unconditional)로 선회했다 — "infra-only PR 재시작 회피"라는 P3의 이점이 두 위험을 감수할 만큼 크지 않았다. SSE 스트림 graceful drain은 별도 follow-up으로 분리. **선택지가 본문에 권장된 형태와 정확히 일치할 필요는 없다 — plan 단계 페르소나가 본문이 잡지 못한 trade-off를 짚어낸 사례다.**
+
+---
+
+## 18. Single-org pool에서 429 failover는 정보가치 0 — wall-clock만 태워 504로 둔갑
+
+**증상**: 큰 payload(≥500KB) + 1M-context + thinking-enabled 요청에서 클라이언트(CC SDK)가 `API Error: 504 status code (no body). This is a server-side issue...`를 본다. 동일 세션 안에서 3회까지 SDK 자체 retry가 동일하게 504로 끝난다. Caddy 액세스 로그에는 같은 30초대 구간에 504가 클러스터링되어 있고, 동시에 업스트림은 사실 정직하게 429를 돌려보내고 있었다 — `X-Should-Retry: true`, `Retry-After` 헤더 포함, `Anthropic-Ratelimit-Unified-5h-Status: allowed → exhausted` 전이.
+
+**원인**: `src/proxy/upstream.ts`가 (1) `fetchOnce`에서 5xx retry loop를 돌고 (2) `callUpstream`에서 429 발생 시 다른 풀 멤버로 failover하면서 누적 wait가 Caddy `response_header_timeout`을 넘었다. Caddy가 먼저 abort → 클라이언트에는 Caddy-origin 504(빈 본문) 만 도달 → SDK는 `Retry-After`/`X-Should-Retry`를 못 보고 무차별 retry, 같은 벽을 다시 친다. 게다가:
+
+- **POST `/v1/messages`는 비멱등.** 5xx retry는 업스트림이 부분 처리한 뒤 5xx를 돌려준 경우 double-submit 위험이 있다.
+- **Single-org pool에서 429 failover는 정보가치 0.** Anthropic의 5h/7d quota는 org 단위로 묶여 있다. 같은 org 풀의 다른 멤버에게 다시 물어봐도 답은 같다. failover는 wall-clock만 태운다.
+
+→ "transparent proxy"라는 정체성과도 충돌. 업스트림이 정직하게 보낸 429를 우리가 504로 가공해 클라이언트의 backoff 신호를 날려버린 것.
+
+**복구** (2026-06-09 #44에서 적용 완료):
+- `src/proxy/upstream.ts`에서 5xx retry 상수/함수 (`FIVE_XX_*`, `isTransient5xx`, `fullJitterDelay`)와 `sleep` 헬퍼, `callUpstream`의 429 failover 분기를 모두 제거.
+- 401 refresh + 동일 풀 멤버 1회 retry는 그대로 유지 (refresh token은 우리만 가지고 있어서 클라이언트가 자력으로 회복 불가).
+- `UPSTREAM_TTFB_TIMEOUT_MS` 5min → 120s, `Caddyfile` `response_header_timeout` 5m → 120s. #16 invariant 그대로 유지.
+
+**예방**: 풀의 가치를 다시 못 박는다. **per-session token routing + 401 refresh fallback** 이지, quota 분산이 아니다. 풀에 cross-org 계정이 정말로 들어오는 날이 오면 bounded(≤10s) failover를 다시 도입할 수 있지만, 그날까지는 single-round-trip이 옳다.
+
+**검증**: `tests/upstream.test.ts`가 (A) 429 verbatim surface, (B) 502/503/504 verbatim surface, (C) 401 refresh + 1회 retry, (D) 401 후에도 401이면 surface — 네 가지 invariant를 픽스처로 박제한다. PR R2(behavioral fuzz)에서 staging 상대로 429-storm replay + 큰 payload TTFB 실측.
+
+**결정적 교훈**: "transparent proxy"라는 정체성을 두 번 잃었다 — #16에서는 timeout invariant 위반으로, #18에서는 retry 정책이 정직한 업스트림 응답을 가공해서. 둘 다 *"우리가 클라이언트 대신 잘해주려고"* 끼어든 코드가 원인이었다. 우리는 OAuth refresh처럼 **클라이언트가 못 하는 일만** 한다 — 그 외에는 비켜선다. cross-link: #16 (timeout invariant).
 
 ---
 
