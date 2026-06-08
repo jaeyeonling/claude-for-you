@@ -26,6 +26,7 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 | `aws_iam_role_policy.env_param_read` | Read just `/claude-for-you/env` and `/claude-for-you/database-url` |
 | `aws_ssm_parameter.env` | SecureString — operator-managed (`.env` contents) |
 | `aws_ssm_parameter.database_url` | SecureString — terraform-owned (RDS connection string) |
+| `aws_ssm_parameter.github_deploy_key` | SecureString — operator-managed (SSH private key for the GitHub repo deploy key) |
 | `aws_route53_record.app` | Created only when `domain_zone_id` and `domain_name` are both set |
 
 ## Variables (`variables.tf`)
@@ -89,20 +90,44 @@ sudo docker compose up -d
 
 ### Private-repo support (optional)
 
-When the repo is private, populate the GitHub PAT parameter so cloud-init
-and `scripts/deploy.sh` can authenticate:
+When the repo is private, register an SSH deploy key. The EC2 instance
+fetches the private half from SSM at boot and at every deploy; the public
+half lives on GitHub as a per-repo read-only deploy key.
+
+The previous flow stored a GitHub PAT in SSM and embedded it directly into
+the clone URL, which meant any git error printed the PAT to operator
+scrollback via `StandardErrorContent`. SSH keys avoid that channel — the
+key never appears in URLs, `git remote -v`, or git's stderr.
 
 ```bash
+# 1. Generate an ED25519 key locally (no passphrase — the instance fetches
+#    it programmatically).
+ssh-keygen -t ed25519 -f claude-for-you-deploy -N ''
+
+# 2. Store the PRIVATE half in SSM.
 aws ssm put-parameter \
-  --name /claude-for-you/github-pat \
-  --value "ghp_xxx" \
+  --name /claude-for-you/github-deploy-key \
+  --value "$(cat claude-for-you-deploy)" \
   --type SecureString --overwrite \
   --region ap-northeast-2
+
+# 3. Register the PUBLIC half as a repo deploy key (read-only is enough).
+gh repo deploy-key add claude-for-you-deploy.pub \
+  --title "claude-for-you ec2 deploy" \
+  --repo <owner>/<repo>
+
+# 4. Shred the local copy of the private key — SSM is the source of truth now.
+shred -u claude-for-you-deploy claude-for-you-deploy.pub  # or rm -P / srm on macOS
 ```
 
-A PAT with `repo:read` scope (fine-grained: contents read for this single
-repo) is enough. While the placeholder is intact, cloud-init falls back to
-anonymous clone (only works for public repos).
+While the placeholder SSM value is intact, cloud-init falls back to
+anonymous clone (only works for public repos), and `scripts/deploy.sh`
+exits early with an explicit error.
+
+`scripts/deploy.sh` and the cloud-init bootstrap both pin GitHub's published
+host keys (ED25519 + ECDSA + RSA) into `~ec2-user/.ssh/known_hosts` — there
+is no first-contact TOFU. If GitHub rotates a host key, update the entries
+in `terraform/main.tf` and `scripts/deploy.sh` together.
 
 ## Destroy
 
