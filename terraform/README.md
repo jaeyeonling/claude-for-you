@@ -10,6 +10,7 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 - `aws configure` with credentials that can manage EC2, RDS, IAM, SSM, and (optionally) Route53
 - `session-manager-plugin` (e.g., `brew install --cask session-manager-plugin`)
 - Terraform ≥ 1.6
+- GitHub CLI (`gh`, e.g., `brew install gh`) — only for the private-repo deploy-key registration step; not required for public repos.
 
 ## What gets created
 
@@ -23,7 +24,7 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 | `random_password.db_master` | 32-char alphanumeric + `_-` (URL-safe) |
 | `aws_iam_role.app` + `aws_iam_instance_profile.app` | EC2 → SSM + Parameter Store read |
 | `aws_iam_role_policy_attachment.ssm_managed_core` | `AmazonSSMManagedInstanceCore` |
-| `aws_iam_role_policy.env_param_read` | Read just `/claude-for-you/env` and `/claude-for-you/database-url` |
+| `aws_iam_role_policy.env_param_read` | Read `/claude-for-you/env`, `/claude-for-you/database-url`, and `/claude-for-you/github-deploy-key` |
 | `aws_ssm_parameter.env` | SecureString — operator-managed (`.env` contents) |
 | `aws_ssm_parameter.database_url` | SecureString — terraform-owned (RDS connection string) |
 | `aws_ssm_parameter.github_deploy_key` | SecureString — operator-managed (SSH private key for the GitHub repo deploy key) |
@@ -67,6 +68,11 @@ RDS provisioning is the slow step (~5–7 minutes). EC2 + IAM finish in under 60
 
 ## After apply
 
+> **Private repo only**: complete the [Private-repo support](#private-repo-support-optional) section
+> **before** invoking `scripts/deploy.sh`. `deploy.sh` exits early with
+> `SSM /claude-for-you/github-deploy-key is empty/placeholder` if the key
+> parameter still holds its placeholder value.
+
 ```bash
 # 1. Upload your local .env to SSM SecureString
 aws ssm put-parameter \
@@ -88,7 +94,7 @@ sudo docker build -t claude-for-you:latest .
 sudo docker compose up -d
 ```
 
-### Private-repo support (optional)
+### Private-repo support (optional) <a id="private-repo-support-optional"></a>
 
 When the repo is private, register an SSH deploy key. The EC2 instance
 fetches the private half from SSM at boot and at every deploy; the public
@@ -117,7 +123,13 @@ gh repo deploy-key add claude-for-you-deploy.pub \
   --repo <owner>/<repo>
 
 # 4. Shred the local copy of the private key — SSM is the source of truth now.
-shred -u claude-for-you-deploy claude-for-you-deploy.pub  # or rm -P / srm on macOS
+shred -u claude-for-you-deploy claude-for-you-deploy.pub
+# macOS notes: GNU `shred` isn't bundled (install via `brew install coreutils`,
+# then `gshred -u …`). Modern macOS (APFS) does not expose a working
+# secure-erase tool — `rm -P` is silently ignored on APFS, `srm` was removed.
+# `rm` is acceptable since SSM is the source of truth; just delete it
+# (`rm claude-for-you-deploy claude-for-you-deploy.pub`) and do not back the
+# files up unencrypted.
 ```
 
 While the placeholder SSM value is intact, cloud-init falls back to

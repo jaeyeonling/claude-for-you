@@ -44,6 +44,30 @@ aws ssm put-parameter \
   --region "$REGION" >/dev/null
 echo "  uploaded ✓"
 
+# Outer pre-flight: detect the placeholder deploy-key BEFORE the SSM
+# invocation. Without this, the same check inside commands[] fails the run
+# from inside the remote shell, where the only signal back is the polling
+# loop and the truncated StandardErrorContent. Catching it here gives the
+# operator a remediation pointer immediately.
+echo "▸ Verifying SSH deploy key in SSM..."
+DEPLOY_KEY_VAL=$(aws ssm get-parameter \
+  --name /claude-for-you/github-deploy-key \
+  --with-decryption \
+  --region "$REGION" \
+  --query 'Parameter.Value' \
+  --output text 2>/dev/null || echo "PLACEHOLDER_RUN_PUT_PARAMETER")
+if [ "$DEPLOY_KEY_VAL" = "PLACEHOLDER_RUN_PUT_PARAMETER" ] || [ -z "$DEPLOY_KEY_VAL" ]; then
+  echo "  ✗ SSM /claude-for-you/github-deploy-key is empty/placeholder."
+  echo "    Register a deploy key first — see terraform/README.md → \"Private-repo support\":"
+  echo "      ssh-keygen -t ed25519 -f claude-for-you-deploy -N ''"
+  echo "      aws ssm put-parameter --name /claude-for-you/github-deploy-key \\"
+  echo "        --value \"\$(cat claude-for-you-deploy)\" --type SecureString --overwrite --region $REGION"
+  echo "      gh repo deploy-key add claude-for-you-deploy.pub --title 'claude-for-you ec2 deploy' --repo <owner>/<repo>"
+  exit 1
+fi
+unset DEPLOY_KEY_VAL  # don't keep the private key in the parent shell environment any longer than needed
+echo "  populated ✓"
+
 echo "▸ Running remote setup (SSH key bootstrap, git pull, fetch-env, docker build + up)..."
 # The remote script:
 #   1. Bootstraps the SSH deploy key from SSM into ~ec2-user/.ssh/ with a
@@ -72,7 +96,7 @@ CMD_ID=$(aws ssm send-command \
     "DEPLOY_KEY=$(aws ssm get-parameter --name /claude-for-you/github-deploy-key --with-decryption --region '"$REGION"' --query Parameter.Value --output text 2>/dev/null || echo PLACEHOLDER_RUN_PUT_PARAMETER)",
     "if [ \"$DEPLOY_KEY\" = \"PLACEHOLDER_RUN_PUT_PARAMETER\" ] || [ -z \"$DEPLOY_KEY\" ]; then echo \"[deploy] SSM /claude-for-you/github-deploy-key is empty/placeholder. Populate it before running deploy.sh.\" >&2; exit 1; fi",
     "install -d -m 700 -o ec2-user -g ec2-user /home/ec2-user/.ssh",
-    "umask 077 && echo \"$DEPLOY_KEY\" > /home/ec2-user/.ssh/id_ed25519_claude_for_you",
+    "(umask 077 && printf '%s\\n' \"$DEPLOY_KEY\" > /home/ec2-user/.ssh/id_ed25519_claude_for_you)",
     "chown ec2-user:ec2-user /home/ec2-user/.ssh/id_ed25519_claude_for_you && chmod 600 /home/ec2-user/.ssh/id_ed25519_claude_for_you",
     "{ echo \"Host github.com\"; echo \"  HostName github.com\"; echo \"  User git\"; echo \"  IdentityFile ~/.ssh/id_ed25519_claude_for_you\"; echo \"  IdentitiesOnly yes\"; } > /home/ec2-user/.ssh/config",
     "chown ec2-user:ec2-user /home/ec2-user/.ssh/config && chmod 600 /home/ec2-user/.ssh/config",

@@ -87,24 +87,26 @@ bun run dev
 
 ```bash
 # 1. SSH 키 페어 불필요 — 세션은 AWS Systems Manager 경유
-brew install --cask session-manager-plugin
-
-# (선택) private repo면 terraform apply 후 PAT 등록:
-#   aws ssm put-parameter --name /claude-for-you/github-pat \
-#     --value "ghp_xxx" --type SecureString --overwrite --region ap-northeast-2
+brew install --cask session-manager-plugin gh
 
 # 2. terraform.tfvars 수정 (선택사항 — 기본값으로도 대부분 OK)
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 cd terraform && terraform init && terraform apply
 
-# 3. .env 내용을 SSM SecureString으로 업로드
+# 3. (private repo만 해당 — deploy.sh 실행 전 필수) SSH deploy key 등록.
+#    상세 4단계는 terraform/README.md → "Private-repo support" 참조:
+#    ssh-keygen → aws ssm put-parameter /claude-for-you/github-deploy-key →
+#    gh repo deploy-key add → 로컬 키 shred.
+#    public repo: 이 단계 생략. cloud-init이 anonymous로 clone한다.
+
+# 4. .env 내용을 SSM SecureString으로 업로드
 aws ssm put-parameter \
   --name /claude-for-you/env \
   --value "$(cat .env)" \
   --type SecureString --overwrite \
   --region ap-northeast-2
 
-# 4. 인스턴스에 SSM 세션 진입 + 스택 기동
+# 5. 인스턴스에 SSM 세션 진입 + 스택 기동
 aws ssm start-session --target $(terraform output -raw instance_id) --region ap-northeast-2
 $ sudo /usr/local/bin/fetch-env.sh
 $ cd /home/ec2-user/claude-for-you && sudo docker build -t claude-for-you:latest . && sudo docker compose up -d

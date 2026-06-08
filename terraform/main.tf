@@ -337,8 +337,9 @@ locals {
       chmod 700 /home/ec2-user/.ssh
 
       # Private key — only readable by ec2-user, never embedded in URLs.
-      printf '%s\n' "$${DEPLOY_KEY}" > /home/ec2-user/.ssh/id_ed25519_claude_for_you
-      chmod 600 /home/ec2-user/.ssh/id_ed25519_claude_for_you
+      # Subshell `umask 077` makes the file land at 0600 atomically, closing
+      # the brief 0644 window that a plain `printf > … ; chmod 600` opens.
+      (umask 077 && printf '%s\n' "$${DEPLOY_KEY}" > /home/ec2-user/.ssh/id_ed25519_claude_for_you)
 
       # Pin the deploy key to github.com so it isn't offered to other hosts.
       cat > /home/ec2-user/.ssh/config <<SSHCFG
