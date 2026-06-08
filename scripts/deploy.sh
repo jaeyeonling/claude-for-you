@@ -44,15 +44,24 @@ aws ssm put-parameter \
   --region "$REGION" >/dev/null
 echo "  uploaded ✓"
 
-echo "▸ Running remote setup (git pull, fetch-env, docker build + up)..."
+echo "▸ Running remote setup (SSH key bootstrap, git pull, fetch-env, docker build + up)..."
 # The remote script:
-#   1. Resolves the git URL with PAT injection if /github-pat is populated
-#      (private-repo support; falls back to anonymous for public repos).
-#   2. Clones if missing, otherwise fetches + resets to origin/main.
+#   1. Bootstraps the SSH deploy key from SSM into ~ec2-user/.ssh/ with a
+#      pinned ssh_config and explicit (non-TOFU) GitHub host keys. This is
+#      idempotent — pre-existing files are overwritten each deploy, so a
+#      rotated key takes effect immediately.
+#   2. Clones via git@github.com if missing; otherwise re-points the remote
+#      to the SSH URL (in case the instance still has an old HTTPS+PAT
+#      remote from the previous deploy flow) and resets to origin/main.
 #   3. Pulls SSM secrets into .env via fetch-env.sh.
 #   4. Builds the docker image with plain `docker build` (NOT `compose --build`)
 #      to sidestep buildx version requirements in compose v5.x bundles.
 #   5. Starts the stack with `docker compose up -d`.
+#
+# Why SSH instead of HTTPS+PAT: the prior flow embedded the PAT in the
+# clone URL, so any git failure surfaced the token in stderr →
+# StandardErrorContent → operator scrollback. The SSH key never appears
+# in URLs or git remote error output.
 CMD_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
@@ -60,11 +69,18 @@ CMD_ID=$(aws ssm send-command \
   --region "$REGION" \
   --parameters 'commands=[
     "set -euo pipefail",
-    "PAT=$(aws ssm get-parameter --name /claude-for-you/github-pat --with-decryption --region '"$REGION"' --query Parameter.Value --output text 2>/dev/null || echo PLACEHOLDER_RUN_PUT_PARAMETER)",
-    "BASE_URL=https://github.com/jaeyeonling/claude-for-you.git",
-    "if [ \"$PAT\" != \"PLACEHOLDER_RUN_PUT_PARAMETER\" ] && [ -n \"$PAT\" ]; then CLONE_URL=$(echo \"$BASE_URL\" | sed \"s#https://github.com/#https://oauth2:$PAT@github.com/#\"); else CLONE_URL=\"$BASE_URL\"; fi",
-    "if [ ! -d /home/ec2-user/claude-for-you ]; then sudo -u ec2-user git clone \"$CLONE_URL\" /home/ec2-user/claude-for-you; fi",
-    "cd /home/ec2-user/claude-for-you && sudo -u ec2-user git remote set-url origin \"$CLONE_URL\" && sudo -u ec2-user git fetch --depth=1 origin main && sudo -u ec2-user git reset --hard origin/main",
+    "DEPLOY_KEY=$(aws ssm get-parameter --name /claude-for-you/github-deploy-key --with-decryption --region '"$REGION"' --query Parameter.Value --output text 2>/dev/null || echo PLACEHOLDER_RUN_PUT_PARAMETER)",
+    "if [ \"$DEPLOY_KEY\" = \"PLACEHOLDER_RUN_PUT_PARAMETER\" ] || [ -z \"$DEPLOY_KEY\" ]; then echo \"[deploy] SSM /claude-for-you/github-deploy-key is empty/placeholder. Populate it before running deploy.sh.\" >&2; exit 1; fi",
+    "install -d -m 700 -o ec2-user -g ec2-user /home/ec2-user/.ssh",
+    "umask 077 && echo \"$DEPLOY_KEY\" > /home/ec2-user/.ssh/id_ed25519_claude_for_you",
+    "chown ec2-user:ec2-user /home/ec2-user/.ssh/id_ed25519_claude_for_you && chmod 600 /home/ec2-user/.ssh/id_ed25519_claude_for_you",
+    "{ echo \"Host github.com\"; echo \"  HostName github.com\"; echo \"  User git\"; echo \"  IdentityFile ~/.ssh/id_ed25519_claude_for_you\"; echo \"  IdentitiesOnly yes\"; } > /home/ec2-user/.ssh/config",
+    "chown ec2-user:ec2-user /home/ec2-user/.ssh/config && chmod 600 /home/ec2-user/.ssh/config",
+    "{ echo \"github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\"; echo \"github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=\"; echo \"github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=\"; } > /home/ec2-user/.ssh/known_hosts",
+    "chown ec2-user:ec2-user /home/ec2-user/.ssh/known_hosts && chmod 644 /home/ec2-user/.ssh/known_hosts",
+    "CLONE_URL=git@github.com:jaeyeonling/claude-for-you.git",
+    "if [ ! -d /home/ec2-user/claude-for-you ]; then sudo -Hu ec2-user git clone \"$CLONE_URL\" /home/ec2-user/claude-for-you; fi",
+    "cd /home/ec2-user/claude-for-you && sudo -Hu ec2-user git remote set-url origin \"$CLONE_URL\" && sudo -Hu ec2-user git fetch --depth=1 origin main && sudo -Hu ec2-user git reset --hard origin/main",
     "sudo /usr/local/bin/fetch-env.sh",
     "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && [ \"${#CADDYFILE_SHA256}\" -eq 64 ] && docker build -t claude-for-you:latest . && docker compose up -d"
   ]' \
