@@ -341,6 +341,26 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 ---
 
+## 17. `docker compose up -d`는 `:latest` 태그 digest 변경을 인지하지 못한다 — src/ PR이 stale 컨테이너로 서빙됨
+
+**증상**: src/ 변경 PR이 머지되고 `scripts/deploy.sh`가 성공으로 끝났는데도 app 컨테이너의 `StartedAt`은 갱신되지 않고 옛 코드가 계속 서빙된다. `docker compose ps`는 `Up 12 hours`처럼 직전 deploy 이전 시각을 보인다. `/healthz`는 정상 응답이라 synthetic check로는 잡히지 않는다. 운영자는 deploy 로그상 SSM `Success` + `/healthz ✓`를 보고 deploy가 끝났다고 결론낸다.
+
+**원인**: `docker compose up -d`는 compose 서비스의 `image:` 참조(우리 경우 `claude-for-you:latest`)를 비교한다 — 컨테이너가 실제로 실행 중인 이미지의 **digest**를 비교하지 않는다. `docker build -t claude-for-you:latest .`이 `:latest` 태그를 새 digest로 옮겨도 compose 입장에서는 서비스 정의가 그대로(`claude-for-you:latest`)이므로 컨테이너 재생성 사유가 없다고 판단한다. 결과: 새 이미지는 만들어졌지만 새 컨테이너로 회전되지 않는다.
+
+이 함정은 PR #54/#70/#73이 deploy chain의 위쪽 단계(SSH 키 부트스트랩, git fetch silent 실패)를 시끄럽게 실패하게 만들기 전까지는 가려져 있었다. 위쪽 단계가 잡힌 뒤에야 src/ 변경이 컨테이너 재생성 단계까지 도달하게 되었고, 거기서 이 함정이 표면화됐다 (issue #74).
+
+**복구**:
+- `scripts/deploy.sh`는 PR #74 이후 `docker compose up -d --force-recreate --no-deps claude-for-you` + 후속 `docker compose up -d`로 변경되어 매 deploy당 컨테이너를 강제 재생성한다. operator가 수동 작업할 일은 일반적으로 없다.
+- 수동 hotfix가 필요한 상황(예: hot-patched 이미지를 즉시 적용): `docker compose up -d --force-recreate --no-deps claude-for-you`. Caddy는 `caddyfile-hash` label에 묶여 있으므로 `--no-deps`로 cascade를 차단한다 (Caddy가 함께 재생성될 이유가 없을 때).
+
+**예방**: 이 함정은 `:latest` 태그의 의미와 compose의 서비스 참조 비교 방식이 만나는 지점에서 발생한다. SHA-tag 기반 image 참조(`claude-for-you:<git-sha>`)로 옮기면 자연스럽게 회피되지만 deploy.sh + docker-compose.yml + Dockerfile 변경 surface가 커진다 — 현재는 P1(unconditional force-recreate)로 KISS 처리. deploy당 2-3초 overhead를 받아들인 대신 디버깅 복잡도와 roll-forward 시 digest-cache 함정을 동시에 해소한다.
+
+**검증**: src/ 파일을 한 줄이라도 수정한 PR을 머지 + deploy.sh 실행 → `docker ps --format 'table {{.Names}}\t{{.Status}}'`에서 `claude-for-you`의 `Up Xs/Xm` 값이 직전 deploy 이후 시각을 가리킨다. infra-only PR(terraform/, *.md 등) 후에도 동일하게 재생성됨이 P1 채택의 trade-off.
+
+**결정적 교훈**: 처음에는 issue #74 본문이 P3(digest 비교 후 조건부 recreate)를 권장했지만, plan 단계에서 페르소나 검증(impact-analyst)이 짚은 roll-forward digest fragility + Go template escape 위험으로 P1(unconditional)로 선회했다 — "infra-only PR 재시작 회피"라는 P3의 이점이 두 위험을 감수할 만큼 크지 않았다. SSE 스트림 graceful drain은 별도 follow-up으로 분리. **선택지가 본문에 권장된 형태와 정확히 일치할 필요는 없다 — plan 단계 페르소나가 본문이 잡지 못한 trade-off를 짚어낸 사례다.**
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```

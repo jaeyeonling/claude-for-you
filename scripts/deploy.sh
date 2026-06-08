@@ -130,6 +130,20 @@ echo "▸ Running remote setup (SSH key bootstrap, git pull, fetch-env, docker b
 # command exit non-zero instead of proceeding to docker build with the
 # stale working tree.
 #
+# Why the SSM `commands[]` array entries can share shell state: AWS
+# Systems Manager Agent (`aws:runShellScript`) joins the array with
+# newlines into one temporary script file and executes it with a
+# single shell invocation. Variables defined in one entry
+# (`DEPLOY_KEY=$(aws ssm get-parameter …)`), shell options
+# (`set -euo pipefail`), and cwd (`cd /home/ec2-user/claude-for-you`)
+# persist to subsequent entries. This is the precondition the `#71 P1`
+# git-chain split below relies on — `cd` on its own line is followed
+# by `git remote set-url`/`fetch`/`reset` on the next lines, and
+# `set -e` from the first entry terminates the whole script on the
+# first non-zero exit. Evidence: pre-existing entries (`DEPLOY_KEY`
+# defined on one line, consumed on the next) have been running in
+# production since PR #54.
+#
 # Why unconditional `docker compose up -d --force-recreate --no-deps
 # claude-for-you` after `docker build` (issue #74): under the `:latest`
 # tag, `docker compose up -d` compares the compose service reference,
