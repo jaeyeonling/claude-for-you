@@ -35,16 +35,19 @@
 		# Streaming responses need flush_interval -1 so SSE chunks aren't buffered.
 		flush_interval -1
 		# Timeouts. response_header_timeout (TTFB) MUST equal
-		# UPSTREAM_TTFB_TIMEOUT_MS in src/proxy/upstream.ts (currently 5m).
+		# UPSTREAM_TTFB_TIMEOUT_MS in src/proxy/upstream.ts (currently 120s).
 		# If Caddy aborts before Bun gives up, the client sees a Caddy-origin 504
 		# with `net/http: timeout awaiting response headers` — see
 		# docs/operational-pitfalls.md #16 for the 2026-06-05 incident that put
-		# the two values out of sync (Caddy at 30s, Bun at 5m).
+		# the two values out of sync (Caddy at 30s, Bun at 5m). 2026-06-09 #44
+		# lowered both from 5m → 120s after the 5xx retry / 429 failover loops
+		# were removed from upstream.ts (single-round-trip is now the only
+		# wall-clock cost). The invariant remains: change one, change the other.
 		# read/write_timeout cover the streaming body and can stay longer than
 		# the Bun ceiling; they only matter once headers have arrived.
 		transport http {
 			dial_timeout 10s
-			response_header_timeout 5m
+			response_header_timeout 120s
 			read_timeout 10m
 			write_timeout 10m
 		}
