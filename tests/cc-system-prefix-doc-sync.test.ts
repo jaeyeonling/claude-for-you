@@ -29,4 +29,14 @@ describe('CC_SYSTEM_PREFIX docs sync', () => {
     // a future refactor moves the value out of Section 2a entirely.
     expect(docText).toMatch(/##\s*2a\.\s*Entitlement marker invariant/);
   });
+
+  test("cc-wire-reference.md §2a documents the cache_control: ephemeral anchor (#55)", () => {
+    // Issue #55: CC_BLOCK carries cache_control: { type: 'ephemeral' } as a
+    // prompt-cache prefix anchor. If a future refactor silently drops that
+    // field from the doc, operators read a stale invariant — the same class
+    // of misdiagnosis the prefix-existence guards above were built to prevent.
+    // We assert the verbatim substring so the doc stays sync'd with the
+    // runtime CC_BLOCK shape.
+    expect(docText).toContain("cache_control: { type: 'ephemeral' }");
+  });
 });

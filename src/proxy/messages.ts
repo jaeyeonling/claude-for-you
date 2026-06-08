@@ -40,6 +40,26 @@ import { tapResponseBody } from './response-tap.js';
  *     a caller from forging the identity by prefixing their own body with the
  *     marker. Caller's original intent (custom persona, cache_control on
  *     blocks) is preserved verbatim as the second+ blocks. See pitfalls #13.
+ *   2026-06-08 — `CC_BLOCK` now carries `cache_control: { type: 'ephemeral' }`
+ *     to act as an explicit prompt-cache anchor (issue #55). The earlier
+ *     shape silently pushed every caller cache_control breakpoint one slot
+ *     deeper, which broke the content-hash prefix Anthropic uses for cache
+ *     lookups and dropped sonnet/opus hit rate from ~95% to ~0% (~4-5x
+ *     effective input cost). With our own breakpoint, the caller's downstream
+ *     cache_control blocks anchor against a deterministic CC_BLOCK prefix.
+ *     Trade-off: this consumes 1 of the 4 cache_control breakpoints Anthropic
+ *     counts across system+messages+tools. Real CC traffic uses 2 → +1 is
+ *     safe; SDK callers maxing out at 4 would now hit 400, tracked as a
+ *     follow-up (caller-aware conditional prepend). Mechanism per Anthropic
+ *     docs (https://platform.claude.com/docs/en/docs/build-with-claude/prompt-caching):
+ *     prompt caching is content-hash based with a 20-block lookback window
+ *     — adding our anchor segments the cumulative hash so the caller's
+ *     larger entries match across calls instead of missing every time.
+ *     `'ephemeral'` is currently the only valid `cache_control.type` Anthropic
+ *     accepts; if the enum widens (e.g. `persistent`), revisit this constant
+ *     alongside cc-wire-reference §2a — `as const` + the doc-sync test guard
+ *     the runtime side, but the trade-off rationale needs a fresh evaluation
+ *     because a longer-TTL anchor changes the breakpoint-budget math.
  */
 export const CC_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -49,9 +69,22 @@ interface SystemTextBlock {
   readonly cache_control?: unknown;
 }
 
-/** Module-singleton — Object.freeze keeps V8's hidden class stable so the
- * inline cache for the prepended block doesn't churn under hot-path load. */
-const CC_BLOCK: SystemTextBlock = Object.freeze({ type: 'text', text: CC_SYSTEM_PREFIX });
+/**
+ * Module-singleton — `Object.freeze` (deep) keeps V8's hidden class stable so
+ * the inline cache for the prepended block doesn't churn under hot-path load.
+ * The inner `cache_control` object is frozen too: shallow-freeze would let
+ * external code mutate `CC_BLOCK.cache_control.type` and silently invalidate
+ * the prompt-cache anchor for every subsequent caller.
+ *
+ * Exported so tests can use the live runtime value as their assertion ground
+ * truth instead of duplicating string literals. Production code should not
+ * pull this directly — go through `ensureSystem`.
+ */
+export const CC_BLOCK: SystemTextBlock = Object.freeze({
+  type: 'text',
+  text: CC_SYSTEM_PREFIX,
+  cache_control: Object.freeze({ type: 'ephemeral' as const }),
+});
 
 /**
  * Normalize `system` so the upstream entitlement gate always sees a proxy-owned

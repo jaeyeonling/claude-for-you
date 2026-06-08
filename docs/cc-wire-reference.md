@@ -49,7 +49,7 @@ CC sends `system` as **array of 3 text blocks** in every observed capture (none 
 
 - **First block** starts with `x-anthropic-billing-header: cc_version=2.1.126.<HASH>;cc_…`. **The `<HASH>` differs per CC session** (`75e`, `88d`, `af5`, `e4b`, `198` across our captures). This is the build-time hash CC emits — a real fingerprint axis. Because we forward `body.system` verbatim, the hash naturally varies per CC session in our outbound, which matches what direct CC traffic looks like.
 - **Size distribution**: min 934 B, max 26662 B, mean **~19 KB**. Grows with multi-turn conversation context.
-- **Cache control**: blocks carry `cache_control: { type: "ephemeral" }` for prompt caching (not shown above — strip from synthesized values if reusing).
+- **Cache control**: caller-emitted blocks carry `cache_control: { type: "ephemeral" }` for prompt caching (not shown above — strip when reusing captured blocks as synthesized values). Note: §2a below covers a *separate* proxy-emitted CC_BLOCK that also carries `cache_control: { type: 'ephemeral' }` — same syntax, different owner. Do not confuse the two when reading wire captures.
 
 ---
 
@@ -69,7 +69,9 @@ Anthropic's Claude.ai-OAuth-issued tokens require the upstream `system` array to
 You are Claude Code, Anthropic's official CLI for Claude.
 ```
 
-`ensureSystem()` always prepends `{ type: 'text', text: CC_SYSTEM_PREFIX }` as the **first** element of the outbound `system` array, regardless of what the caller sent. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction.
+`ensureSystem()` always prepends `{ type: 'text', text: CC_SYSTEM_PREFIX, cache_control: { type: 'ephemeral' } }` as the **first** element of the outbound `system` array, regardless of what the caller sent. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction.
+
+The `cache_control: { type: 'ephemeral' }` field is a prefix-hash anchor — without it the prepend silently pushes caller cache_control breakpoints one slot deeper and breaks Anthropic prompt cache matching (issue #55). It also consumes one of the 4 cache_control breakpoints Anthropic counts across system+messages+tools combined — a trade-off documented at the patch site (`src/proxy/messages.ts`).
 
 ### Drift signature
 
