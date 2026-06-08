@@ -370,7 +370,9 @@ KNOWN
       CLONE_URL="${var.git_repo_url}"
     fi
 
-    sudo -u ec2-user bash -c "cd /home/ec2-user && git clone $${CLONE_URL} claude-for-you" || \
+    # -H sets HOME=/home/ec2-user so SSH finds the deploy key under ~ec2-user/.ssh/.
+    # Without -H, sudo inherits root's HOME and SSH would look in /root/.ssh/.
+    sudo -Hu ec2-user bash -c "cd /home/ec2-user && git clone $${CLONE_URL} claude-for-you" || \
       echo "[user-data] git clone failed (private repo without deploy key?). Operator can clone manually after SSM-session entry."
     %{endif~}
 
