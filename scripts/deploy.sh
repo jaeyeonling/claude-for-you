@@ -96,6 +96,22 @@ echo "▸ Running remote setup (SSH key bootstrap, git pull, fetch-env, docker b
 # clone URL, so any git failure surfaced the token in stderr →
 # StandardErrorContent → operator scrollback. The SSH key never appears
 # in URLs or git remote error output.
+#
+# Why `echo "$DEPLOY_KEY"` instead of `printf '%s\n' "$DEPLOY_KEY"`:
+# the AWS CLI shorthand parser collapses `\\n` inside commands[] entries
+# to a literal `n`, producing a key file whose final line ends with
+# `KEY-----n` instead of `KEY-----\n`. OpenSSH then rejects the format
+# with `error in libcrypto`, git fetch fails with `Permission denied
+# (publickey)`, and (per issue #71) the rest of commands[] continues
+# silently. `echo` writes the trailing newline natively. ED25519 PEM
+# bodies don't contain `\` or leading `-` characters that would trip
+# echo's quirks. (See issue #72 for the full diagnosis.)
+#
+# Why the HEAD_LOCAL/HEAD_REMOTE gate after git reset: post-condition
+# guard against issue #71 — if `git fetch` or `git reset` silently
+# fails, HEAD won't advance to origin/main and the gate makes the SSM
+# command exit non-zero instead of proceeding to docker build with the
+# stale working tree.
 CMD_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
@@ -106,7 +122,7 @@ CMD_ID=$(aws ssm send-command \
     "DEPLOY_KEY=$(aws ssm get-parameter --name /claude-for-you/github-deploy-key --with-decryption --region '"$REGION"' --query Parameter.Value --output text 2>/dev/null || echo PLACEHOLDER_RUN_PUT_PARAMETER)",
     "if [ \"$DEPLOY_KEY\" = \"PLACEHOLDER_RUN_PUT_PARAMETER\" ] || [ -z \"$DEPLOY_KEY\" ]; then echo \"[deploy] SSM /claude-for-you/github-deploy-key is empty/placeholder. Populate it before running deploy.sh.\" >&2; exit 1; fi",
     "install -d -m 700 -o ec2-user -g ec2-user /home/ec2-user/.ssh",
-    "(umask 077 && printf '%s\\n' \"$DEPLOY_KEY\" > /home/ec2-user/.ssh/id_ed25519_claude_for_you)",
+    "(umask 077 && echo \"$DEPLOY_KEY\" > /home/ec2-user/.ssh/id_ed25519_claude_for_you)",
     "chown ec2-user:ec2-user /home/ec2-user/.ssh/id_ed25519_claude_for_you && chmod 600 /home/ec2-user/.ssh/id_ed25519_claude_for_you",
     "{ echo \"Host github.com\"; echo \"  HostName github.com\"; echo \"  User git\"; echo \"  IdentityFile ~/.ssh/id_ed25519_claude_for_you\"; echo \"  IdentitiesOnly yes\"; } > /home/ec2-user/.ssh/config",
     "chown ec2-user:ec2-user /home/ec2-user/.ssh/config && chmod 600 /home/ec2-user/.ssh/config",
@@ -115,6 +131,7 @@ CMD_ID=$(aws ssm send-command \
     "CLONE_URL=git@github.com:jaeyeonling/claude-for-you.git",
     "if [ ! -d /home/ec2-user/claude-for-you ]; then sudo -Hu ec2-user git clone \"$CLONE_URL\" /home/ec2-user/claude-for-you; fi",
     "cd /home/ec2-user/claude-for-you && sudo -Hu ec2-user git remote set-url origin \"$CLONE_URL\" && sudo -Hu ec2-user git fetch --depth=1 origin main && sudo -Hu ec2-user git reset --hard origin/main",
+    "HEAD_LOCAL=$(sudo -Hu ec2-user git -C /home/ec2-user/claude-for-you rev-parse HEAD); HEAD_REMOTE=$(sudo -Hu ec2-user git -C /home/ec2-user/claude-for-you rev-parse origin/main); [ \"$HEAD_LOCAL\" = \"$HEAD_REMOTE\" ] || { echo \"[deploy] HEAD did not advance to origin/main ($HEAD_LOCAL != $HEAD_REMOTE) -- git fetch or reset silently failed. Aborting before docker build.\" >&2; exit 1; }",
     "sudo /usr/local/bin/fetch-env.sh",
     "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && [ \"${#CADDYFILE_SHA256}\" -eq 64 ] && docker build -t claude-for-you:latest . && docker compose up -d"
   ]' \
