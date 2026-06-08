@@ -135,6 +135,17 @@ echo "▸ Running remote setup (SSH key bootstrap, git pull, fetch-env, docker b
 # placeholder check) has been using since PR #54. (See issue #78 for
 # the post-merge regression that surfaced this.)
 #
+# Why inner SSM commands[] echo messages MUST NOT contain literal `'`
+# characters: the entire `commands=[...]` payload below is wrapped in
+# bash single quotes for the `--parameters` argument. A literal `'`
+# anywhere inside terminates the outer single-quoted string, causing
+# whatever follows (separated by spaces) to be split into separate
+# bash arguments — AWS CLI then sees those fragments as unknown
+# options instead of the intended payload. Reference the PEM header
+# in messages with parentheses or no quotes, never with `'...'`. (See
+# issue #80 for the regression where the inner message used `'-----
+# BEGIN OPENSSH PRIVATE KEY-----'` and broke the entire payload.)
+#
 # Why the HEAD_LOCAL/HEAD_REMOTE gate after git reset: post-condition
 # guard against issue #71 — if `git fetch` or `git reset` silently
 # fails, HEAD won't advance to origin/main and the gate makes the SSM
@@ -179,7 +190,7 @@ CMD_ID=$(aws ssm send-command \
     "set -euo pipefail",
     "DEPLOY_KEY=$(aws ssm get-parameter --name /claude-for-you/github-deploy-key --with-decryption --region '"$REGION"' --query Parameter.Value --output text 2>/dev/null || echo PLACEHOLDER_RUN_PUT_PARAMETER)",
     "if [ \"$DEPLOY_KEY\" = \"PLACEHOLDER_RUN_PUT_PARAMETER\" ] || [ -z \"$DEPLOY_KEY\" ]; then echo \"[deploy] SSM /claude-for-you/github-deploy-key is empty/placeholder. Populate it before running deploy.sh.\" >&2; exit 1; fi",
-    "case \"$DEPLOY_KEY\" in \"-----BEGIN OPENSSH PRIVATE KEY-----\"*) :;; *) echo \"[deploy] SSM /claude-for-you/github-deploy-key does not start with '-----BEGIN OPENSSH PRIVATE KEY-----'. Whitespace-only value, public key, or wrong format. Re-upload the ed25519 private key.\" >&2; exit 1;; esac",
+    "case \"$DEPLOY_KEY\" in \"-----BEGIN OPENSSH PRIVATE KEY-----\"*) :;; *) echo \"[deploy] SSM /claude-for-you/github-deploy-key does not start with the expected PEM header (-----BEGIN OPENSSH PRIVATE KEY-----). Whitespace-only value, public key, or wrong format. Re-upload the ed25519 private key.\" >&2; exit 1;; esac",
     "install -d -m 700 -o ec2-user -g ec2-user /home/ec2-user/.ssh",
     "(umask 077 && echo \"$DEPLOY_KEY\" > /home/ec2-user/.ssh/id_ed25519_claude_for_you)",
     "chown ec2-user:ec2-user /home/ec2-user/.ssh/id_ed25519_claude_for_you && chmod 600 /home/ec2-user/.ssh/id_ed25519_claude_for_you",
