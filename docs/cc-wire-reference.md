@@ -69,7 +69,9 @@ Anthropic's Claude.ai-OAuth-issued tokens require the upstream `system` array to
 You are Claude Code, Anthropic's official CLI for Claude.
 ```
 
-`ensureSystem()` always prepends `{ type: 'text', text: CC_SYSTEM_PREFIX }` as the **first** element of the outbound `system` array, regardless of what the caller sent. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction.
+`ensureSystem()` always prepends `{ type: 'text', text: CC_SYSTEM_PREFIX, cache_control: { type: 'ephemeral' } }` as the **first** element of the outbound `system` array, regardless of what the caller sent. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction.
+
+The `cache_control: { type: 'ephemeral' }` field is a prefix-hash anchor — without it the prepend silently pushes caller cache_control breakpoints one slot deeper and breaks Anthropic prompt cache matching (issue #55). It also consumes one of the 4 cache_control breakpoints Anthropic counts across system+messages+tools combined — a trade-off documented at the patch site (`src/proxy/messages.ts`).
 
 ### Drift signature
 

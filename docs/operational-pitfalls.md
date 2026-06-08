@@ -318,6 +318,8 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 **선례**: #48 (2026-06-05) — 같은 증상을 "idempotent fix"로 풀려다 위 invariant와 정면 충돌해 won't-fix로 close. 향후 재발견 시 본 항목으로 즉시 returns.
 
+**별개 트레이드오프 — prepend로 인한 cache key shift (issue #55, 2026-06-08 해소)**: 위 진단 경로(항목 1~3)는 *client 측 동적 콘텐츠*가 원인인 경우다. 별개로 `ensureSystem`이 prepend하는 CC_BLOCK 자체가 caller breakpoint 위치를 한 칸 밀어 cache prefix hash를 깨는 *proxy 측* 트레이드오프도 존재했다. issue #55에서 CC_BLOCK에 `cache_control: { type: 'ephemeral' }`을 부여하는 방식으로 해소했다 — Anthropic prompt cache는 content-hash 기반 + 20-block lookback이므로, CC_BLOCK이 자체 breakpoint를 가지면 caller breakpoint의 prefix hash가 deterministic하게 처리된다. 두 원인은 독립적으로 발생 가능 — proxy 측 fix 후에도 client_sys0 동적 콘텐츠로 인한 hit% 저하는 별개로 진단해야 한다. #48과 #55의 차이도 여기에 있다: **#48은 "CC_BLOCK 중복 자체로 인한 토큰 낭비" (~$0.04/day, won't-fix 합당), #55는 "CC_BLOCK prepend로 인한 cache key shift" (~4-5x 실효 비용, fix 합당)**. 같은 invariant를 보는 두 각도가 정반대 결론을 낳을 수 있으니 future-me는 두 케이스를 혼동하지 말 것.
+
 ---
 
 ## 16. Caddy `response_header_timeout`이 Bun `UPSTREAM_TTFB_TIMEOUT_MS`보다 짧으면 silent 504
