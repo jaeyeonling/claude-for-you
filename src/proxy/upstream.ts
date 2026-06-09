@@ -111,6 +111,10 @@ const wrapFetchOnceStage = async <T>(
     return await stage();
   } catch (e) {
     if (e instanceof DomainError) throw e;
+    // UpstreamFailed factory is reused for code/headers shape, but status is 500
+    // (not the 502 default): the failure happened inside the proxy *before* any
+    // network attempt, so reporting it as an upstream-network problem would
+    // mislead alerts. `code` (e.g. template_apply_failed) carries the distinction.
     throw UpstreamFailed(`${label}: ${e instanceof Error ? e.message : String(e)}`, 500, code);
   }
 };

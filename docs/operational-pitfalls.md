@@ -385,6 +385,21 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 ---
 
+## 19. `template_apply_failed` / `pacing_await_failed` — proxy 내부 단계 실패 (status=500, upstream 무관)
+
+**증상**: 클라이언트가 HTTP 500을 받고 응답 본문/로그에 `"code": "template_apply_failed"` 또는 `"code": "pacing_await_failed"`가 찍힌다. 같은 시간대 upstream(Anthropic) 호출은 한 건도 발생하지 않는다 — `fetch` 도달 전에 throw됐기 때문이다.
+
+**원인**: `src/proxy/upstream.ts`의 `fetchOnce`는 네트워크 호출 전 두 단계(`template.apply` → `pacing.await`)를 거친다. 이 두 단계의 raw 예외(예: snapshot이 stale해서 `template.apply`가 `TypeError` throw, pacing 맵 invariant 위반)는 이전에는 `DomainError` 래핑 없이 generic 500으로 표출되어 incident triage 시 upstream 장애와 구분하기 어려웠다. #91에서 `wrapFetchOnceStage`로 식별 가능한 code의 `DomainError`로 변환하도록 수정 (2026-06-09).
+
+**triage**:
+- `template_apply_failed`: snapshot stale 가능성 우선 의심 (#8). 최신 cron-capture 결과 확인 후 재배포.
+- `pacing_await_failed`: `src/pacing.ts` 설정/invariant 위반. 보통 코드 버그 — 스택 트레이스 확인.
+- 두 code 모두 **upstream 호출이 아예 발생하지 않은** 실패라, billing/quota 알람과 무관하다.
+
+**예방**: status=500 + `upstream_failed` code (default)와 시맨틱 차이에 주의. `upstream_failed`(502)는 fetch 자체 실패, `template_apply_failed`/`pacing_await_failed`(500)는 fetch 도달 전 proxy 내부 실패. 알람 의사결정 흐름에 별도 분기.
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```
@@ -398,8 +413,11 @@ Discord에 [billing] ALARM 알람 옴
   │     ├─ 일시적이면 무시 (Anthropic이 자동 회복)
   │     └─ 지속되면 multi-account pool 또는 사용자 quota 강화
   │
-  └─ [oauth] refresh failed?  → 토큰 revoke됨 (#1, #10, 또는 #11)
-        → 본인이 logout한 적 있으면 #1, 무관하게 갑자기면 #10,
-          본인 로컬에서 같은 OAuth 쓰는 중이면 #11
+  ├─ [oauth] refresh failed?  → 토큰 revoke됨 (#1, #10, 또는 #11)
+  │     → 본인이 logout한 적 있으면 #1, 무관하게 갑자기면 #10,
+  │       본인 로컬에서 같은 OAuth 쓰는 중이면 #11
+  │
+  └─ HTTP 500 + code=template_apply_failed|pacing_await_failed?  → proxy 내부 실패 (#19)
+        → upstream 호출 발생 안 함. snapshot/pacing 설정 점검
         → 재로그인 + 갱신 절차
 ```
