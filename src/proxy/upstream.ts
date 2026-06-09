@@ -1,5 +1,5 @@
 import type { AccountPool } from '../auth/account-pool.js';
-import { UpstreamFailed } from '../lib/errors.js';
+import { DomainError, UpstreamFailed } from '../lib/errors.js';
 import type { PacingEnforcer } from '../pacing.js';
 import type { ClaudeTemplate } from '../template/types.js';
 
@@ -96,6 +96,30 @@ const fetchWithTtfbGuard = async (
 };
 
 /**
+ * Wraps a pre-network fetchOnce stage (template.apply, pacing.await) so raw
+ * exceptions land in onError as a DomainError with a distinct code. Status
+ * is 500 — template/pacing failures are server-internal, not upstream-network
+ * failures, so the 502 default would be misleading. Existing DomainErrors
+ * pass through unchanged.
+ */
+const wrapFetchOnceStage = async <T>(
+  code: string,
+  label: string,
+  stage: () => Promise<T>,
+): Promise<T> => {
+  try {
+    return await stage();
+  } catch (e) {
+    if (e instanceof DomainError) throw e;
+    // UpstreamFailed factory is reused for code/headers shape, but status is 500
+    // (not the 502 default): the failure happened inside the proxy *before* any
+    // network attempt, so reporting it as an upstream-network problem would
+    // mislead alerts. `code` (e.g. template_apply_failed) carries the distinction.
+    throw UpstreamFailed(`${label}: ${e instanceof Error ? e.message : String(e)}`, 500, code);
+  }
+};
+
+/**
  * Single fetch attempt to upstream. Transparent proxy policy (#44):
  *   - 5xx is NOT retried here. POST /v1/messages is non-idempotent and
  *     a same-org pool can't distribute upstream quota, so retrying only
@@ -113,9 +137,24 @@ const fetchOnce = async (
   template: ClaudeTemplate,
   pacing: PacingEnforcer,
 ): Promise<FetchOnceResult> => {
-  const outbound = await template.apply({ clientBody, accessToken, clientHeaders });
+  // template.apply and pacing.await both run before the network call. Raw
+  // exceptions from these (e.g. TypeError from a malformed snapshot, a non-
+  // DomainError ConfigError variant from a pacing-map invariant violation)
+  // would otherwise reach Hono onError as generic 500s, making same-class
+  // failures ("can't talk to upstream") log as two different shapes. Convert
+  // to DomainError with a distinct code so incident triage stays uniform.
+  // DomainError already has an identifiable code — re-throw as-is so we
+  // don't double-wrap (e.g. a ConfigError stays a config_error, not a
+  // template_apply_failed).
+  const outbound = await wrapFetchOnceStage(
+    'template_apply_failed',
+    'template apply failed',
+    () => template.apply({ clientBody, accessToken, clientHeaders }),
+  );
   // Pace by the session-id we're about to send (CC's view of "same session").
-  await pacing.await(outbound.headers['x-claude-code-session-id']);
+  await wrapFetchOnceStage('pacing_await_failed', 'pacing await failed', () =>
+    pacing.await(outbound.headers['x-claude-code-session-id']),
+  );
   try {
     const { response, controller } = await fetchWithTtfbGuard(
       outbound.url,

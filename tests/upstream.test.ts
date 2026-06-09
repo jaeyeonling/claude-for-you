@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { AccountPool, TokenState } from '../src/auth/account-pool.js';
-import { createPacingEnforcer } from '../src/pacing.js';
+import { ConfigError, DomainError } from '../src/lib/errors.js';
+import { createPacingEnforcer, type PacingEnforcer } from '../src/pacing.js';
 import { callUpstream } from '../src/proxy/upstream.js';
 import type { ClaudeTemplate } from '../src/template/types.js';
 
@@ -157,6 +158,94 @@ describe('callUpstream — transparent proxy (no 5xx retry, no 429 failover)', (
     expect(fetchCallCount).toBe(2);
     // Second fetch must carry the refreshed token, not the original.
     expect(fetchTokensSeen[1]).not.toBe(fetchTokensSeen[0]);
+  });
+
+  test('E: raw template.apply throw is converted to DomainError(template_apply_failed, 500)', async () => {
+    const { pool } = stubPool();
+    const badTemplate: ClaudeTemplate = Object.freeze({
+      source: 'static' as const,
+      description: 'broken',
+      apply: async () => {
+        throw new TypeError('snapshot.system is not iterable');
+      },
+    });
+    installFetch([]);
+
+    let caught: unknown;
+    try {
+      await callUpstream({}, undefined, 'sess-1', {
+        pool,
+        template: badTemplate,
+        pacing: stubPacing,
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(DomainError);
+    const err = caught as DomainError;
+    expect(err.code).toBe('template_apply_failed');
+    expect(err.status).toBe(500);
+    expect(err.message).toContain('snapshot.system is not iterable');
+    expect(fetchCallCount).toBe(0);
+  });
+
+  test('F: raw pacing.await throw is converted to DomainError(pacing_await_failed, 500)', async () => {
+    const { pool } = stubPool();
+    const badPacing: PacingEnforcer = Object.freeze({
+      await: async () => {
+        throw new Error('pacing invariant broken');
+      },
+    });
+    installFetch([]);
+
+    let caught: unknown;
+    try {
+      await callUpstream({}, undefined, 'sess-1', {
+        pool,
+        template: stubTemplate(),
+        pacing: badPacing,
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(DomainError);
+    const err = caught as DomainError;
+    expect(err.code).toBe('pacing_await_failed');
+    expect(err.status).toBe(500);
+    expect(err.message).toContain('pacing invariant broken');
+    expect(fetchCallCount).toBe(0);
+  });
+
+  test('G: DomainError thrown inside template.apply is re-thrown as-is (no double-wrap)', async () => {
+    const { pool } = stubPool();
+    const badTemplate: ClaudeTemplate = Object.freeze({
+      source: 'static' as const,
+      description: 'config-broken',
+      apply: async () => {
+        throw ConfigError('missing system prompt token');
+      },
+    });
+    installFetch([]);
+
+    let caught: unknown;
+    try {
+      await callUpstream({}, undefined, 'sess-1', {
+        pool,
+        template: badTemplate,
+        pacing: stubPacing,
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(DomainError);
+    const err = caught as DomainError;
+    // Original code preserved — NOT wrapped as template_apply_failed.
+    expect(err.code).toBe('config_error');
+    expect(err.message).toContain('missing system prompt token');
+    expect(fetchCallCount).toBe(0);
   });
 
   test('D: 401 after refresh is surfaced — no pool failover', async () => {
