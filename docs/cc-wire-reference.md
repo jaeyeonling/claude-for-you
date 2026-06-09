@@ -69,9 +69,23 @@ Anthropic's Claude.ai-OAuth-issued tokens require the upstream `system` array to
 You are Claude Code, Anthropic's official CLI for Claude.
 ```
 
-`ensureSystem()` always prepends `{ type: 'text', text: CC_SYSTEM_PREFIX, cache_control: { type: 'ephemeral' } }` as the **first** element of the outbound `system` array, regardless of what the caller sent. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction.
+`ensureSystem()` prepends `{ type: 'text', text: CC_SYSTEM_PREFIX, cache_control: { type: 'ephemeral' } }` as the **first** element of the outbound `system` array UNLESS the caller's `system` array already contains a canonical CC marker block (see "Canonical CC marker shape" below). When the canonical shape is present, the caller's `system` is passed through unmodified — at wire level, the canonical block satisfies the entitlement gate's identity requirement regardless of who emits it. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction (note: the conditional shape exception added by #97 takes effect only after #96 merges; before #96, `ensureSystem` unconditionally prepends regardless of caller shape — see `docs/operational-pitfalls.md` #15 activation status).
 
 The `cache_control: { type: 'ephemeral' }` field is a prefix-hash anchor — without it the prepend silently pushes caller cache_control breakpoints one slot deeper and breaks Anthropic prompt cache matching (issue #55). It also consumes one of the 4 cache_control breakpoints Anthropic counts across system+messages+tools combined — a trade-off documented at the patch site (`src/proxy/messages.ts`).
+
+### Canonical CC marker shape
+
+A caller-emitted `system` block is recognized as a "canonical CC marker block" (and thus triggers the transparent passthrough described above, post-#96) only when ALL THREE of these match exactly:
+
+1. `type === 'text'`
+2. `text === CC_SYSTEM_PREFIX` (byte-identical exact match against the constant in `src/proxy/messages.ts`)
+3. `cache_control` is an object AND `cache_control.type === 'ephemeral'` — i.e. the block carries `cache_control: { type: 'ephemeral' }` verbatim
+
+**Position policy**: anywhere in the array (lenient). Section 2's capture data shows real CC emits its CC marker block at `system[1]` (after the `x-anthropic-billing-header:` block at `system[0]`), so strict `system[0]`-only matching would fail real-CC traffic. Lenient matching covers any position.
+
+**Probe path divergence**: `src/admin/test-runners.ts`'s `verify-entitlement` probe sends `system: CC_SYSTEM_PREFIX` as a string. The conditional behavior matches only array elements that satisfy the canonical shape, so the probe path never enters the transparent branch — it always traverses the unconditional prepend path. The `ok` verdict therefore validates entitlement-gate behavior for the prepend path only. Once #96 (B3 strict gate) is active, the transparent branch's gate compliance is structurally guaranteed — the caller-supplied canonical block IS the entitlement marker, so wire-level identity is satisfied byte-identically regardless of who emits it. Before #96 merge, this transparent branch does not exist in code; structural guarantee applies only to the post-#96 state. Operators: treat `ok` as a marker-drift signal, NOT as a transparent-branch health check.
+
+**ToS rationale**: the proxy's responsibility under Anthropic ToS is to emit CC-shaped traffic upstream when calling sonnet/opus. When a caller already emits a canonical CC marker block, the wire-level identity requirement is satisfied byte-identically — Anthropic cannot distinguish proxy-emitted vs caller-emitted bytes of equivalent shape. The transparent branch therefore satisfies the same wire-level identity claim as the prepend path with a different ownership model: caller-supplied marker counts toward identity compliance once it byte-matches the canonical shape (this is the analytic basis for the policy reversal documented in `docs/operational-pitfalls.md` #15; #41's R1 forge-protection rejection of this branch was made before the caching cost was quantified — see issue #59 for the cost evidence that re-opened the trade-off).
 
 ### Drift signature
 
