@@ -250,7 +250,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 **상태**: 2026-06-02 패치. 그 이전에는 caller가 자체 system prompt (예: tomodachi 디스코드 봇 같은 워크로드)를 보내면 sonnet/opus는 즉시 429 `rate_limit_error`로 거절되고 haiku는 통과되는 시그니처가 운영 중에 발생했음.
 
-**현재 동작**: `src/proxy/messages.ts`의 `ensureSystem`이 모든 호출에 대해 caller 입력에 관계없이 CC 시그니처 블록을 `system` array의 첫 블록으로 강제 prepend한다. caller가 보낸 string/array는 두 번째 이후 블록으로 그대로 보존된다 (cache_control 포함). transparent 분기는 없음 — caller가 본문에 `"You are Claude Code"`로 시작하는 텍스트를 박아 identity를 위장하는 abuse도 차단된다.
+**현재 동작** *(pre-#96)*: `src/proxy/messages.ts`의 `ensureSystem`이 모든 호출에 대해 caller 입력에 관계없이 CC 시그니처 블록을 `system` array의 첫 블록으로 강제 prepend한다. caller가 보낸 string/array는 두 번째 이후 블록으로 그대로 보존된다 (cache_control 포함). transparent 분기는 없음. 단 forge 차단 강도는 절대적이지 않다 — caller가 `system[0]`에 CC prefix를, `system[1]`에 임의 텍스트를 보내면 upstream은 `[CC_BLOCK_proxy, forgedBlock, ...]` 를 받아 entitlement 게이트는 통과한다. 본 동작은 *entitlement gate 통과용 leading-block 소유권 확보* 목적이며 *system injection 방어*는 아니다. **#96 (B3 strict gate) 머지 시 caller가 canonical shape의 CC marker를 미리 박은 경우 transparent passthrough가 활성화됨 — 함정 #15 활성화 박스 참조.**
 
 **필수 조건**:
 
@@ -298,17 +298,52 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 ---
 
-## 15. CC_BLOCK 마커가 system[0]과 system[1]에 두 번 보임 — 이건 의도된 invariant, dedup 금지
+## 15. CC_BLOCK prepend — canonical shape 일 때 transparent, 그 외 prepend
+
+> **[현재 미활성 — #96 머지 후 적용]** 본 conditional rule은 #96 (B3 strict gate) 코드 PR 머지 후 `ensureSystem`에 반영된다. **본 항목(#97 docs PR) 머지 시점에서 `src/proxy/messages.ts:102-111` 의 `ensureSystem` 코드는 여전히 unconditional prepend를 유지한다 — 본 문서는 *invariant rule의 정의*만 박제하며 *코드 활성화*는 별개의 PR (#96)이다.** 향후 #96 머지 시 본 문서는 그대로 유지되고 코드만 본 정의와 정렬된다. 함정 #13의 "현재 동작" 단락도 #96 머지 시 함께 갱신 대상.
 
 **증상**: 토큰 사용 진단 중 outbound payload의 `system` 배열에서 `"You are Claude Code, Anthropic's official CLI for Claude."` 문자열이 position 0과 1에 동일하게 박힌 걸 발견. 직접 ~12 tok/req 낭비처럼 보임. 1009 req/day 기준 ~12K tok/day, sonnet 단가 환산 약 $0.04/day.
 
-**원인 (그러나 버그 아님)**: `ensureSystem()` (`src/proxy/messages.ts:69-78`) 은 caller가 같은 prefix를 보내든 말든 **무조건 prepend**한다. Claude Code CLI의 첫 system 블록이 이미 동일 prefix로 시작하므로 결과적으로 duplicate. 이건 다음 세 가지를 동시에 보장하는 documented invariant다:
+**원인**: `ensureSystem()` (`src/proxy/messages.ts:102-111`) 은 caller가 같은 prefix를 보내든 말든 **무조건 prepend**한다 (#96 머지 전 현재 동작). 관측 시점(2026-06-02, CC 2.1.149.27c)의 Claude Code CLI는 system array 중 하나(현재 캡처에선 `system[1]`)에 동일 prefix를 cache_control과 함께 박아 보내므로 결과적으로 duplicate. 위치는 향후 CC 버전에서 이동 가능 — 본 항목의 진단 경로는 위치가 아닌 *shape 중복*에 초점. 표면적으로는 직접 낭비가 작아 보이지만 (~$0.04/day 토큰 비용), 이 중복이 caller가 박은 cache_control breakpoint의 prefix hash를 깨서 **실질적 cache miss를 유발하는 부수효과**가 더 크다 (issue #55, 후술 cost evidence 참조).
 
-1. **Adversary R1 forge protection** — `tests/messages-ensure-system.test.ts:41-75`의 두 forge 테스트가 명시. caller가 marker를 mimicking해서 보내도 proxy-owned block이 leading position을 가져가야 identity ownership이 가짜 caller로 넘어가지 않는다.
-2. **문서화된 wire invariant** — `docs/cc-wire-reference.md:72`: *"always prepends ... as the first element ... regardless of what the caller sent"*.
-3. **`#40` Entitlement drift probe** — `src/admin/test-runners.ts`의 `verify-entitlement`는 "proxy가 매번 marker를 박는다"를 가정으로 marker drift를 검출한다. dedup하면 이 진단 인프라의 신뢰성도 흔들린다.
+### Cost evidence (출처: issue #59 코멘트 — 24h verification post-#58 deploy)
 
-**왜 dedup으로 절약하지 않나**: 절약 ~$0.04/day vs 무너뜨릴 것 = adversary R1 hardening + 문서 invariant + drift probe 가정. trade-off가 한쪽으로 명확히 기운다.
+PR #41 (2026-06-04 머지, unconditional prepend 도입) 전후 동일 user/model의 burst-only cache_read 비율:
+
+| 날짜 | read_burst | avg_create (per req) | Era |
+|---|---:|---:|---|
+| 2026-05-31 | 95.0% | 19,087 | PRE PR41 |
+| 2026-06-01 | 97.0% | 23,368 | PRE PR41 |
+| 2026-06-02 | 96.0% | 17,419 | PRE PR41 |
+| 2026-06-04 | 47.0% | 127,596 | PR #41 머지일 |
+| 2026-06-05 | 20.8% | 201,273 | POST PR41 |
+| 2026-06-07 | 0.0% | 303,755 | full cache collapse |
+| 2026-06-08 | 21.9% | 224,143 | PR #58 머지일 |
+| 2026-06-09 | 26.3% | 177,824 | POST PR58 (24h 측정 ceiling) |
+
+`avg_create` 19k → 22만 (약 10x 증가). 매 요청 약 22만 tokens가 새 cache entry로 저장되지만 다음 요청에서 read로 환수되지 못함. 이는 직접 토큰 낭비가 아니라 **caching efficiency 손실** — 4-5x 실효 input 비용.
+
+**PRE PR41 (2026-06-02) raw capture** — caller가 보낸 system array 실제 shape:
+
+- system[0]: `x-anthropic-billing-header:` (81자, no cache_control)
+- system[1]: `"You are Claude Code, Anthropic's official CLI for Claude."` (57자, cache_control: ephemeral)
+- system[2]: big system prompt (27,473자, cache_control: ephemeral)
+
+→ Real CC client는 entitlement marker를 **system[1]** 에 박는다 (system[0] 아님). canonical shape match는 **anywhere-in-array** 매칭이 필요 — strict `system[0]`-only matching은 real CC traffic을 놓친다.
+
+### invariant 세 보장의 재평가
+
+(1) **Adversary R1 forge protection** — strict shape match로 정책 변경 예정 (post-#96). `tests/messages-ensure-system.test.ts:55-64`의 string forge 테스트는 유지 (string은 array 분기 미진입). `:79-89`의 array forge 테스트는 forged text가 CC_SYSTEM_PREFIX와 byte-identical 아니라 canonical 미해당 → 유지. wire-level forger와 real CC가 정확히 동일 shape이면 구별 불가능 — 이게 새 정책의 핵심 trade-off다. **위협 모델 재정의**: 본 proxy의 API key를 소지한 *모든* 클라이언트는 "외부 공격 vector"가 아닌 "인증된 caller" 영역으로 분류된다. 본 PR은 entitlement gate의 canonical shape 준수 의무를 *proxy에서 API key holder로 위임*하는 변경이다. 외부 API key 클라이언트(예: discord 봇, 자체 agent 워크로드)가 canonical block을 박지 않은 채로 호출하는 case는 여전히 proxy가 unconditional prepend로 보호 — 그러나 canonical block을 *정확히 모사*해서 박은 경우 proxy는 그 caller의 의도를 신뢰하고 통과시킨다. 이 위임의 ToS 함의는 운영자의 책임 영역으로 박제됨 (proxy 외 직접 API key 발급 시 동일 정책이 자동 승계). cost evidence가 정량화된 후 #41 R1 결정의 trade-off를 재평가한 결과다.
+
+(2) **문서화된 wire invariant** — `docs/cc-wire-reference.md` §2a로 conditional rule 갱신 (#97과 동일 PR).
+
+(3) **`#40` Entitlement drift probe** — `verify-entitlement` probe의 call-A는 `system: CC_SYSTEM_PREFIX` (string)을 보낸다. string은 array가 아니므로 새 conditional invariant 하에서도 canonical match 분기 미진입 → probe path는 항상 unconditional prepend 경로를 탄다. **즉 probe `ok` verdict는 always-prepend 경로의 entitlement gate 통과만 검증하며, production transparent 분기에서의 gate 통과는 probe 범위 외.** #96 활성화 이후, transparent 분기에서 gate 통과는 *structural* 보장 — canonical block 자체가 entitlement marker 본체이므로 wire-level identity 요건이 자동 충족 (proxy가 emit했든 caller가 emit했든 동일 byte sequence를 upstream이 본다). 본 PR 머지 시점엔 transparent 분기 코드 부재 — structural 보장은 post-#96 상태에만 적용. 운영자 가이드: probe `ok`는 marker drift 검출 신호로만 해석, transparent 분기 health proxy로 해석 금지.
+
+### Future #96 구현 가이드 — forge 테스트 처분
+
+- `tests/messages-ensure-system.test.ts:55-64` ("string forge"): **유지**. string은 #96 새 array 분기 미진입, transparent 적용 안 됨.
+- `tests/messages-ensure-system.test.ts:79-89` ("array forge with 'Anthropic-issued.' text"): **유지**. forged text가 `CC_SYSTEM_PREFIX` 와 byte-identical 아님 → canonical 미해당 → 여전히 prepend.
+- 새 transparent 분기 테스트 (canonical match) 케이스는 #96 PR에서 추가.
 
 **진짜 토큰이 부풀어 보이면 어디부터 봐야 하나** (2026-06-05 진단 경로):
 
@@ -316,9 +351,9 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 2. 비정상의 진짜 원인은 보통 **Claude CLI 동적 system 콘텐츠** (오늘 날짜, 현재 git branch, recent commits, session 요약) 가 prefix bytes를 매 호출 바꿔서 cache_creation으로 다시 청구되는 패턴. proxy 책임 아님 — Anthropic CLI 측 설계.
 3. multi-tenant aggregation 효과도 별도 확인: 단일 OAuth 토큰이 N명을 서비스하면 Anthropic 콘솔은 N명 합산을 보여준다 (함정 #2의 "운영자=사용자" 모델 참고).
 
-**선례**: #48 (2026-06-05) — 같은 증상을 "idempotent fix"로 풀려다 위 invariant와 정면 충돌해 won't-fix로 close. 향후 재발견 시 본 항목으로 즉시 returns.
+**#48 재분류**: (2026-06-05) — 같은 증상을 "idempotent fix"로 풀려다 당시 invariant와 정면 충돌해 won't-fix로 close. **superseded by #96 (B3 strict gate)**: #48 closing 시점엔 cache cost가 quantify되지 않았다 (~$0.04/day 토큰 낭비만 보였음). issue #59에서 cost evidence가 정량화된 후 (~22만 tokens/req 새 cache entry 낭비, read_burst 95%→24%) trade-off 재평가가 정당화됨.
 
-**별개 트레이드오프 — prepend로 인한 cache key shift (issue #55, 2026-06-08 해소)**: 위 진단 경로(항목 1~3)는 *client 측 동적 콘텐츠*가 원인인 경우다. 별개로 `ensureSystem`이 prepend하는 CC_BLOCK 자체가 caller breakpoint 위치를 한 칸 밀어 cache prefix hash를 깨는 *proxy 측* 트레이드오프도 존재했다. issue #55에서 CC_BLOCK에 `cache_control: { type: 'ephemeral' }`을 부여하는 방식으로 해소했다 — Anthropic prompt cache는 content-hash 기반 + 20-block lookback이므로, CC_BLOCK이 자체 breakpoint를 가지면 caller breakpoint의 prefix hash가 deterministic하게 처리된다. 두 원인은 독립적으로 발생 가능 — proxy 측 fix 후에도 client_sys0 동적 콘텐츠로 인한 hit% 저하는 별개로 진단해야 한다. #48과 #55의 차이도 여기에 있다: **#48은 "CC_BLOCK 중복 자체로 인한 토큰 낭비" (~$0.04/day, won't-fix 합당), #55는 "CC_BLOCK prepend로 인한 cache key shift" (~4-5x 실효 비용, fix 합당)**. 같은 invariant를 보는 두 각도가 정반대 결론을 낳을 수 있으니 future-me는 두 케이스를 혼동하지 말 것.
+**PR #58 (2026-06-08) — partial fix 정정**: PR #58은 CC_BLOCK에 `cache_control: { type: 'ephemeral' }` 을 부여하여 prefix hash anchor를 박았으나 (issue #55 본문 §7.1 mechanism 가설), **caller marker 중복 자체는 해소 못해** read_burst 24% ceiling에 그친 partial fix였다 (issue #59 24h 측정 결과). full fix는 본 PR(#97)의 invariant conditional 재정의 + 후속 #96의 B3 strict gate 코드 구현으로 완성된다. #48과 #55/#96의 차이는 여전히 박제 가치 있음: **#48은 "CC_BLOCK 중복 자체로 인한 토큰 낭비" (~$0.04/day, won't-fix 합당), #55는 "CC_BLOCK prepend로 인한 cache key shift" (~4-5x 실효 비용, fix 합당)**. 같은 코드 변경이라도 두 각도가 정반대 결론을 낳을 수 있으니 future-me는 두 케이스를 혼동하지 말 것.
 
 ---
 

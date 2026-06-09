@@ -55,6 +55,8 @@ CC sends `system` as **array of 3 text blocks** in every observed capture (none 
 
 ## 2a. Entitlement marker invariant
 
+> **[Current state — pre-#96]** The conditional shape exception described below (`UNLESS the caller's system array already contains a canonical CC marker block`) is defined by #97 (this doc PR) but **not yet active in code**. `src/proxy/messages.ts:102-111`'s `ensureSystem` still does **unconditional prepend** regardless of caller shape. The conditional behavior takes effect only after #96 (B3 strict gate) merges. Operators reading this section before #96: treat the `UNLESS` clause as the target post-#96 behavior, not current production. See `docs/operational-pitfalls.md` #15 for migration history and cost rationale.
+
 Section 2 above describes the `system` array that **callers** send. This section describes a separate, proxy-owned block that **we prepend** to that array before forwarding upstream. Do not conflate the two — Section 2's `x-anthropic-billing-header:` block is caller-emitted; the invariant block below is proxy-emitted.
 
 ### Why this exists
@@ -69,9 +71,25 @@ Anthropic's Claude.ai-OAuth-issued tokens require the upstream `system` array to
 You are Claude Code, Anthropic's official CLI for Claude.
 ```
 
-`ensureSystem()` always prepends `{ type: 'text', text: CC_SYSTEM_PREFIX, cache_control: { type: 'ephemeral' } }` as the **first** element of the outbound `system` array, regardless of what the caller sent. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction.
+**Current behavior (pre-#96, what production runs today)**: `ensureSystem()` unconditionally prepends `{ type: 'text', text: CC_SYSTEM_PREFIX, cache_control: { type: 'ephemeral' } }` as the **first** element of the outbound `system` array. Caller shape is ignored entirely — even if the caller already ships a canonical CC marker block, the prepend still runs, producing two CC marker blocks at wire level. This is the single source of truth — `src/admin/test-runners.ts` imports the same constant for self-test, so drift between the proxy path and the probe path is impossible by construction.
+
+**Target behavior (post-#96, defined here, activated by #96)**: the prepend is skipped when the caller's `system` array already contains a canonical CC marker block (see "Canonical CC marker shape" below). When the canonical shape is present, the caller's `system` is passed through unmodified — at wire level, the canonical block satisfies the entitlement gate's identity requirement regardless of who emits it. The single-source-of-truth guarantee carries over: the constant import in `src/admin/test-runners.ts` still anchors both the prepend path (probe) and the transparent path (production) to the same byte sequence.
 
 The `cache_control: { type: 'ephemeral' }` field is a prefix-hash anchor — without it the prepend silently pushes caller cache_control breakpoints one slot deeper and breaks Anthropic prompt cache matching (issue #55). It also consumes one of the 4 cache_control breakpoints Anthropic counts across system+messages+tools combined — a trade-off documented at the patch site (`src/proxy/messages.ts`).
+
+### Canonical CC marker shape
+
+A caller-emitted `system` block is recognized as a "canonical CC marker block" (and thus triggers the transparent passthrough described above, post-#96) only when ALL THREE of these match exactly:
+
+1. `type === 'text'`
+2. `text === CC_SYSTEM_PREFIX` (byte-identical exact match against the constant in `src/proxy/messages.ts`)
+3. `cache_control` is an object AND `cache_control.type === 'ephemeral'` — i.e. the block carries `cache_control: { type: 'ephemeral' }` verbatim
+
+**Position policy**: anywhere in the array (lenient). Empirical evidence is in `docs/operational-pitfalls.md` #15 "Cost evidence — PRE PR41 (2026-06-02) raw capture" — at that time CC version 2.1.149.27c emitted its CC marker block at `system[1]` (after the `x-anthropic-billing-header:` block at `system[0]`), so strict `system[0]`-only matching would fail real-CC traffic. Lenient matching covers any position; this also future-proofs against further CC version shifts that may move the marker. (Section 2 above documents an older CC 2.1.126 snapshot whose `system[1]` was the system prompt body, not a separate CC marker — the marker block emerged in a later CC version.)
+
+**Probe path divergence**: `src/admin/test-runners.ts`'s `verify-entitlement` probe sends `system: CC_SYSTEM_PREFIX` as a string. The conditional behavior matches only array elements that satisfy the canonical shape, so the probe path never enters the transparent branch — it always traverses the unconditional prepend path. The `ok` verdict therefore validates entitlement-gate behavior for the prepend path only; the transparent branch's gate compliance (post-#96) is structurally guaranteed — the caller-supplied canonical block IS the entitlement marker, so wire-level identity is satisfied byte-identically regardless of who emits it. Operators: treat `ok` as a marker-drift signal, NOT as a transparent-branch health check.
+
+**ToS rationale**: the proxy's responsibility under Anthropic ToS is to emit CC-shaped traffic upstream when calling sonnet/opus. When a caller already emits a canonical CC marker block, the wire-level identity requirement is satisfied byte-identically — Anthropic cannot distinguish proxy-emitted vs caller-emitted bytes of equivalent shape. The transparent branch therefore satisfies the same wire-level identity claim as the prepend path with a different ownership model: caller-supplied marker counts toward identity compliance once it byte-matches the canonical shape (this is the analytic basis for the policy reversal documented in `docs/operational-pitfalls.md` #15; #41's R1 forge-protection rejection of this branch was made before the caching cost was quantified — see issue #59 for the cost evidence that re-opened the trade-off).
 
 ### Drift signature
 
