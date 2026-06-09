@@ -416,8 +416,8 @@ Discord에 [billing] ALARM 알람 옴
   ├─ [oauth] refresh failed?  → 토큰 revoke됨 (#1, #10, 또는 #11)
   │     → 본인이 logout한 적 있으면 #1, 무관하게 갑자기면 #10,
   │       본인 로컬에서 같은 OAuth 쓰는 중이면 #11
+  │     → 재로그인 + 갱신 절차
   │
   └─ HTTP 500 + code=template_apply_failed|pacing_await_failed?  → proxy 내부 실패 (#19)
         → upstream 호출 발생 안 함. snapshot/pacing 설정 점검
-        → 재로그인 + 갱신 절차
 ```

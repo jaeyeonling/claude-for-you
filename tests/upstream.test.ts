@@ -245,6 +245,7 @@ describe('callUpstream — transparent proxy (no 5xx retry, no 429 failover)', (
     // Original code preserved — NOT wrapped as template_apply_failed.
     expect(err.code).toBe('config_error');
     expect(err.message).toContain('missing system prompt token');
+    expect(fetchCallCount).toBe(0);
   });
 
   test('D: 401 after refresh is surfaced — no pool failover', async () => {
