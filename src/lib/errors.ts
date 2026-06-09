@@ -52,8 +52,11 @@ export const Forbidden = (msg = 'forbidden', code = 'forbidden'): DomainError =>
 export const QuotaExceeded = (msg = 'quota_exceeded'): DomainError =>
   new DomainError(msg, 429, 'quota_exceeded');
 
-export const UpstreamFailed = (msg: string, status = 502): DomainError =>
-  new DomainError(msg, status, 'upstream_failed');
+export const UpstreamFailed = (
+  msg: string,
+  status = 502,
+  code = 'upstream_failed',
+): DomainError => new DomainError(msg, status, code);
 
 export const ConfigError = (msg: string): DomainError =>
   new DomainError(msg, 500, 'config_error');
