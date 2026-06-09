@@ -250,7 +250,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 **상태**: 2026-06-02 패치. 그 이전에는 caller가 자체 system prompt (예: tomodachi 디스코드 봇 같은 워크로드)를 보내면 sonnet/opus는 즉시 429 `rate_limit_error`로 거절되고 haiku는 통과되는 시그니처가 운영 중에 발생했음.
 
-**현재 동작**: `src/proxy/messages.ts`의 `ensureSystem`이 모든 호출에 대해 caller 입력에 관계없이 CC 시그니처 블록을 `system` array의 첫 블록으로 강제 prepend한다. caller가 보낸 string/array는 두 번째 이후 블록으로 그대로 보존된다 (cache_control 포함). transparent 분기는 없음 — caller가 본문에 `"You are Claude Code"`로 시작하는 텍스트를 박아 identity를 위장하는 abuse도 차단된다.
+**현재 동작** *(pre-#96)*: `src/proxy/messages.ts`의 `ensureSystem`이 모든 호출에 대해 caller 입력에 관계없이 CC 시그니처 블록을 `system` array의 첫 블록으로 강제 prepend한다. caller가 보낸 string/array는 두 번째 이후 블록으로 그대로 보존된다 (cache_control 포함). transparent 분기는 없음. 단 forge 차단 강도는 절대적이지 않다 — caller가 `system[0]`에 CC prefix를, `system[1]`에 임의 텍스트를 보내면 upstream은 `[CC_BLOCK_proxy, forgedBlock, ...]` 를 받아 entitlement 게이트는 통과한다. 본 동작은 *entitlement gate 통과용 leading-block 소유권 확보* 목적이며 *system injection 방어*는 아니다. **#96 (B3 strict gate) 머지 시 caller가 canonical shape의 CC marker를 미리 박은 경우 transparent passthrough가 활성화됨 — 함정 #15 활성화 박스 참조.**
 
 **필수 조건**:
 
@@ -300,7 +300,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 ## 15. CC_BLOCK prepend — canonical shape 일 때 transparent, 그 외 prepend
 
-**[활성화 상태]** 본 conditional rule은 #96 (B3 strict gate) 코드 PR 머지 후 `ensureSystem`에 반영된다. 본 항목(#97 docs PR) 머지 시점엔 `src/proxy/messages.ts:102-111` 의 `ensureSystem` 코드는 여전히 **unconditional prepend**를 유지한다. 이 문서는 *invariant rule의 정의*이며 *코드 활성화*는 별개의 PR (#96)이다.
+> **[현재 미활성 — #96 머지 후 적용]** 본 conditional rule은 #96 (B3 strict gate) 코드 PR 머지 후 `ensureSystem`에 반영된다. **본 항목(#97 docs PR) 머지 시점에서 `src/proxy/messages.ts:102-111` 의 `ensureSystem` 코드는 여전히 unconditional prepend를 유지한다 — 본 문서는 *invariant rule의 정의*만 박제하며 *코드 활성화*는 별개의 PR (#96)이다.** 향후 #96 머지 시 본 문서는 그대로 유지되고 코드만 본 정의와 정렬된다. 함정 #13의 "현재 동작" 단락도 #96 머지 시 함께 갱신 대상.
 
 **증상**: 토큰 사용 진단 중 outbound payload의 `system` 배열에서 `"You are Claude Code, Anthropic's official CLI for Claude."` 문자열이 position 0과 1에 동일하게 박힌 걸 발견. 직접 ~12 tok/req 낭비처럼 보임. 1009 req/day 기준 ~12K tok/day, sonnet 단가 환산 약 $0.04/day.
 
