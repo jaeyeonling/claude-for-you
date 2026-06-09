@@ -203,9 +203,11 @@ Your key has a per-key model allowlist and you requested something outside it. T
 
 ### `429 rate_limit_error` on sonnet/opus, but haiku works
 
-The proxy itself should handle this transparently — it injects a default `system` field that Anthropic's backend requires for premium models on Claude.ai OAuth tokens. If you see it anyway:
+The proxy injects a default `system` field that Anthropic's backend requires for premium models on Claude.ai OAuth tokens — this `system`-prefix injection runs on every request and is invisible to you, so this specific `rate_limit_error` shouldn't reach the client. If you see it anyway:
 - Your client may be sending an explicit empty `system` (`"system": ""`). Either remove the field or use a non-empty string.
 - Ask your operator to confirm the proxy is on a recent commit.
+
+(Note on terminology: the proxy surfaces *upstream* `429`s — including `Retry-After` and `X-Should-Retry` headers — to the client verbatim, so the SDK's backoff can do its job. The signature above is a different class of `429` that comes from a missing `system` prefix and is fixed inside the proxy.)
 
 ### `[1m]` models / 1M context — works as of 2026-05-29
 
