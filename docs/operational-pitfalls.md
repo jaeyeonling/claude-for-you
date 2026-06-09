@@ -304,7 +304,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 **증상**: 토큰 사용 진단 중 outbound payload의 `system` 배열에서 `"You are Claude Code, Anthropic's official CLI for Claude."` 문자열이 position 0과 1에 동일하게 박힌 걸 발견. 직접 ~12 tok/req 낭비처럼 보임. 1009 req/day 기준 ~12K tok/day, sonnet 단가 환산 약 $0.04/day.
 
-**원인**: `ensureSystem()` (`src/proxy/messages.ts:102-111`) 은 caller가 같은 prefix를 보내든 말든 **무조건 prepend**한다 (#96 머지 전 현재 동작). Claude Code CLI의 두 번째 system 블록이 이미 동일 prefix를 cache_control과 함께 박아 보내므로 결과적으로 duplicate. 표면적으로는 직접 낭비가 작아 보이지만 (~$0.04/day 토큰 비용), 이 중복이 caller가 박은 cache_control breakpoint의 prefix hash를 깨서 **실질적 cache miss를 유발하는 부수효과**가 더 크다 (issue #55, 후술 cost evidence 참조).
+**원인**: `ensureSystem()` (`src/proxy/messages.ts:102-111`) 은 caller가 같은 prefix를 보내든 말든 **무조건 prepend**한다 (#96 머지 전 현재 동작). 관측 시점(2026-06-02, CC 2.1.149.27c)의 Claude Code CLI는 system array 중 하나(현재 캡처에선 `system[1]`)에 동일 prefix를 cache_control과 함께 박아 보내므로 결과적으로 duplicate. 위치는 향후 CC 버전에서 이동 가능 — 본 항목의 진단 경로는 위치가 아닌 *shape 중복*에 초점. 표면적으로는 직접 낭비가 작아 보이지만 (~$0.04/day 토큰 비용), 이 중복이 caller가 박은 cache_control breakpoint의 prefix hash를 깨서 **실질적 cache miss를 유발하는 부수효과**가 더 크다 (issue #55, 후술 cost evidence 참조).
 
 ### Cost evidence (출처: issue #59 코멘트 — 24h verification post-#58 deploy)
 
@@ -333,7 +333,7 @@ PR #41 (2026-06-04 머지, unconditional prepend 도입) 전후 동일 user/mode
 
 ### invariant 세 보장의 재평가
 
-(1) **Adversary R1 forge protection** — strict shape match로 정책 변경. `tests/messages-ensure-system.test.ts:55-64`의 string forge 테스트는 유지 (string은 array 분기 미진입). `:79-89`의 array forge 테스트는 forged text가 CC_SYSTEM_PREFIX와 byte-identical 아니라 canonical 미해당 → 유지. wire-level forger와 real CC가 정확히 동일 shape이면 구별 불가지만 그게 새 정책 — 인증된 caller의 self-spoofing은 외부 공격 vector가 아니라 ToS상 caller 자신의 책임 영역. cost evidence가 정량화된 후 #41 R1 결정의 trade-off를 재평가한 결과다.
+(1) **Adversary R1 forge protection** — strict shape match로 정책 변경 예정 (post-#96). `tests/messages-ensure-system.test.ts:55-64`의 string forge 테스트는 유지 (string은 array 분기 미진입). `:79-89`의 array forge 테스트는 forged text가 CC_SYSTEM_PREFIX와 byte-identical 아니라 canonical 미해당 → 유지. wire-level forger와 real CC가 정확히 동일 shape이면 구별 불가능 — 이게 새 정책의 핵심 trade-off다. **위협 모델 재정의**: 본 proxy의 API key를 소지한 *모든* 클라이언트는 "외부 공격 vector"가 아닌 "인증된 caller" 영역으로 분류된다. 본 PR은 entitlement gate의 canonical shape 준수 의무를 *proxy에서 API key holder로 위임*하는 변경이다. 외부 API key 클라이언트(예: discord 봇, 자체 agent 워크로드)가 canonical block을 박지 않은 채로 호출하는 case는 여전히 proxy가 unconditional prepend로 보호 — 그러나 canonical block을 *정확히 모사*해서 박은 경우 proxy는 그 caller의 의도를 신뢰하고 통과시킨다. 이 위임의 ToS 함의는 운영자의 책임 영역으로 박제됨 (proxy 외 직접 API key 발급 시 동일 정책이 자동 승계). cost evidence가 정량화된 후 #41 R1 결정의 trade-off를 재평가한 결과다.
 
 (2) **문서화된 wire invariant** — `docs/cc-wire-reference.md` §2a로 conditional rule 갱신 (#97과 동일 PR).
 
