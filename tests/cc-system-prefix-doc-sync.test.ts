@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { CC_SYSTEM_PREFIX } from '../src/proxy/messages.js';
+import { CC_SYSTEM_PREFIX, CC_BLOCK, isCanonicalCcMarker } from '../src/proxy/messages.js';
 
 // The CC entitlement marker has TWO authoritative locations:
 //   - src/proxy/messages.ts (the runtime value used by the proxy)
@@ -38,5 +38,24 @@ describe('CC_SYSTEM_PREFIX docs sync', () => {
     // We assert the verbatim substring so the doc stays sync'd with the
     // runtime CC_BLOCK shape.
     expect(docText).toContain("cache_control: { type: 'ephemeral' }");
+  });
+
+  test('CC_BLOCK itself is a canonical CC marker (definitional consistency, #96)', () => {
+    // The proxy-emitted CC_BLOCK and caller-emitted canonical blocks share the
+    // same wire shape (this is what makes the transparent-passthrough branch
+    // ToS-coherent — see pitfall #15 threat model). If a future change to
+    // CC_BLOCK or isCanonicalCcMarker breaks this self-consistency, the
+    // transparent branch silently stops working for real CC traffic and
+    // cache hit% regresses without any other test failing.
+    expect(isCanonicalCcMarker(CC_BLOCK)).toBe(true);
+  });
+
+  test('cc-wire-reference.md §2a documents the canonical-shape match conditions (#96)', () => {
+    // The "Canonical CC marker shape" subsection lists three conditions that
+    // mirror `isCanonicalCcMarker` (type, text, cache_control). Substring
+    // checks for the key fragments — narrow enough to catch silent rewords
+    // that drop a condition, broad enough to survive prose tweaks.
+    expect(docText).toContain('text === CC_SYSTEM_PREFIX');
+    expect(docText).toContain("cache_control.type === 'ephemeral'");
   });
 });
