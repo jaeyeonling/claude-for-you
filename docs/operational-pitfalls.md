@@ -318,7 +318,7 @@ PR #41 (2026-06-04 머지, unconditional prepend 도입) 전후 동일 user/mode
 | 2026-06-04 | 47.0% | 127,596 | PR #41 머지일 |
 | 2026-06-05 | 20.8% | 201,273 | POST PR41 |
 | 2026-06-07 | 0.0% | 303,755 | full cache collapse |
-| 2026-06-08 | 21.9% | 224,143 | PR #58 (§7.1) 머지일 |
+| 2026-06-08 | 21.9% | 224,143 | PR #58 머지일 |
 | 2026-06-09 | 26.3% | 177,824 | POST PR58 (24h 측정 ceiling) |
 
 `avg_create` 19k → 22만 (약 10x 증가). 매 요청 약 22만 tokens가 새 cache entry로 저장되지만 다음 요청에서 read로 환수되지 못함. 이는 직접 토큰 낭비가 아니라 **caching efficiency 손실** — 4-5x 실효 input 비용.
@@ -353,7 +353,7 @@ PR #41 (2026-06-04 머지, unconditional prepend 도입) 전후 동일 user/mode
 
 **#48 재분류**: (2026-06-05) — 같은 증상을 "idempotent fix"로 풀려다 당시 invariant와 정면 충돌해 won't-fix로 close. **superseded by #96 (B3 strict gate)**: #48 closing 시점엔 cache cost가 quantify되지 않았다 (~$0.04/day 토큰 낭비만 보였음). issue #59에서 cost evidence가 정량화된 후 (~22만 tokens/req 새 cache entry 낭비, read_burst 95%→24%) trade-off 재평가가 정당화됨.
 
-**PR #58 (§7.1, 2026-06-08) — partial fix 정정**: PR #58은 CC_BLOCK에 `cache_control: { type: 'ephemeral' }` 을 부여하여 prefix hash anchor를 박았으나, **caller marker 중복 자체는 해소 못해** read_burst 24% ceiling에 그친 partial fix였다 (issue #59 24h 측정 결과). full fix는 본 PR(#97)의 invariant conditional 재정의 + 후속 #96의 B3 strict gate 코드 구현으로 완성된다. #48과 #55/#96의 차이는 여전히 박제 가치 있음: **#48은 "CC_BLOCK 중복 자체로 인한 토큰 낭비" (~$0.04/day, won't-fix 합당), #55는 "CC_BLOCK prepend로 인한 cache key shift" (~4-5x 실효 비용, fix 합당)**. 같은 코드 변경이라도 두 각도가 정반대 결론을 낳을 수 있으니 future-me는 두 케이스를 혼동하지 말 것.
+**PR #58 (2026-06-08) — partial fix 정정**: PR #58은 CC_BLOCK에 `cache_control: { type: 'ephemeral' }` 을 부여하여 prefix hash anchor를 박았으나 (issue #55 본문 §7.1 mechanism 가설), **caller marker 중복 자체는 해소 못해** read_burst 24% ceiling에 그친 partial fix였다 (issue #59 24h 측정 결과). full fix는 본 PR(#97)의 invariant conditional 재정의 + 후속 #96의 B3 strict gate 코드 구현으로 완성된다. #48과 #55/#96의 차이는 여전히 박제 가치 있음: **#48은 "CC_BLOCK 중복 자체로 인한 토큰 낭비" (~$0.04/day, won't-fix 합당), #55는 "CC_BLOCK prepend로 인한 cache key shift" (~4-5x 실효 비용, fix 합당)**. 같은 코드 변경이라도 두 각도가 정반대 결론을 낳을 수 있으니 future-me는 두 케이스를 혼동하지 말 것.
 
 ---
 
