@@ -8,9 +8,11 @@
 //      is also surfaced verbatim to clients by Hono's onError handler
 //      (src/app.ts:332) — and that path does not pass through the logger.
 //
-// Patterns are matched in order; the first that fires for a given substring
-// wins. We keep multiple patterns instead of a single mega-regex so each
-// shape's intent stays scannable.
+// Patterns are applied in order via reduce + replace — every pattern runs
+// against the (already-redacted) intermediate, so an earlier wider pattern
+// consumes its match before a narrower later pattern can fire on the same
+// substring. We keep multiple patterns instead of a single mega-regex so
+// each shape's intent stays scannable.
 //
 // What is intentionally NOT covered:
 //   - File paths, query strings, IPs, internal hostnames. The 5xx log surface
