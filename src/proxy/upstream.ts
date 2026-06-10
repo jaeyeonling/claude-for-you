@@ -1,5 +1,6 @@
 import type { AccountPool } from '../auth/account-pool.js';
 import { DomainError, UpstreamFailed } from '../lib/errors.js';
+import { redact } from '../lib/redact.js';
 import type { PacingEnforcer } from '../pacing.js';
 import type { ClaudeTemplate } from '../template/types.js';
 
@@ -115,7 +116,11 @@ const wrapFetchOnceStage = async <T>(
     // (not the 502 default): the failure happened inside the proxy *before* any
     // network attempt, so reporting it as an upstream-network problem would
     // mislead alerts. `code` (e.g. template_apply_failed) carries the distinction.
-    throw UpstreamFailed(`${label}: ${e instanceof Error ? e.message : String(e)}`, 500, code);
+    throw UpstreamFailed(
+      redact(`${label}: ${e instanceof Error ? e.message : String(e)}`),
+      500,
+      code,
+    );
   }
 };
 
@@ -171,7 +176,9 @@ const fetchOnce = async (
     unrefTimer(streamingTimer);
     return { response, streamingTimer };
   } catch (e) {
-    throw UpstreamFailed(`upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+    throw UpstreamFailed(
+      redact(`upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`),
+    );
   }
 };
 

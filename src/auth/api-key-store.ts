@@ -4,6 +4,7 @@ import { rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ApiKeyEntry } from '../config.js';
 import { ConfigError, Conflict, InvalidRequest, NotFound } from '../lib/errors.js';
+import { redact } from '../lib/redact.js';
 import { assertValidModelPattern } from './model-allow.js';
 
 /**
@@ -126,7 +127,7 @@ const loadFile = (path: string): ApiKeyFile => {
     raw = readFileSync(path, 'utf-8');
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw ConfigError(`failed to read ${path}: ${msg}`);
+    throw ConfigError(redact(`failed to read ${path}: ${msg}`));
   }
   try {
     const parsed = JSON.parse(raw) as ApiKeyFile;
@@ -168,7 +169,7 @@ const loadFile = (path: string): ApiKeyFile => {
     return parsed;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw ConfigError(`api-keys file malformed (${path}): ${msg}`);
+    throw ConfigError(redact(`api-keys file malformed (${path}): ${msg}`));
   }
 };
 
@@ -384,7 +385,7 @@ export const createApiKeyStore = (params: {
           for (const p of capturedAllowed) assertValidModelPattern(p);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          throw InvalidRequest(msg, 'invalid_model_pattern');
+          throw InvalidRequest(redact(msg), 'invalid_model_pattern');
         }
       }
 
@@ -491,7 +492,7 @@ export const createApiKeyStore = (params: {
           for (const p of patchedAllowed) assertValidModelPattern(p);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          throw InvalidRequest(msg, 'invalid_model_pattern');
+          throw InvalidRequest(redact(msg), 'invalid_model_pattern');
         }
       }
 

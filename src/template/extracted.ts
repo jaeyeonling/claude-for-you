@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { AccountLearner } from '../account-learner.js';
 import { ConfigError } from '../lib/errors.js';
 import { log } from '../lib/logger.js';
+import { redact } from '../lib/redact.js';
 import type { ApplyInput, ClaudeTemplate, OutboundRequest } from './types.js';
 
 // Real CC v2.1.145 POSTs to /v1/messages?beta=true on every request (verified
@@ -82,7 +83,7 @@ const loadSnapshot = (path: string): SnapshotV2 => {
     parsed = JSON.parse(raw) as SnapshotV2;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw ConfigError(`snapshot malformed (${path}): ${msg}`);
+    throw ConfigError(redact(`snapshot malformed (${path}): ${msg}`));
   }
   if (parsed.schemaVersion !== SUPPORTED_SCHEMA_VERSION) {
     throw ConfigError(
