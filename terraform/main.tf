@@ -6,7 +6,7 @@ data "aws_ami" "al2023" {
 
   filter {
     name   = "name"
-    values = ["al2023-ami-2023.*-x86_64"]
+    values = ["al2023-ami-2023.*-arm64"]
   }
   filter {
     name   = "virtualization-type"
@@ -266,7 +266,13 @@ locals {
   docker_compose_version = "v2.30.3"
   docker_buildx_version  = "v0.17.1"
 
-  user_data = <<-EOT
+  # `<<-EOT` dedents by the smallest indentation in the body, but the
+  # nested heredoc terminators (SSHCFG, KNOWN, FETCH) sit at column 0,
+  # so Terraform infers a strip width of 0 and the visual 4-space indent
+  # survives into the rendered user-data — including in front of
+  # `#!/bin/bash`. On AL2023 arm64 cloud-init that breaks shebang
+  # detection and scripts-user fails. Force-strip the 4-space prefix.
+  user_data = replace(<<-EOT
     #!/bin/bash
     set -e
     dnf update -y
@@ -396,6 +402,7 @@ KNOWN
 
     echo "user-data finished" > /var/log/user-data-done
   EOT
+  , "/(?m)^    /", "")
 }
 
 resource "aws_instance" "app" {

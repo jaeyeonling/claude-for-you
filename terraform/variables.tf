@@ -11,9 +11,9 @@ variable "name" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type. t3.small (2 GiB RAM) is the floor — t3.micro (916 MiB) hit a silent kernel-reclaim hang under transient deploy/build memory pressure even with swap headroom (issue #107)."
+  description = "EC2 instance type. t4g.medium (Graviton, 4 GiB RAM) — picked over t3.medium for ~10% cost. Must remain an arm64 family member; the AMI filter is pinned to al2023 arm64."
   type        = string
-  default     = "t3.small"
+  default     = "t4g.medium"
 }
 
 variable "root_volume_size_gb" {
