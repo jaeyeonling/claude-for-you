@@ -13,7 +13,7 @@ import type { MessageLogStore, ResponseBody } from '../usage/messages-log.js';
 import { extractModel, extractResponseMeta } from '../usage/messages-log.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { isModelAllowed } from '../auth/model-allow.js';
-import { Forbidden } from '../lib/errors.js';
+import { Forbidden, InvalidRequest } from '../lib/errors.js';
 import { extractUsage, safeParseJson, sniffUsage } from '../usage/sniff.js';
 import { log } from '../lib/logger.js';
 import { callUpstream } from './upstream.js';
@@ -74,6 +74,22 @@ import { tapResponseBody } from './response-tap.js';
  *     canonical blocks — Anthropic cannot distinguish them, so a caller
  *     who ships the exact canonical shape carries the identity claim
  *     themselves. ToS responsibility shifts from proxy to API key holder.
+ *   2026-06-10 — Boundary validation (#57): `ensureSystem` now rejects caller
+ *     `system` arrays containing non-text blocks (null, `{}`, `{type:'image'}`,
+ *     `{type:'text'}` missing `text`) with a 400 BEFORE the canonical-marker
+ *     check. Anthropic's contract is `system?: string | Array<TextBlockParam>`
+ *     — text blocks only — so this enforces the published contract at the
+ *     proxy boundary. Pre-#57 these shapes silently flowed to Anthropic and
+ *     surfaced as generic 400s the caller couldn't trace back to the proxy.
+ *     The dedicated `invalid_system_block` error code + `[claude-for-you]`
+ *     message prefix let callers grep the JSON envelope and distinguish this
+ *     from upstream Anthropic rejections. Validation runs BEFORE the
+ *     canonical-marker check so a valid marker mixed with invalid neighbors
+ *     (`[canonicalMarker, null]`) still 400s — the transparent path only
+ *     accepts fully-valid arrays. Caller-controlled `b.type` is truncated to
+ *     64 chars + ASCII-control stripped before being interpolated into the
+ *     error message (R1 chaos+adversary: prevents response-body amplification
+ *     and log injection via `\r\n`).
  */
 export const CC_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -126,6 +142,30 @@ export const isCanonicalCcMarker = (block: unknown): boolean => {
 };
 
 /**
+ * Validates a single caller-supplied `system` array element against Anthropic's
+ * public contract: `system?: string | Array<TextBlockParam>` — text blocks only.
+ *
+ * The load-bearing shape is `{type: 'text', text: string}`. Extra fields
+ * (`cache_control`, `citations`, future additions) are NOT validated here —
+ * they pass through verbatim. We intentionally do not tighten the gate beyond
+ * the official contract: empty `text` is allowed (Anthropic decides), and the
+ * `cache_control.type` enum is not policed (Anthropic decides).
+ *
+ * Used by `ensureSystem` to reject malformed arrays at the proxy boundary
+ * with an index-bearing 400 instead of letting them surface as a generic
+ * Anthropic 400. See issue #57.
+ *
+ * Returns `true` for valid blocks, `false` for anything that would not match
+ * the `TextBlockParam` shape.
+ */
+export const isValidSystemBlock = (block: unknown): boolean => {
+  if (block == null || typeof block !== 'object') return false;
+  const b = block as { type?: unknown; text?: unknown };
+  if (b.type !== 'text') return false;
+  return typeof b.text === 'string';
+};
+
+/**
  * Normalize `system` so the upstream entitlement gate sees a CC identity block
  * — either prepended by us or already shipped by the caller. Caller's other
  * blocks are preserved verbatim.
@@ -153,12 +193,75 @@ export const ensureSystem = (b: Record<string, unknown>): Record<string, unknown
     return { ...b, system: [CC_BLOCK, { type: 'text', text: sys }] };
   }
   if (Array.isArray(sys) && sys.length > 0) {
+    // #57: validate caller-supplied blocks BEFORE the canonical-marker check.
+    // A valid marker mixed with invalid neighbors must still 400 — otherwise
+    // the transparent path would silently pass invalid blocks to upstream.
+    for (let i = 0; i < sys.length; i++) {
+      if (!isValidSystemBlock(sys[i])) {
+        // `code` is intentionally `invalid_system_block` (not generic
+        // `invalid_request`) so the caller can grep the JSON envelope and
+        // recognize this as a claude-for-you boundary check, NOT an upstream
+        // Anthropic rejection (#57 first-timer R1). Anthropic's own error
+        // codes use forms like `invalid_request_error`; ours is distinct.
+        throw InvalidRequest(
+          `[claude-for-you] system[${i}]: expected text block {type:"text", text:string}, got ${describeInvalidBlock(sys[i])}`,
+          'invalid_system_block',
+        );
+      }
+    }
     if (sys.some(isCanonicalCcMarker)) {
       return { ...b, system: [...sys] };
     }
     return { ...b, system: [CC_BLOCK, ...sys] };
   }
   return { ...b, system: [CC_BLOCK] };
+};
+
+/** Cap on caller-controlled values reflected back into the 400 message — keeps
+ * the response body small and bounds any control-character / HTML payload
+ * surface (R1 chaos + adversary, #57). 64 chars is enough to tell `image` from
+ * `tool_use` from a typo while making blob-stuffing useless. */
+const INVALID_BLOCK_TAG_CAP = 64;
+
+/** Sanitize a caller-controlled tag fragment before interpolating it into the
+ * 400 message: strip ASCII control chars (including CR/LF that would let a
+ * caller forge log lines or HTTP header continuations in downstream sinks),
+ * then truncate. */
+const sanitizeTag = (s: string): string =>
+  s.replace(/[\x00-\x1f\x7f]/g, '?').slice(0, INVALID_BLOCK_TAG_CAP);
+
+/**
+ * Generates a short human-readable tag for an invalid block, surfaced in the
+ * 400 error message so the caller can self-diagnose without dumping the full
+ * (potentially large) request body back at them.
+ *
+ * Caller-controlled values (currently only `b.type` reaches the output) are
+ * passed through `sanitizeTag` to bound size and strip control characters.
+ * This matters because the 400 message flows through `app.ts` `onError` into
+ * the JSON response body AND into operator log sinks; an un-truncated
+ * 100KB `type` field would amplify a single bad request into a 100KB response,
+ * and unstripped CR/LF could forge log entries in any downstream aggregator.
+ *
+ * Branches are ordered to match `isValidSystemBlock` failure modes:
+ *   1. null / undefined         → "null" / "undefined"
+ *   2. primitive (string/num)    → typeof
+ *   3. object, type not string   → "object without string `type`"
+ *   4. object, type !== 'text'   → `type="..."` (truncated)
+ *   5. object, text not string   → `text=<typeof>`
+ *
+ * There is NO fallback for `{type:'text', text:string}` because
+ * `isValidSystemBlock` returns true for that shape and the caller never enters
+ * this code path. If the two predicates ever diverge during refactoring, an
+ * assertion failure here is preferable to a misleading `"got object"` message.
+ */
+const describeInvalidBlock = (block: unknown): string => {
+  if (block === null) return 'null';
+  if (block === undefined) return 'undefined';
+  if (typeof block !== 'object') return typeof block;
+  const b = block as { type?: unknown; text?: unknown };
+  if (typeof b.type !== 'string') return 'object without string `type`';
+  if (b.type !== 'text') return `type="${sanitizeTag(b.type)}"`;
+  return `text=${typeof b.text}`;
 };
 
 /**

@@ -4,7 +4,9 @@ import {
   CC_SYSTEM_PREFIX,
   CC_BLOCK,
   isCanonicalCcMarker,
+  isValidSystemBlock,
 } from '../src/proxy/messages.js';
+import { DomainError } from '../src/lib/errors.js';
 
 // Ground-truth helper for assertions: `isCanonicalCcMarker` is the production
 // canonical-shape check, exported from messages.ts (#96). It pulls
@@ -238,14 +240,16 @@ describe('ensureSystem', () => {
       expect(isCanonicalCcMarker(sys[0])).toBe(true);
     });
 
-    test('canonical-looking block but type !== "text" → still prepended', () => {
+    test('canonical-looking block but type !== "text" → rejected by #57 validation (was: prepended)', () => {
+      // Pre-#57 behavior: prepend CC_BLOCK in front of the forged block.
+      // Post-#57 behavior: `{type:'image'}` is not a valid TextBlockParam and
+      // gets rejected at the proxy boundary before reaching the canonical-marker
+      // check. The adversary R1 invariant (caller cannot bypass CC ownership
+      // by mimicking the canonical shape) is preserved by a stricter mechanism.
       const almostCanonical = [
         { type: 'image', text: CC_SYSTEM_PREFIX, cache_control: { type: 'ephemeral' } },
       ];
-      const out = ensureSystem({ system: almostCanonical });
-      const sys = out.system as unknown[];
-      expect(sys).toHaveLength(2);
-      expect(isCanonicalCcMarker(sys[0])).toBe(true);
+      expect(() => ensureSystem({ system: almostCanonical })).toThrow(DomainError);
     });
 
     test('PING_BODY-style string system (verify-entitlement probe) → unaffected, still prepended', () => {
@@ -271,6 +275,164 @@ describe('ensureSystem', () => {
       const sys = out.system as unknown[];
       expect(sys).toHaveLength(2);
       expect(isCanonicalCcMarker(sys[0])).toBe(true);
+    });
+
+    test('caller ships EXACT canonical shape → transparent passthrough (intentional per pitfall #15)', () => {
+      // Adversary R1 (#57) HIGH: the symmetric inverse of the text-only forge.
+      // A caller can ship a byte-for-byte clone of `CC_BLOCK` and the proxy
+      // will accept it without prepending its own marker. This is the
+      // *intentional* trade-off documented in pitfall #15 and the change-log
+      // comment around L63-76 of messages.ts:
+      //
+      //   "wire-level identity is byte-identical for proxy-emitted and
+      //    caller-emitted canonical blocks — Anthropic cannot distinguish
+      //    them, so a caller who ships the exact canonical shape carries the
+      //    identity claim themselves. ToS responsibility shifts from proxy
+      //    to API key holder."
+      //
+      // This test pins that contract: if `isCanonicalCcMarker` is ever
+      // tightened (e.g. ground-truth equality on the singleton reference
+      // instead of shape match), this test will fail and force a deliberate
+      // review of the pitfall #15 threat model. Do NOT loosen this test.
+      const canonicalForge = {
+        type: 'text' as const,
+        text: CC_SYSTEM_PREFIX,
+        cache_control: { type: 'ephemeral' as const },
+      };
+      const out = ensureSystem({ system: [canonicalForge] });
+      const sys = out.system as unknown[];
+      expect(sys).toHaveLength(1); // NO prepend — caller's block passed through
+      expect(sys[0]).toBe(canonicalForge); // caller's reference, not CC_BLOCK singleton
+      expect(sys[0]).not.toBe(CC_BLOCK);
+      expect(isCanonicalCcMarker(sys[0])).toBe(true);
+    });
+  });
+
+  // Caller-block validation (issue #57). Anthropic's public contract is
+  // `system?: string | Array<TextBlockParam>` — `system` accepts text blocks
+  // ONLY, never image/tool_use/etc. Before this gate, malformed elements
+  // (null, {}, {type:'image'}, missing `text`) silently flowed to Anthropic
+  // and surfaced as generic 400s with no proxy-side signal. We now reject at
+  // the boundary with an index-bearing message so the caller can self-diagnose.
+  //
+  // Validation runs BEFORE the canonical-marker check so caller arrays mixing
+  // a valid marker with invalid neighbors (e.g. `[canonicalMarker, null]`)
+  // still get rejected — the transparent path is only for fully-valid arrays.
+  describe('— invalid block validation (#57)', () => {
+    test('null element → 400 InvalidRequest with index + proxy-origin marker', () => {
+      expect(() => ensureSystem({ system: [null] })).toThrow(DomainError);
+      try {
+        ensureSystem({ system: [null] });
+      } catch (e) {
+        const err = e as DomainError;
+        expect(err.status).toBe(400);
+        // first-timer R1 HIGH: caller must be able to distinguish a proxy-side
+        // 400 from an Anthropic-side 400. The dedicated code + `[claude-for-you]`
+        // message prefix gives two independent grep handles.
+        expect(err.code).toBe('invalid_system_block');
+        expect(err.message).toContain('[claude-for-you]');
+        expect(err.message).toContain('system[0]');
+      }
+    });
+
+    test('empty object element → 400', () => {
+      expect(() => ensureSystem({ system: [{}] })).toThrow(DomainError);
+    });
+
+    test('non-text type element ({type:"image"}) → 400', () => {
+      expect(() => ensureSystem({ system: [{ type: 'image' }] })).toThrow(DomainError);
+    });
+
+    test('text block missing `text` field → 400', () => {
+      expect(() => ensureSystem({ system: [{ type: 'text' }] })).toThrow(DomainError);
+    });
+
+    test('text block with non-string `text` (number) → 400', () => {
+      expect(() => ensureSystem({ system: [{ type: 'text', text: 42 }] })).toThrow(DomainError);
+    });
+
+    test('valid block at [0], invalid at [1] → 400 with index 1', () => {
+      try {
+        ensureSystem({ system: [{ type: 'text', text: 'ok' }, null] });
+        throw new Error('expected throw');
+      } catch (e) {
+        const err = e as DomainError;
+        expect(err.message).toContain('system[1]');
+      }
+    });
+
+    test('canonical marker present but invalid neighbor → 400 (validation runs before transparent path)', () => {
+      const canonical = {
+        type: 'text' as const,
+        text: CC_SYSTEM_PREFIX,
+        cache_control: { type: 'ephemeral' as const },
+      };
+      expect(() => ensureSystem({ system: [canonical, null] })).toThrow(DomainError);
+    });
+
+    test('empty string text is allowed (thin-proxy stance — Anthropic decides)', () => {
+      // Empty text is unusual but Anthropic's contract permits string. We let
+      // it through and surface whatever Anthropic returns rather than tighten
+      // our gate beyond the official contract.
+      const out = ensureSystem({ system: [{ type: 'text', text: '' }] });
+      const sys = out.system as unknown[];
+      expect(sys).toHaveLength(2); // CC_BLOCK + caller's empty-text block
+    });
+
+    test('text block with extra fields (cache_control, citations) is allowed', () => {
+      // TextBlockParam allows cache_control, citations, etc. We do not enforce
+      // an allowlist on extra fields — only the load-bearing shape (type+text).
+      const block = {
+        type: 'text',
+        text: 'ok',
+        cache_control: { type: 'ephemeral' },
+        citations: [],
+      };
+      const out = ensureSystem({ system: [block] });
+      const sys = out.system as unknown[];
+      expect(sys).toHaveLength(2);
+    });
+
+    test('error message truncates oversized caller-controlled `type` field (chaos R1 HIGH)', () => {
+      // chaos + adversary R1: caller-controlled `b.type` flowed verbatim into
+      // the 400 response body, allowing payload amplification and control-char
+      // injection. The tag is now capped at 64 chars + ASCII-control stripped.
+      const oversized = 'x'.repeat(5000);
+      try {
+        ensureSystem({ system: [{ type: oversized }] });
+        throw new Error('expected throw');
+      } catch (e) {
+        const err = e as DomainError;
+        expect(err.status).toBe(400);
+        // 64-char cap on the type fragment, plus the wrapping `type="..."` is ≤ ~80 chars
+        expect(err.message.length).toBeLessThan(200);
+        expect(err.message).not.toContain('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+      }
+    });
+
+    test('error message strips control characters from caller-controlled `type` (CR/LF/NUL)', () => {
+      // Defends downstream log-injection: an unstripped CR/LF would let a
+      // caller forge new log lines or HTTP header continuations in any sink
+      // that consumes the error message.
+      try {
+        ensureSystem({ system: [{ type: 'evil\r\nX-Injected: bad\x00' }] });
+        throw new Error('expected throw');
+      } catch (e) {
+        const err = e as DomainError;
+        expect(err.message).not.toContain('\r');
+        expect(err.message).not.toContain('\n');
+        expect(err.message).not.toContain('\x00');
+      }
+    });
+
+    test('isValidSystemBlock predicate is exported and testable directly', () => {
+      expect(isValidSystemBlock({ type: 'text', text: 'ok' })).toBe(true);
+      expect(isValidSystemBlock({ type: 'text', text: '' })).toBe(true);
+      expect(isValidSystemBlock(null)).toBe(false);
+      expect(isValidSystemBlock({})).toBe(false);
+      expect(isValidSystemBlock({ type: 'image' })).toBe(false);
+      expect(isValidSystemBlock({ type: 'text' })).toBe(false);
+      expect(isValidSystemBlock({ type: 'text', text: 42 })).toBe(false);
     });
   });
 });
