@@ -6,6 +6,12 @@ services:
     image: claude-for-you:latest
     container_name: claude-for-you
     restart: unless-stopped
+    # cgroup-scoped memory cap: a runaway here OOM-kills only this container,
+    # not the host. Pairs with `restart: unless-stopped` for auto-recovery.
+    # Basis: idle ~50MB (issue #110), 1G upper bound absorbs SSE buffering /
+    # model-swap bursts with headroom on t4g.medium (4G RAM + 2G swap).
+    mem_limit: 1g
+    mem_reservation: 256m
     environment:
       # OAuth — pick ONE source:
       #   A) Single-account: set ANTHROPIC_OAUTH_REFRESH_TOKEN (env)
@@ -44,6 +50,10 @@ services:
     image: caddy:2-alpine
     container_name: claude-for-you-caddy
     restart: unless-stopped
+    # Caddy idles ~20MB; 128M cap is generous headroom for TLS handshakes
+    # and concurrent connection state without giving it room to misbehave.
+    mem_limit: 128m
+    mem_reservation: 32m
     environment:
       # Required by Caddy itself. Empty → Caddyfile syntax error at boot.
       # IP-only deployment can set DOMAIN=:80 to serve HTTP without ACME.
@@ -76,6 +86,10 @@ services:
     image: postgres:16-alpine
     container_name: claude-for-you-postgres
     restart: unless-stopped
+    # Dev-only — prod uses RDS. 512M is comfortable for local dev workload;
+    # adjust if you run heavy load tests against the local instance.
+    mem_limit: 512m
+    mem_reservation: 128m
     environment:
       POSTGRES_DB: claude_for_you
       POSTGRES_USER: claude
