@@ -15,8 +15,8 @@
 // each shape's intent stays scannable.
 //
 // What is intentionally NOT covered:
-//   - File paths, query strings, IPs, internal hostnames. The 5xx log surface
-//     legitimately wants those for triage.
+//   - File paths, IPs, internal hostnames. The 5xx log surface legitimately
+//     wants those for triage.
 //   - Generic high-entropy strings. False positives on random-looking config
 //     values (commit SHAs, request IDs) would hide the actual operational signal.
 //   - `Bearer <word>` false-positives like `"Bearer scheme is deprecated"` get
@@ -27,6 +27,15 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
   // OAuth Bearer header echoes. Includes `.` so a JWT
   // (`Bearer eyJhbGciOi....<sig>`) matches end-to-end.
   /Bearer\s+[a-zA-Z0-9._-]+/gi,
+  // OAuth credential query params (`?access_token=...`, `&refresh_token=...`).
+  // Issue #93 L17 explicitly requires this shape — upstream errors and curl
+  // diagnostics can echo a query string containing the live token.
+  /(?:access_token|refresh_token|id_token)=[^&\s]+/gi,
+  // Labeled opaque token values surfaced in free-form prose (e.g.
+  // `access token was: <opaque>`). Catches the non-`Bearer ` / non-JWT case
+  // where an upstream error narrates the credential. Length floor 20 keeps
+  // common phrases like `"access token: missing"` from matching.
+  /(?:access|refresh|id)[ _-]?token(?:\s+was)?[:=]\s*[A-Za-z0-9._~-]{20,}/gi,
   // Standalone JWTs surfaced in messages without an explicit `Bearer ` prefix
   // (e.g. `access token was: eyJ...`). Three-part `header.payload.sig`.
   /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,

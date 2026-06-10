@@ -36,6 +36,28 @@ describe('redact', () => {
     expect(JSON.stringify(out)).toContain('[REDACTED]');
   });
 
+  test('redacts query-string credential params (#93 L17, CodeRabbit follow-up)', () => {
+    const out = redact(
+      'curl https://example/cb?state=xyz&access_token=opaqueABCDEF12345 failed',
+    );
+    expect(out).not.toContain('opaqueABCDEF12345');
+    expect(out).toContain('[REDACTED]');
+    // Adjacent params on the other side of `&` survive — boundary check.
+    expect(out).toContain('state=xyz');
+  });
+
+  test('redacts labeled opaque token values in prose', () => {
+    const out = redact('upstream replied: access token was: opaqueXYZ0123456789abcd (rotated)');
+    expect(out).not.toContain('opaqueXYZ0123456789abcd');
+    expect(out).toContain('[REDACTED]');
+  });
+
+  test('labeled-token pattern length floor avoids `access token: missing`', () => {
+    // Short value below 20 chars must NOT match — otherwise innocuous error
+    // text would lose triage signal.
+    expect(redact('access token: missing')).toBe('access token: missing');
+  });
+
   test('passes innocuous text through unchanged', () => {
     expect(redact('hello world')).toBe('hello world');
     expect(redact('failed to read /tmp/data: ENOENT')).toBe('failed to read /tmp/data: ENOENT');
