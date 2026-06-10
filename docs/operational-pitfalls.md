@@ -250,11 +250,18 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 **상태**: 2026-06-02 패치. 그 이전에는 caller가 자체 system prompt (예: tomodachi 디스코드 봇 같은 워크로드)를 보내면 sonnet/opus는 즉시 429 `rate_limit_error`로 거절되고 haiku는 통과되는 시그니처가 운영 중에 발생했음.
 
-**현재 동작** *(pre-#96)*: `src/proxy/messages.ts`의 `ensureSystem`이 모든 호출에 대해 caller 입력에 관계없이 CC 시그니처 블록을 `system` array의 첫 블록으로 강제 prepend한다. caller가 보낸 string/array는 두 번째 이후 블록으로 그대로 보존된다 (cache_control 포함). transparent 분기는 없음. 단 forge 차단 강도는 절대적이지 않다 — caller가 `system[0]`에 CC prefix를, `system[1]`에 임의 텍스트를 보내면 upstream은 `[CC_BLOCK_proxy, forgedBlock, ...]` 를 받아 entitlement 게이트는 통과한다. 본 동작은 *entitlement gate 통과용 leading-block 소유권 확보* 목적이며 *system injection 방어*는 아니다. **#96 (B3 strict gate) 머지 시 caller가 canonical shape의 CC marker를 미리 박은 경우 transparent passthrough가 활성화됨 — 함정 #15 활성화 박스 참조.**
+**현재 동작**: `src/proxy/messages.ts`의 `ensureSystem`은 두 분기를 가진다:
+
+1. **caller `system`이 canonical CC marker block (type+text+cache_control:ephemeral)을 array에 포함하면 transparent passthrough** — caller array를 shallow-copy하여 그대로 forwarding. 실제 CC client 트래픽이 이 경로로 흘러 prefix hash가 PRE PR41과 일치 (함정 #15 cost evidence 참조).
+2. **그 외 경우 unconditional prepend** — caller가 보낸 string/array는 두 번째 이후 블록으로 보존. tomodachi-style 봇이나 canonical shape를 안 박는 SDK 클라이언트가 이 경로.
+
+단 forge 차단 강도는 절대적이지 않다 — caller가 canonical shape를 정확히 모사하면 transparent 통과되며, 이는 wire-level에서 real CC와 byte-identical하다 (proxy emit vs caller emit 구별 불가). 본 동작은 *entitlement gate 통과용 wire-level identity 보장* 목적이며 *system injection 방어*는 아니다 — ToS 책임이 proxy → API key holder로 위임됨 (함정 #15 위협 모델 재정의 참조).
+
+`verify-entitlement` probe는 `PING_BODY`에 `system: CC_SYSTEM_PREFIX` (string)을 사용하므로 transparent 분기 미진입 — 항상 unconditional prepend 경로를 탄다. probe `ok` verdict는 prepend 경로의 marker drift 검출 신호로만 해석.
 
 **필수 조건**:
 
-- `system` array의 첫 블록은 **정확히** `"You are Claude Code, Anthropic's official CLI for Claude."` — 이 marker가 entitlement 게이트 통과 조건. Anthropic이 이 prefix를 한 글자라도 바꾸면 우리 가드가 무너지고 sonnet/opus가 다시 429로 떨어진다.
+- `system` array 안 *어딘가에* **정확히** `"You are Claude Code, Anthropic's official CLI for Claude."` text + `cache_control: { type: 'ephemeral' }`를 가진 canonical block이 있어야 한다. 위치는 array 내 어디든 — real CC는 `system[1]`(billing header 다음)에 박고, `ensureSystem`이 prepend하는 경우는 `system[0]`. `isCanonicalCcMarker`가 anywhere-in-array로 매칭하므로 두 위치 모두 통과 (cc-wire-reference §2a "Position policy" 참조). Anthropic이 이 prefix를 한 글자라도 바꾸면 우리 가드가 무너지고 sonnet/opus가 다시 429로 떨어진다.
 - proxy가 박는 헤더 (`user-agent: claude-cli/...`, `anthropic-beta: claude-code-...`) 는 `src/template/static.ts:34-65`에서 클라이언트 헤더 무관하게 자체적으로 박는다. system body만 변수.
 
 ### 과거 잘못된 진단 (역사 기록, 같은 함정 재발 방지용)
@@ -300,7 +307,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 ## 15. CC_BLOCK prepend — canonical shape 일 때 transparent, 그 외 prepend
 
-> **[현재 미활성 — #96 머지 후 적용]** 본 conditional rule은 #96 (B3 strict gate) 코드 PR 머지 후 `ensureSystem`에 반영된다. **본 항목(#97 docs PR) 머지 시점에서 `src/proxy/messages.ts:102-111` 의 `ensureSystem` 코드는 여전히 unconditional prepend를 유지한다 — 본 문서는 *invariant rule의 정의*만 박제하며 *코드 활성화*는 별개의 PR (#96)이다.** 향후 #96 머지 시 본 문서는 그대로 유지되고 코드만 본 정의와 정렬된다. 함정 #13의 "현재 동작" 단락도 #96 머지 시 함께 갱신 대상.
+> **[활성 — #96 머지로 적용 완료]** 본 conditional rule은 #96 (B3 strict gate) 코드 PR 머지로 `ensureSystem`에 반영되어 production에서 활성. caller가 canonical CC marker block을 array에 박은 경우 (real CC client 트래픽) `ensureSystem`이 caller `system`을 shallow-copy하여 그대로 forwarding하고, 그 외 경우 unconditional prepend 유지. 코드: `src/proxy/messages.ts` `isCanonicalCcMarker` + `ensureSystem`. 함정 #13의 "현재 동작" 단락도 본 PR과 함께 갱신됨.
 
 **증상**: 토큰 사용 진단 중 outbound payload의 `system` 배열에서 `"You are Claude Code, Anthropic's official CLI for Claude."` 문자열이 position 0과 1에 동일하게 박힌 걸 발견. 직접 ~12 tok/req 낭비처럼 보임. 1009 req/day 기준 ~12K tok/day, sonnet 단가 환산 약 $0.04/day.
 

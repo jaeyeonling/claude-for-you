@@ -60,6 +60,20 @@ import { tapResponseBody } from './response-tap.js';
  *     alongside cc-wire-reference §2a — `as const` + the doc-sync test guard
  *     the runtime side, but the trade-off rationale needs a fresh evaluation
  *     because a longer-TTL anchor changes the breakpoint-budget math.
+ *   2026-06-10 — B3 strict gate (#96, this commit): `ensureSystem` now skips
+ *     the prepend when the caller's `system` array already contains a
+ *     canonical CC marker block (see `isCanonicalCcMarker` below). Real CC
+ *     traffic ships such a block at `system[1]` (after the billing header),
+ *     so this transparent passthrough eliminates the marker duplication that
+ *     PR #41 introduced — restoring the prefix hash caller `cache_control`
+ *     breakpoints relied on (issue #55, cost evidence in pitfall #15).
+ *     Non-CC callers (tomodachi-style bots, SDK clients without the marker)
+ *     still get the unconditional prepend, preserving PR #41's entitlement
+ *     fix. Threat model per docs/operational-pitfalls.md #15: wire-level
+ *     identity is byte-identical for proxy-emitted and caller-emitted
+ *     canonical blocks — Anthropic cannot distinguish them, so a caller
+ *     who ships the exact canonical shape carries the identity claim
+ *     themselves. ToS responsibility shifts from proxy to API key holder.
  */
 export const CC_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -87,17 +101,51 @@ export const CC_BLOCK: SystemTextBlock = Object.freeze({
 });
 
 /**
- * Normalize `system` so the upstream entitlement gate always sees a proxy-owned
- * CC identity block in the leading position. Caller's body is preserved as
- * subsequent blocks.
+ * Detects whether a `system` block is a "canonical CC marker" — i.e. the exact
+ * shape we'd prepend ourselves. Used by `ensureSystem` to skip the prepend when
+ * the caller has already shipped one (real CC client). See pitfall #15.
+ *
+ * Ground truth comes from the frozen `CC_BLOCK` singleton, NOT a hardcoded
+ * 'ephemeral' literal — a deliberate future change to
+ * `CC_BLOCK.cache_control.type` propagates here automatically. The single
+ * hardcoded literal lives in `tests/cc-system-prefix-doc-sync.test.ts` as the
+ * dedicated invariant-trip test (see issue #55 maintainer review).
+ *
+ * Returns `true` only for blocks that match all three:
+ *   - `type === 'text'`
+ *   - `text === CC_SYSTEM_PREFIX` (byte-identical)
+ *   - `cache_control.type === CC_BLOCK.cache_control.type` (currently 'ephemeral')
+ */
+export const isCanonicalCcMarker = (block: unknown): boolean => {
+  if (block == null || typeof block !== 'object') return false;
+  const b = block as { type?: unknown; text?: unknown; cache_control?: unknown };
+  if (b.type !== 'text' || b.text !== CC_SYSTEM_PREFIX) return false;
+  if (b.cache_control == null || typeof b.cache_control !== 'object') return false;
+  const ccType = (b.cache_control as { type?: unknown }).type;
+  return ccType === (CC_BLOCK.cache_control as { type: string }).type;
+};
+
+/**
+ * Normalize `system` so the upstream entitlement gate sees a CC identity block
+ * — either prepended by us or already shipped by the caller. Caller's other
+ * blocks are preserved verbatim.
  *
  * Shape rules:
- *   - missing / empty / non-string non-array → `[CC_BLOCK]`
- *   - non-empty string                       → `[CC_BLOCK, {type:'text', text: caller}]`
- *   - non-empty array                        → `[CC_BLOCK, ...caller]` (blocks
- *                                              preserved with their cache_control intact)
+ *   - missing / empty / non-string non-array        → `[CC_BLOCK]`
+ *   - non-empty string                              → `[CC_BLOCK, {type:'text', text: caller}]`
+ *   - non-empty array, contains canonical marker    → caller passed through (shallow copy)
+ *   - non-empty array, no canonical marker          → `[CC_BLOCK, ...caller]`
  *
- * Returns a new object — never mutates the input.
+ * The "contains canonical marker" branch (#96, post-#97 invariant) skips the
+ * prepend when the caller's `system` array already carries a block matching
+ * `isCanonicalCcMarker`. This preserves the prefix hash caller cache_control
+ * breakpoints rely on (issue #55). Non-canonical callers still get the
+ * unconditional prepend (PR #41 entitlement fix preserved).
+ *
+ * Returns a new object — never mutates the input. The transparent branch uses
+ * a shallow-copied `system` array (`[...sys]`) so downstream code can't leak
+ * mutations back to the caller's array reference, even though element
+ * references are shared (same shape as the existing prepend branches).
  */
 export const ensureSystem = (b: Record<string, unknown>): Record<string, unknown> => {
   const sys = b.system;
@@ -105,6 +153,9 @@ export const ensureSystem = (b: Record<string, unknown>): Record<string, unknown
     return { ...b, system: [CC_BLOCK, { type: 'text', text: sys }] };
   }
   if (Array.isArray(sys) && sys.length > 0) {
+    if (sys.some(isCanonicalCcMarker)) {
+      return { ...b, system: [...sys] };
+    }
     return { ...b, system: [CC_BLOCK, ...sys] };
   }
   return { ...b, system: [CC_BLOCK] };
