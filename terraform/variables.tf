@@ -11,9 +11,9 @@ variable "name" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type. t3.micro is enough for trusted-few traffic."
+  description = "EC2 instance type. t4g.medium (Graviton, 4 GiB RAM) — picked over t3.medium for ~10% cost. Must remain an arm64 family member; the AMI filter is pinned to al2023 arm64."
   type        = string
-  default     = "t3.micro"
+  default     = "t4g.medium"
 }
 
 variable "root_volume_size_gb" {
