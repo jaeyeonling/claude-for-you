@@ -261,7 +261,7 @@ HTTPS_PROXY=http://localhost:8765 NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-
 
 **필수 조건**:
 
-- `system` array의 첫 블록은 **정확히** `"You are Claude Code, Anthropic's official CLI for Claude."` — 이 marker가 entitlement 게이트 통과 조건. Anthropic이 이 prefix를 한 글자라도 바꾸면 우리 가드가 무너지고 sonnet/opus가 다시 429로 떨어진다.
+- `system` array 안 *어딘가에* **정확히** `"You are Claude Code, Anthropic's official CLI for Claude."` text + `cache_control: { type: 'ephemeral' }`를 가진 canonical block이 있어야 한다. 위치는 array 내 어디든 — real CC는 `system[1]`(billing header 다음)에 박고, `ensureSystem`이 prepend하는 경우는 `system[0]`. `isCanonicalCcMarker`가 anywhere-in-array로 매칭하므로 두 위치 모두 통과 (cc-wire-reference §2a "Position policy" 참조). Anthropic이 이 prefix를 한 글자라도 바꾸면 우리 가드가 무너지고 sonnet/opus가 다시 429로 떨어진다.
 - proxy가 박는 헤더 (`user-agent: claude-cli/...`, `anthropic-beta: claude-code-...`) 는 `src/template/static.ts:34-65`에서 클라이언트 헤더 무관하게 자체적으로 박는다. system body만 변수.
 
 ### 과거 잘못된 진단 (역사 기록, 같은 함정 재발 방지용)
