@@ -251,7 +251,7 @@ const runLoopbackPing = async (
       diagHeaders: captureDiagHeaders(res.headers),
     };
   } catch (err: unknown) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = redact(err instanceof Error ? err.message : String(err));
     return {
       ok: false,
       status: 0,
