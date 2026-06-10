@@ -2,6 +2,7 @@ import type { Context, Hono } from 'hono';
 import type { AccountPool } from '../auth/account-pool.js';
 import type { ApiKeyStore } from '../auth/api-key-store.js';
 import { InvalidRequest, NotFound } from '../lib/errors.js';
+import { redact } from '../lib/redact.js';
 import { CC_SYSTEM_PREFIX } from '../proxy/messages.js';
 
 /**
@@ -161,7 +162,7 @@ export const createOAuthProbeHandler =
         detail: `member="${memberName}" new access token suffix=…${suffix}`,
       };
     } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = redact(err instanceof Error ? err.message : String(err));
       result = {
         kind: 'oauth-probe',
         ok: false,
@@ -250,7 +251,7 @@ const runLoopbackPing = async (
       diagHeaders: captureDiagHeaders(res.headers),
     };
   } catch (err: unknown) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = redact(err instanceof Error ? err.message : String(err));
     return {
       ok: false,
       status: 0,
@@ -412,7 +413,7 @@ const callAnthropicDirect = async (
       status: 0,
       bodyText: '',
       headers: null,
-      error: err instanceof Error ? err.message : String(err),
+      error: redact(err instanceof Error ? err.message : String(err)),
     };
   }
 };
@@ -476,7 +477,7 @@ export const createUpstreamDirectHandler =
       }
     } catch (err: unknown) {
       // Only reachable when pool.getAccessToken throws — see comment above.
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = redact(err instanceof Error ? err.message : String(err));
       result = {
         kind: 'upstream-direct',
         ok: false,
@@ -667,7 +668,7 @@ export const createVerifyEntitlementHandler =
       // Reached only when pool.getAccessToken throws — fetch errors are
       // swallowed inside callAnthropicDirect and surface as status=0/error
       // via the verdict path. Phase is therefore unambiguous: token-fetch.
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = redact(err instanceof Error ? err.message : String(err));
       result = {
         kind: 'verify-entitlement',
         ok: false,

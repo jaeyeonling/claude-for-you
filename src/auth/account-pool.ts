@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ConfigError } from '../lib/errors.js';
+import { redact } from '../lib/redact.js';
 import { createOAuthManager, type OAuthManager, type TokenState } from './oauth.js';
 export type { TokenState };
 
@@ -205,7 +206,7 @@ export const tryLoadAccountPool = async (
     raw = await readFile(params.accountsPath, 'utf-8');
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw ConfigError(`failed to read ${params.accountsPath}: ${msg}`);
+    throw ConfigError(redact(`failed to read ${params.accountsPath}: ${msg}`));
   }
 
   let parsed: AccountFile;
@@ -213,7 +214,7 @@ export const tryLoadAccountPool = async (
     parsed = JSON.parse(raw) as AccountFile;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw ConfigError(`${params.accountsPath} malformed: ${msg}`);
+    throw ConfigError(redact(`${params.accountsPath} malformed: ${msg}`));
   }
   if (!Array.isArray(parsed.accounts) || parsed.accounts.length === 0) {
     throw ConfigError(`${params.accountsPath} must contain a non-empty "accounts" array`);

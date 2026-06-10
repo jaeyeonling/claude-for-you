@@ -248,6 +248,62 @@ describe('callUpstream — transparent proxy (no 5xx retry, no 429 failover)', (
     expect(fetchCallCount).toBe(0);
   });
 
+  test('H: Bearer tokens in template.apply error are redacted from DomainError.message (#93)', async () => {
+    const { pool } = stubPool();
+    const leakyTemplate: ClaudeTemplate = Object.freeze({
+      source: 'static' as const,
+      description: 'leaky',
+      apply: async () => {
+        throw new Error('snapshot load failed: cached header was "Bearer sk-ant-abc123def456ghi789jkl"');
+      },
+    });
+    installFetch([]);
+
+    let caught: unknown;
+    try {
+      await callUpstream({}, undefined, 'sess-1', {
+        pool,
+        template: leakyTemplate,
+        pacing: stubPacing,
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(DomainError);
+    const err = caught as DomainError;
+    expect(err.code).toBe('template_apply_failed');
+    expect(err.message).not.toContain('sk-ant-abc123def456ghi789jkl');
+    expect(err.message).not.toMatch(/Bearer\s+sk-ant-/);
+    expect(err.message).toContain('[REDACTED]');
+    expect(fetchCallCount).toBe(0);
+  });
+
+  test('I: Bearer tokens in fetch network error are redacted from DomainError.message (#93)', async () => {
+    const { pool } = stubPool();
+    globalThis.fetch = (async () => {
+      throw new TypeError('connect ECONNREFUSED while sending "Bearer sk-leaked-token-abcdefghij"');
+    }) as typeof globalThis.fetch;
+
+    let caught: unknown;
+    try {
+      await callUpstream({}, undefined, 'sess-1', {
+        pool,
+        template: stubTemplate(),
+        pacing: stubPacing,
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(DomainError);
+    const err = caught as DomainError;
+    expect(err.code).toBe('upstream_failed');
+    expect(err.message).not.toContain('sk-leaked-token-abcdefghij');
+    expect(err.message).not.toMatch(/Bearer\s+sk-/);
+    expect(err.message).toContain('[REDACTED]');
+  });
+
   test('D: 401 after refresh is surfaced — no pool failover', async () => {
     const { pool, calls } = stubPool();
     installFetch([

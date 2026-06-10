@@ -133,6 +133,28 @@ describe('createApiKeyStore', () => {
     ).rejects.toThrow(/more than one/);
   });
 
+  test('add() redacts Bearer tokens echoed by model-pattern validation errors (#93)', async () => {
+    const store = createApiKeyStore({
+      envKeys: [],
+      filePath: join(workdir, 'api-keys.json'),
+    });
+    // assertValidModelPattern echoes the pattern verbatim ("model pattern \"...\" has more than one wildcard").
+    // If a caller bug or malicious admin embeds a Bearer token substring,
+    // the InvalidRequest message goes to the client (400). This must be redacted.
+    const leaky = 'Bearer sk-ant-leakedabcdef123456*-*';
+    let err: unknown;
+    try {
+      await store.add('mallory', { allowedModels: [leaky] });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    const msg = (err as Error).message;
+    expect(msg).not.toContain('sk-ant-leakedabcdef123456');
+    expect(msg).not.toMatch(/Bearer\s+sk-ant-/);
+    expect(msg).toContain('[REDACTED]');
+  });
+
   test('add() rejects allowedModels arrays over the per-key cap', async () => {
     const store = createApiKeyStore({
       envKeys: [],
