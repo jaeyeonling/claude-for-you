@@ -45,6 +45,131 @@ if [ "$PING" != "Online" ]; then
 fi
 echo "  Online ✓"
 
+# Issue #109: remote memory pre-flight gate.
+#
+# Post-mortem #107 traced the silent hang to a deploy/buildkit memory spike on
+# t3.small. swap + the larger instance widened the safety margin, but a deploy
+# launched when MemAvailable is already low can still re-enter the same
+# threshold — the new headroom is finite, not unconditional. This gate aborts
+# BEFORE the docker build kicks in if the instance is already memory-pressed.
+#
+# Why a ratio (MemAvailable < MemTotal * 0.2) and not an absolute byte
+# threshold: the instance type has changed once (t3.micro → t4g.medium via
+# #107/#108) and may change again. An absolute "<400MB" gate would trip
+# spuriously on small instances and miss real pressure on larger ones.
+# Ratio scales with whatever terraform provisions.
+#
+# Why bash integer math instead of bc: bc isn't guaranteed on every operator
+# workstation (alpine, minimal Docker dev images). /proc/meminfo values are
+# already in integer kB, so `(MemAvailable * 100) / MemTotal` stays integer
+# without precision loss.
+#
+# Why a separate SSM send-command instead of folding the check into the main
+# remote script: the main script runs git fetch + docker build, which is
+# already the expensive step we want to NOT enter when memory is low. The
+# gate must precede it as its own SSM invocation. It also keeps the abort
+# message visible on the operator's terminal — failures inside the main
+# commands[] surface only via truncated StandardErrorContent (issue #71).
+#
+# Why AWS_MAX_ATTEMPTS=2 AWS_DEFAULT_CONNECT_TIMEOUT=5: issue #67 covers the
+# wider gap (outer pre-flight has no AWS CLI timeout), but every NEW outer
+# AWS CLI call this PR adds applies the recommendation locally so we don't
+# stack new ~3min silent-blocking surface. The pre-existing calls above
+# remain untouched and stay scoped to #67.
+echo "▸ Checking remote memory pressure on $INSTANCE_ID..."
+MEM_CMD_ID=$(AWS_MAX_ATTEMPTS=2 AWS_DEFAULT_CONNECT_TIMEOUT=5 aws ssm send-command \
+  --instance-ids "$INSTANCE_ID" \
+  --document-name "AWS-RunShellScript" \
+  --comment "claude-for-you mem preflight" \
+  --region "$REGION" \
+  --parameters 'commands=["cat /proc/meminfo"]' \
+  --query 'Command.CommandId' \
+  --output text)
+
+# Poll up to ~30s — `cat /proc/meminfo` is a microsecond op on the box;
+# any latency here is SSM agent round-trip, not workload.
+MEM_STATUS="Pending"
+MEM_OUTPUT=""
+for _ in $(seq 1 15); do
+  MEM_STATUS=$(AWS_MAX_ATTEMPTS=2 AWS_DEFAULT_CONNECT_TIMEOUT=5 aws ssm get-command-invocation \
+    --command-id "$MEM_CMD_ID" \
+    --instance-id "$INSTANCE_ID" \
+    --region "$REGION" \
+    --query 'Status' \
+    --output text 2>/dev/null || echo "Pending")
+  case "$MEM_STATUS" in
+    Success)
+      MEM_OUTPUT=$(AWS_MAX_ATTEMPTS=2 AWS_DEFAULT_CONNECT_TIMEOUT=5 aws ssm get-command-invocation \
+        --command-id "$MEM_CMD_ID" \
+        --instance-id "$INSTANCE_ID" \
+        --region "$REGION" \
+        --query 'StandardOutputContent' \
+        --output text)
+      break
+      ;;
+    Failed|TimedOut|Cancelled)
+      echo "  ✗ memory pre-flight SSM status: $MEM_STATUS"
+      echo "    → proceeding to deploy would be flying blind on memory headroom."
+      echo "    → check the instance via: aws ssm start-session --target $INSTANCE_ID --region $REGION"
+      exit 1
+      ;;
+    *)
+      sleep 2
+      ;;
+  esac
+done
+
+if [ "$MEM_STATUS" != "Success" ]; then
+  echo "  ✗ memory pre-flight did not complete within timeout (last status: $MEM_STATUS)"
+  echo "    → SSM agent may be unresponsive; re-run after confirming the instance is healthy."
+  exit 1
+fi
+
+# Parse /proc/meminfo. Fields are " kB"-suffixed; awk drops the suffix.
+# Field 2 is the integer value in kB.
+MEM_TOTAL_KB=$(echo "$MEM_OUTPUT" | awk '/^MemTotal:/ {print $2}')
+MEM_AVAIL_KB=$(echo "$MEM_OUTPUT" | awk '/^MemAvailable:/ {print $2}')
+SWAP_TOTAL_KB=$(echo "$MEM_OUTPUT" | awk '/^SwapTotal:/ {print $2}')
+SWAP_FREE_KB=$(echo "$MEM_OUTPUT" | awk '/^SwapFree:/ {print $2}')
+
+# Defensive: if /proc/meminfo missing expected fields, fail closed rather than
+# silently skip the gate. A broken parse should not look like "all clear".
+if [ -z "$MEM_TOTAL_KB" ] || [ -z "$MEM_AVAIL_KB" ] || [ "$MEM_TOTAL_KB" -le 0 ]; then
+  echo "  ✗ could not parse MemTotal/MemAvailable from remote /proc/meminfo"
+  echo "    raw output (first 10 lines):"
+  echo "$MEM_OUTPUT" | head -10 | sed 's/^/      /'
+  exit 1
+fi
+
+MEM_AVAIL_PCT=$(( (MEM_AVAIL_KB * 100) / MEM_TOTAL_KB ))
+MEM_AVAIL_MB=$(( MEM_AVAIL_KB / 1024 ))
+MEM_TOTAL_MB=$(( MEM_TOTAL_KB / 1024 ))
+
+if [ "$MEM_AVAIL_PCT" -lt 20 ]; then
+  echo "  ✗ MemAvailable too low: ${MEM_AVAIL_MB}MiB / ${MEM_TOTAL_MB}MiB (${MEM_AVAIL_PCT}%, threshold 20%)"
+  echo "    → deploying now risks re-entering the #107 OOM/swap-thrash window."
+  echo "    → investigate via: aws ssm start-session --target $INSTANCE_ID --region $REGION"
+  echo "      and: free -m; ps aux --sort=-%mem | head -10"
+  exit 1
+fi
+echo "  memory ✓ (MemAvailable ${MEM_AVAIL_MB}MiB / ${MEM_TOTAL_MB}MiB, ${MEM_AVAIL_PCT}%)"
+
+# Swap is a warning, not a gate: a partly-consumed swap is normal under the
+# t4g.medium + 2GiB swap config (#108), and aborting on it would block deploys
+# that the memory check already cleared. Surface it so the operator can
+# decide whether to investigate post-deploy.
+if [ -n "$SWAP_TOTAL_KB" ] && [ "$SWAP_TOTAL_KB" -gt 0 ] && [ -n "$SWAP_FREE_KB" ]; then
+  SWAP_FREE_PCT=$(( (SWAP_FREE_KB * 100) / SWAP_TOTAL_KB ))
+  SWAP_FREE_MB=$(( SWAP_FREE_KB / 1024 ))
+  SWAP_TOTAL_MB=$(( SWAP_TOTAL_KB / 1024 ))
+  if [ "$SWAP_FREE_PCT" -lt 50 ]; then
+    echo "  ⚠ SwapFree low: ${SWAP_FREE_MB}MiB / ${SWAP_TOTAL_MB}MiB (${SWAP_FREE_PCT}%, warn <50%)"
+    echo "    → memory check passed but swap is heavily consumed; deploy proceeds, monitor post-roll."
+  else
+    echo "  swap ✓ (SwapFree ${SWAP_FREE_MB}MiB / ${SWAP_TOTAL_MB}MiB, ${SWAP_FREE_PCT}%)"
+  fi
+fi
+
 echo "▸ Uploading .env to SSM SecureString ($ENV_PARAM)..."
 aws ssm put-parameter \
   --name "$ENV_PARAM" \
