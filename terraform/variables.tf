@@ -11,9 +11,9 @@ variable "name" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type. t3.micro is enough for trusted-few traffic."
+  description = "EC2 instance type. t3.small (2 GiB RAM) is the floor — t3.micro (916 MiB) hit a silent kernel-reclaim hang under transient deploy/build memory pressure even with swap headroom (issue #107)."
   type        = string
-  default     = "t3.micro"
+  default     = "t3.small"
 }
 
 variable "root_volume_size_gb" {

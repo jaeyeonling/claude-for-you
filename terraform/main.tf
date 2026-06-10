@@ -275,6 +275,23 @@ locals {
     systemctl enable --now docker
     usermod -aG docker ec2-user
 
+    # ---- Swap (2 GiB) ----
+    # Small instances (t3.micro/small) without swap can hit a kernel reclaim
+    # death spiral under transient memory pressure (deploy/build): kswapd
+    # spins, OOM-killer stays conservative, soft-lockup watchdog starves,
+    # and the host hangs silently with no panic. See issue #107.
+    # swappiness=10 keeps RAM as the primary tier; swap is the safety net,
+    # not the hot path.
+    if [ ! -f /swapfile ]; then
+      fallocate -l 2G /swapfile
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      echo 'vm.swappiness=10' >> /etc/sysctl.conf
+      sysctl -w vm.swappiness=10
+    fi
+
     # ---- Docker Compose v2 (pinned) ----
     mkdir -p /usr/local/lib/docker/cli-plugins
     ARCH=$(uname -m)
