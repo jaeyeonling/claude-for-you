@@ -146,6 +146,18 @@ export const TOOL_NAME_TRIGGERS: ReadonlySet<string> = (() => {
     // tools[0..20] + this name = 400; tools[0..20] with this name renamed = 200;
     // this name alone with no other non-CC tools = 200).
     'session_search',
+    // confirmed 2026-06-11 via #134 (post-#125 production smoke). The #125
+    // bisect was necessary but not sufficient — adding session_search to a
+    // 21-tool set tripped 400, but the other three skill_* names were
+    // already in tools[22..24] and contributed to the fingerprint. R2 on the
+    // live failing body showed that removing any single member of
+    // {session_search, skill_manage, skill_view, skills_list} flips 400 → 200.
+    // Aliasing any one breaks the fingerprint; we alias all four so the
+    // defense survives a future classifier evolution that narrows the set.
+    // See #134 for the R2/R3 evidence.
+    'skill_manage',
+    'skill_view',
+    'skills_list',
   ]);
   // `Object.freeze` is shallow on a Set — the internal [[SetData]] slot is
   // not protected by frozen-object semantics, so `inner.add(...)` / `.clear()`
