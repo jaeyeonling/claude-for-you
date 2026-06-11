@@ -64,6 +64,11 @@ export const createAliasMap = (): ToolAliasMap => {
   const reverse = new Map<string, string>();
   return {
     toAlias(name: string): string {
+      // Empty-name guard: Anthropic's contract requires non-empty `name`, and
+      // an empty trigger would alias to `__cfy_alias_0__` and then reverse to
+      // an empty string in caller-facing responses (Chaos #125 review).
+      // Treat empty as pass-through — let Anthropic return its own 400.
+      if (name === '') return name;
       const existing = forward.get(name);
       if (existing !== undefined) return existing;
       const alias = `${ALIAS_PREFIX}${forward.size}${ALIAS_SUFFIX}`;

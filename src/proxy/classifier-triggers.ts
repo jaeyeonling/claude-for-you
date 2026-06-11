@@ -140,14 +140,32 @@ export const CLASSIFIER_TRIGGERS: ReadonlyArray<ClassifierTrigger> = Object.free
  * reproduces with it alone), remove its entry — but only after confirming the
  * removal against a recent failing-traffic sample.
  */
-export const TOOL_NAME_TRIGGERS: ReadonlySet<string> = Object.freeze(
-  new Set<string>([
+export const TOOL_NAME_TRIGGERS: ReadonlySet<string> = (() => {
+  const inner = new Set<string>([
     // confirmed 2026-06-11 via #125 (bisected on the #123 failing payload —
     // tools[0..20] + this name = 400; tools[0..20] with this name renamed = 200;
     // this name alone with no other non-CC tools = 200).
     'session_search',
-  ]),
-);
+  ]);
+  // `Object.freeze` is shallow on a Set — the internal [[SetData]] slot is
+  // not protected by frozen-object semantics, so `inner.add(...)` / `.clear()`
+  // / `.delete(...)` would still succeed and silently mutate the membership
+  // list (Chaos #125 review). Block the three mutators explicitly so a buggy
+  // or hostile sibling module in the same process can't disable the trigger
+  // out from under us.
+  const blocked = (): never => {
+    throw new TypeError('TOOL_NAME_TRIGGERS is read-only');
+  };
+  for (const method of ['add', 'clear', 'delete'] as const) {
+    Object.defineProperty(inner, method, {
+      value: blocked,
+      writable: false,
+      configurable: false,
+    });
+  }
+  Object.freeze(inner);
+  return inner;
+})();
 
 export const applyClassifierTriggers = (text: string): string => {
   // Defensive: the function is exported and may be called by future code paths

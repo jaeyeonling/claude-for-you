@@ -227,6 +227,43 @@ describe('createReverseToolNameStream', () => {
   });
 });
 
+describe('hardening regression guards (Chaos #125 review)', () => {
+  test('TOOL_NAME_TRIGGERS refuses Set mutation methods', () => {
+    // Object.freeze on a Set is shallow; without the explicit defineProperty
+    // guard in classifier-triggers.ts, a sibling module could call
+    // `triggers.add('foo')` and silently widen the trigger set, or
+    // `triggers.clear()` and silently disable the entire bypass.
+    expect(() => (TOOL_NAME_TRIGGERS as Set<string>).add('x')).toThrow(
+      /read-only/,
+    );
+    expect(() => (TOOL_NAME_TRIGGERS as Set<string>).clear()).toThrow(
+      /read-only/,
+    );
+    expect(() => (TOOL_NAME_TRIGGERS as Set<string>).delete('session_search')).toThrow(
+      /read-only/,
+    );
+    // Read methods remain functional.
+    expect(TOOL_NAME_TRIGGERS.has('session_search')).toBe(true);
+  });
+
+  test('no registered trigger collides with the alias prefix', () => {
+    // If a future trigger entry literally starts with `__cfy_alias_`, the
+    // outbound rewrite would produce an alias that looks like a caller-
+    // supplied alias-shaped string — and the reverse pass would behave
+    // unpredictably. Lock the invariant so the conflict is caught at the
+    // moment the entry is added.
+    for (const name of TOOL_NAME_TRIGGERS) {
+      expect(name.startsWith('__cfy_alias_')).toBe(false);
+    }
+  });
+
+  test('empty tool name passes through without consuming an alias index', () => {
+    const aliasMap = createAliasMap();
+    expect(aliasMap.toAlias('')).toBe('');
+    expect(aliasMap.hasMappings()).toBe(false);
+  });
+});
+
 describe('concurrency / non-sharing', () => {
   test('case 11: two alias maps from createAliasMap are independent', () => {
     const a = createAliasMap();
