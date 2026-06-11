@@ -27,3 +27,13 @@ output "dns_record" {
   description = "Created DNS record (only if domain_zone_id was set)"
   value       = length(aws_route53_record.app) > 0 ? aws_route53_record.app[0].fqdn : "(not managed by terraform — point A record to ${aws_eip.app.public_ip})"
 }
+
+output "sns_topic_arn" {
+  description = "SNS topic that receives CloudWatch alarm notifications. Wire additional subscribers (Slack via AWS Chatbot, PagerDuty, etc.) to this ARN."
+  value       = aws_sns_topic.alerts.arn
+}
+
+output "alarm_name" {
+  description = "Name of the NetworkIn drop alarm. Use with `aws cloudwatch describe-alarms --alarm-names` to inspect state."
+  value       = aws_cloudwatch_metric_alarm.network_in_drop.alarm_name
+}

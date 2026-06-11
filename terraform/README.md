@@ -29,6 +29,9 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 | `aws_ssm_parameter.database_url` | SecureString — terraform-owned (RDS connection string) |
 | `aws_ssm_parameter.github_deploy_key` | SecureString — operator-managed (SSH private key for the GitHub repo deploy key) |
 | `aws_route53_record.app` | Created only when `domain_zone_id` and `domain_name` are both set |
+| `aws_sns_topic.alerts` | Fan-in for CloudWatch alarm notifications |
+| `aws_sns_topic_subscription.email` | Created only when `alert_email` is set |
+| `aws_cloudwatch_metric_alarm.network_in_drop` | OS-level liveness — fires on sustained NetworkIn drop OR metric publisher silence (#107 follow-up) |
 
 ## Variables (`variables.tf`)
 
@@ -41,6 +44,7 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 | `domain_zone_id` | `""` | no | Route53 zone ID. When set with `domain_name`, terraform manages the A record. |
 | `domain_name` | `""` | no | FQDN such as `claude.example.com`. |
 | `git_repo_url` | `""` | no | Public repo cloned by cloud-init on first boot. Empty = clone manually after SSM session. |
+| `alert_email` | `""` | no | Subscriber for the CloudWatch alarm SNS topic. Empty = topic created without a subscriber. |
 
 ## Outputs (`outputs.tf`)
 
@@ -52,6 +56,8 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 | `put_env_parameter_command` | One-liner to push the local `.env` into SSM SecureString. |
 | `fetch_env_command` | Helper script the instance runs to materialize `.env` from SSM. |
 | `dns_record` | The created FQDN (or a reminder to point DNS manually). |
+| `sns_topic_arn` | SNS topic that receives CloudWatch alarm notifications. Wire extra subscribers here. |
+| `alarm_name` | Name of the NetworkIn drop alarm — use with `aws cloudwatch describe-alarms`. |
 
 ## Apply
 
@@ -93,6 +99,97 @@ cd /home/ec2-user/claude-for-you           # repo auto-cloned by cloud-init
 sudo docker build -t claude-for-you:latest .
 sudo docker compose up -d
 ```
+
+## Alarms
+
+The `aws_cloudwatch_metric_alarm.network_in_drop` alarm watches for the silent-hang signature from #107.
+
+### How it fires
+
+| Trigger | Mechanism |
+|---|---|
+| NetworkIn < 5 KB/min for 5 consecutive 1-min periods | `LessThanThreshold` + statistic `Sum` + period 60 s × eval 5 |
+| Metric publisher (CWAgent / EC2 itself) goes silent | `TreatMissingData = breaching` |
+
+`#107`'s actual signature was NetworkIn 167 KB/min → 2.3 KB/min, sustained for over 20 minutes. The 5-minute, 5-of-5-datapoints evaluation window sits well inside that envelope. `ok_actions` is wired to the same SNS topic, so recovery is also notified.
+
+### Confirm the subscription first — before any trigger test
+
+Do this **before** running the reboot test below. If you skip it, AWS still publishes alarms to the topic but the email subscription stays in `PendingConfirmation`, AWS drops the delivery silently, and the reboot test below looks like it passes when nothing was actually received.
+
+1. After `terraform apply`, AWS emails the address in `alert_email` with a confirmation link. Click it within 3 days.
+2. Verify the subscription is no longer `PendingConfirmation`:
+
+   ```bash
+   aws sns list-subscriptions-by-topic \
+     --topic-arn "$(terraform output -raw sns_topic_arn)" \
+     --region ap-northeast-2 \
+     --query 'Subscriptions[].SubscriptionArn' --output text
+   # A subscription stuck on "PendingConfirmation" means the confirm
+   # link wasn't clicked. The token expires after 3 days — re-run
+   # `terraform apply` (or `aws sns subscribe`) to send a new one.
+   ```
+
+3. Common silent-failure traps:
+   - `alert_email` left at the `terraform.tfvars.example` placeholder (`your-alerts-team@your-company.example` — the `.example` TLD is RFC 2606, so AWS will accept it and email a non-existent mailbox).
+   - Confirmation email in spam.
+   - Operator confirmed on one machine, terraform was re-applied from another that thinks the subscription is fresh.
+
+### Trigger test (reboot simulation)
+
+Only after the subscription is `Confirmed`. Confirm the alarm path end-to-end:
+
+```bash
+aws ec2 reboot-instances \
+  --instance-ids $(terraform output -raw instance_id) \
+  --region ap-northeast-2
+# Wait ~5–7 minutes (Period 60 × 5 evaluations + SNS delivery latency).
+# Email arrives on the ALARM transition, then again on OK once the
+# instance is back and pushing traffic.
+```
+
+### Diagnostic publish (manual smoke test)
+
+Pre-conditions before this is useful:
+1. SNS subscription is `Confirmed` (see § Confirm the subscription first — a `PendingConfirmation` subscription drops AWS's delivery silently).
+2. `alert_email` is non-empty in tfvars (otherwise the topic has no subscriber and publishing succeeds but nothing arrives).
+
+If those hold, send a synthetic message to verify the SNS → email path without rebooting the instance:
+
+```bash
+# Replace ap-northeast-2 if your var.region is different.
+aws sns publish \
+  --topic-arn "$(terraform output -raw sns_topic_arn)" \
+  --region ap-northeast-2 \
+  --subject "smoke test" \
+  --message "manual publish to verify subscription delivery"
+```
+
+AWS evaluates SNS topic policy and IAM identity policy as a union for same-account access, so your IAM identity needs `sns:Publish` permission on this topic ARN. If you get `AuthorizationError`:
+
+- Attach `sns:Publish` on the topic ARN to your IAM role/user. Minimal statement:
+  ```json
+  {
+    "Effect": "Allow",
+    "Action": "sns:Publish",
+    "Resource": "<sns_topic_arn from terraform output>"
+  }
+  ```
+- Or temporarily switch to an admin role.
+
+The CloudWatch alarm publish path is independent and uses the topic policy's CloudWatch service principal — alarms still publish even when your operator IAM cannot.
+
+### Known false alarm: deploy cycles
+
+`scripts/deploy.sh` can stop the instance for a few minutes. If a deploy lands during a quiet traffic window, NetworkIn falls below 5 KB/min for the full 5-minute window and the alarm fires even though nothing is wrong. Suppressing the alarm during deploys is a separate follow-up (below); we keep it un-suppressed for now because a real silent hang during quiet hours is exactly the scenario this alarm exists to catch.
+
+### Out of scope (follow-up)
+
+`#111` listed three signals; this PR ships only NetworkIn drop. The other two are tracked as separate issues so each can be designed properly rather than bolted on:
+
+- **SSM Agent ConnectionLost** — Lambda + `DescribeInstanceInformation` polling (AWS Cloud Operations Blog standard). Health Events do not catch instance-level agent disconnects.
+- **External `/healthz`** — Route53 health check + cross-region SNS routing decision. Route53 health metrics publish only to `us-east-1`, and CloudWatch alarm actions must point at a same-region SNS topic.
+- **Deploy-cycle NetworkIn alarm suppression** — `deploy.sh` should flip the alarm to `INSUFFICIENT_DATA` while a deploy is in flight.
 
 ### Private-repo support (optional) <a id="private-repo-support-optional"></a>
 
