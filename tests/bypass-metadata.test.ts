@@ -89,6 +89,64 @@ describe('buildBypassMetadata', () => {
     expect(m.canary.useCandidate).toBe(true);
   });
 
+  test('captures the full anthropic-ratelimit-unified-* family (#122)', () => {
+    // Every header below is one the OAuth/sub-plan response routinely carries.
+    // Before #122 only `request-id` and `anthropic-organization-id` survived
+    // from this set — the rest fell into `unknownUpstreamHeaders` with the
+    // value dropped, so operators investigating sub-plan 4xx had to reproduce
+    // the request to see the classifier verdict. Asserting every name here
+    // doubles as a doc of "what we look at when triaging" and a guard against
+    // an accidental allowlist regression.
+    const upstream = new Headers({
+      'anthropic-ratelimit-unified-status': 'allowed',
+      'anthropic-ratelimit-unified-reset': '1781162400',
+      'anthropic-ratelimit-unified-overage-status': 'rejected',
+      'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled_until',
+      'anthropic-ratelimit-unified-representative-claim': 'five_hour',
+      'anthropic-ratelimit-unified-fallback-percentage': '0.5',
+      'anthropic-ratelimit-unified-5h-status': 'allowed',
+      'anthropic-ratelimit-unified-5h-utilization': '0.05',
+      'anthropic-ratelimit-unified-5h-reset': '1781162400',
+      'anthropic-ratelimit-unified-7d-status': 'allowed',
+      'anthropic-ratelimit-unified-7d-utilization': '0.07',
+      'anthropic-ratelimit-unified-7d-reset': '1781334000',
+      'anthropic-ratelimit-unified-7d_sonnet-status': 'allowed',
+      'anthropic-ratelimit-unified-7d_sonnet-utilization': '0.01',
+      'anthropic-ratelimit-unified-7d_sonnet-reset': '1781334000',
+      // Co-located with a sensitive header so a future allowlist regression
+      // that broadens too far would surface as set-cookie leaking here.
+      'set-cookie': 'tracker=nope',
+    });
+    const m = buildBypassMetadata({
+      inboundHeaders: new Headers(),
+      outboundHeaders: {},
+      upstreamHeaders: upstream,
+      canary: { useCandidate: false },
+    });
+
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-status']).toBe('allowed');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-reset']).toBe('1781162400');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-overage-status']).toBe('rejected');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-overage-disabled-reason']).toBe(
+      'org_level_disabled_until',
+    );
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-representative-claim']).toBe('five_hour');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-fallback-percentage']).toBe('0.5');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-5h-status']).toBe('allowed');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-5h-utilization']).toBe('0.05');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-5h-reset']).toBe('1781162400');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-7d-status']).toBe('allowed');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-7d-utilization']).toBe('0.07');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-7d-reset']).toBe('1781334000');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-7d_sonnet-status']).toBe('allowed');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-7d_sonnet-utilization']).toBe('0.01');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-7d_sonnet-reset']).toBe('1781334000');
+
+    // Fail-closed regression guard: set-cookie must still be unknown, not allowed.
+    expect(m.upstreamHeaders['set-cookie']).toBeUndefined();
+    expect(m.unknownUpstreamHeaders.map((h) => h.name)).toContain('set-cookie');
+  });
+
   test('header names are normalized to lowercase', () => {
     const m = buildBypassMetadata({
       inboundHeaders: new Headers({ 'Anthropic-Beta': 'x' }),
