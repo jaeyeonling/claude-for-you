@@ -46,7 +46,7 @@ variable "alert_email" {
   default     = ""
 
   validation {
-    condition     = length(var.alert_email) == 0 || can(regex("^.+@.+$", var.alert_email))
-    error_message = "alert_email must be either empty or a string containing exactly one '@' character (e.g., ops@example.com). Validation is intentionally loose — full RFC 5322 is the SNS subscription confirmation step's job."
+    condition     = length(var.alert_email) == 0 || can(regex("^[^@\\s]+@[^@\\s]+$", var.alert_email))
+    error_message = "alert_email must be either empty or a single token of the form user@host (no whitespace, exactly one '@'). Validation is intentionally loose — full RFC 5322 conformance is the SNS subscription confirmation step's job."
   }
 }

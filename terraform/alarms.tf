@@ -47,7 +47,11 @@ resource "aws_sns_topic_policy" "alerts" {
       Resource  = aws_sns_topic.alerts.arn
       Condition = {
         ArnLike = {
-          "aws:SourceArn" = "arn:aws:cloudwatch:${var.region}:${data.aws_caller_identity.current.account_id}:alarm:*"
+          # Pin to alarms under our own `${var.name}-*` naming convention.
+          # Follow-up alarms (#115 SSM, #116 healthz) must use the same
+          # prefix so they can publish through this topic without policy
+          # changes.
+          "aws:SourceArn" = "arn:aws:cloudwatch:${var.region}:${data.aws_caller_identity.current.account_id}:alarm:${var.name}-*"
         }
       }
     }]

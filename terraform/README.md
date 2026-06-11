@@ -111,7 +111,7 @@ The `aws_cloudwatch_metric_alarm.network_in_drop` alarm watches for the silent-h
 | NetworkIn < 5 KB/min for 5 consecutive 1-min periods | `LessThanThreshold` + statistic `Sum` + period 60 s × eval 5 |
 | Metric publisher (CWAgent / EC2 itself) goes silent | `TreatMissingData = breaching` |
 
-#107's actual signature was NetworkIn 167 KB/min → 2.3 KB/min, sustained for over 20 minutes. The 5-minute, 5-of-5-datapoints evaluation window sits well inside that envelope. `ok_actions` is wired to the same SNS topic, so recovery is also notified.
+`#107`'s actual signature was NetworkIn 167 KB/min → 2.3 KB/min, sustained for over 20 minutes. The 5-minute, 5-of-5-datapoints evaluation window sits well inside that envelope. `ok_actions` is wired to the same SNS topic, so recovery is also notified.
 
 ### Confirm the subscription first — before any trigger test
 
@@ -185,7 +185,7 @@ The CloudWatch alarm publish path is independent and uses the topic policy's Clo
 
 ### Out of scope (follow-up)
 
-#111 listed three signals; this PR ships only NetworkIn drop. The other two are tracked as separate issues so each can be designed properly rather than bolted on:
+`#111` listed three signals; this PR ships only NetworkIn drop. The other two are tracked as separate issues so each can be designed properly rather than bolted on:
 
 - **SSM Agent ConnectionLost** — Lambda + `DescribeInstanceInformation` polling (AWS Cloud Operations Blog standard). Health Events do not catch instance-level agent disconnects.
 - **External `/healthz`** — Route53 health check + cross-region SNS routing decision. Route53 health metrics publish only to `us-east-1`, and CloudWatch alarm actions must point at a same-region SNS topic.

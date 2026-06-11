@@ -424,6 +424,14 @@ resource "aws_instance" "app" {
     http_put_response_hop_limit = 1
   }
 
+  # Detailed monitoring publishes AWS/EC2 metrics (incl. NetworkIn) at
+  # 1-minute resolution instead of the default 5-minute cadence. Required
+  # for alarms.tf's `network_in_drop` alarm: that alarm asks for 5 of 5
+  # 1-minute datapoints with `TreatMissingData = breaching`, which would
+  # otherwise never collect enough datapoints from basic monitoring and
+  # sit in permanent ALARM. Cost: ~$2.10/mo per instance.
+  monitoring = true
+
   user_data = local.user_data
 
   tags = {
