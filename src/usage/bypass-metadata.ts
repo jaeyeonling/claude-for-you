@@ -183,8 +183,16 @@ export const buildBypassMetadata = (
   });
 };
 
+/** Expose an allowlist as a frozen sorted array. We deliberately do NOT export
+ * the underlying `Set` — `Object.freeze` is shallow and a `Set` instance is
+ * unaffected by it, so a consumer could call `.add('cookie')` at runtime and
+ * silently weaken the fail-closed allowlist. The array form gives operators
+ * the same read-only visibility (admin docs, debugging) with no mutation surface. */
+const exposeAllowlist = (allowlist: ReadonlySet<string>): readonly string[] =>
+  Object.freeze([...allowlist].sort());
+
 export const BYPASS_HEADER_ALLOWLISTS = Object.freeze({
-  inbound: INBOUND_ALLOWLIST,
-  outbound: OUTBOUND_ALLOWLIST,
-  upstream: UPSTREAM_RESPONSE_ALLOWLIST,
+  inbound: exposeAllowlist(INBOUND_ALLOWLIST),
+  outbound: exposeAllowlist(OUTBOUND_ALLOWLIST),
+  upstream: exposeAllowlist(UPSTREAM_RESPONSE_ALLOWLIST),
 });
