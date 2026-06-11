@@ -58,8 +58,13 @@ export interface ClassifierTrigger {
 }
 
 /**
- * Trigger dictionary. Frozen so callers can't extend at runtime (the entire
- * point is the list is reviewable and ages predictably).
+ * Trigger dictionary. Both the array AND each entry are frozen — caller code
+ * (or future contributors writing in the same process) must not mutate them
+ * at runtime. `Object.freeze` is shallow by default, which would leave the
+ * entry objects writable: e.g. setting `entry.pattern = ''` would turn
+ * `text.split('').join(replacement)` into a per-character explosion and
+ * detonate the hot path on every subsequent request. Freezing each entry
+ * closes that surface (Chaos #123 review).
  *
  * Ordering note: substrings that are more specific (longer / more contextual)
  * come before substrings they would shadow. `## Skills (mandatory)` is rewritten
@@ -72,32 +77,32 @@ export const CLASSIFIER_TRIGGERS: ReadonlyArray<ClassifierTrigger> = Object.free
   // the load-bearing substring in the bisected 20-char window inside system[1]
   // at offset ~3,420-3,440 of the failing request. Rewrite preserves human
   // readability and the model's behavioral understanding.
-  {
+  Object.freeze({
     pattern: "skill_manage(action='patch')",
     replacement: "skill_manage with action 'patch'",
     confirmedAt: '2026-06-11',
     issue: 123,
-  },
+  }),
   // confirmed 2026-06-11 via #123
   // Same shape as the skill_manage trigger; the function-call notation
   // `skill_view(name)` is the classifier fingerprint, not the tool itself.
-  {
+  Object.freeze({
     pattern: 'skill_view(name)',
     replacement: 'skill_view with name argument',
     confirmedAt: '2026-06-11',
     issue: 123,
-  },
+  }),
   // confirmed 2026-06-11 via #123
   // The section header `## Skills (mandatory)` co-occurred with the function-
   // call-shaped strings above in the failing system[1] payload. Stripping the
   // parenthetical `(mandatory)` is enough to break the combined fingerprint
   // without losing semantic content — "Skills" remains a top-level section.
-  {
+  Object.freeze({
     pattern: '## Skills (mandatory)',
     replacement: '## Skills',
     confirmedAt: '2026-06-11',
     issue: 123,
-  },
+  }),
 ]);
 
 /**
@@ -116,6 +121,11 @@ export const CLASSIFIER_TRIGGERS: ReadonlyArray<ClassifierTrigger> = Object.free
  *     byte-identical output).
  */
 export const applyClassifierTriggers = (text: string): string => {
+  // Defensive: the function is exported and may be called by future code paths
+  // without going through the `typeof obj.text !== 'string'` guard inside
+  // `sanitizeSystemForUpstream`. Returning the input unchanged on non-string
+  // is safer than letting the `split` call throw on the hot path (Chaos #123).
+  if (typeof text !== 'string') return text;
   let out = text;
   for (const trigger of CLASSIFIER_TRIGGERS) {
     out = out.split(trigger.pattern).join(trigger.replacement);

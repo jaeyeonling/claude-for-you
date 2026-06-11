@@ -67,6 +67,38 @@ describe('applyClassifierTriggers (function-level)', () => {
     // This guard fails loudly the moment that happens.
     expect(applyClassifierTriggers(CC_SYSTEM_PREFIX)).toBe(CC_SYSTEM_PREFIX);
   });
+
+  test("cross-pattern safety: no replacement contains another entry's pattern", () => {
+    // If trigger A's replacement contains trigger B's pattern, applying the
+    // dictionary in order could produce cascading rewrites whose final shape
+    // depends entirely on the array ordering (Chaos #123). This invariant
+    // makes the order documented in the source the only thing that matters
+    // for correctness — any new entry that violates it must be rejected.
+    for (const a of CLASSIFIER_TRIGGERS) {
+      for (const b of CLASSIFIER_TRIGGERS) {
+        expect(a.replacement.includes(b.pattern)).toBe(false);
+      }
+    }
+  });
+
+  test('input guard: non-string input is returned unchanged instead of throwing', () => {
+    // Defensive: the function is exported and may be reused outside the
+    // `sanitizeSystemForUpstream` guard. Hot-path safety > strict typing.
+    expect(applyClassifierTriggers(null as unknown as string)).toBe(null);
+    expect(applyClassifierTriggers(undefined as unknown as string)).toBe(undefined);
+    expect(applyClassifierTriggers(0 as unknown as string)).toBe(0);
+    expect(applyClassifierTriggers({} as unknown as string)).toEqual({});
+  });
+
+  test('CLASSIFIER_TRIGGERS entries are deep-frozen', () => {
+    // Shallow freeze on the array leaves the entry objects writable. A
+    // mutation like `CLASSIFIER_TRIGGERS[0].pattern = ''` would make every
+    // request explode into per-character replacement on the hot path. Each
+    // entry must individually refuse `Object.assign` / property writes.
+    for (const entry of CLASSIFIER_TRIGGERS) {
+      expect(Object.isFrozen(entry)).toBe(true);
+    }
+  });
 });
 
 describe('sanitizeSystemForUpstream (wrapper-level)', () => {
@@ -170,7 +202,9 @@ describe('case 9: watchdog bench (sub-millisecond expected, sanity ceiling only)
     const t0 = performance.now();
     const out = applyClassifierTriggers(triggerLaden);
     const elapsedMs = performance.now() - t0;
-    console.log(`[#123 bench] 50KB sweep: ${elapsedMs.toFixed(3)} ms`);
+    // stderr keeps test output out of CI stdout (no log scraping conflicts)
+    // while still giving operators a number when debugging hot-path regressions.
+    process.stderr.write(`[#123 bench] 50KB sweep: ${elapsedMs.toFixed(3)} ms\n`);
     expect(elapsedMs).toBeLessThan(1000);
     // Sanity: the trigger was actually rewritten (the bench is not measuring
     // a no-op path).
