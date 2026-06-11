@@ -40,6 +40,13 @@ const sampleRecord = (over: Partial<MessageLogRecord> = {}): MessageLogRecord =>
   },
   responseBody: { kind: 'json', body: { content: [{ type: 'text', text: 'hello' }] } },
   errorMessage: null,
+  servedBy: 'pool-0',
+  bypassMetadata: {
+    inboundHeaders: { 'anthropic-beta': 'context-1m-2025-08-07' },
+    outboundHeaders: { authorization: 'Bearer [REDACTED]', 'anthropic-beta': 'oauth' },
+    upstreamHeaders: { 'request-id': 'req_abc' },
+    canary: { useCandidate: false },
+  },
   ...over,
 });
 

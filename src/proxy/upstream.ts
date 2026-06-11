@@ -46,6 +46,11 @@ export interface UpstreamResult {
   readonly response: Response;
   /** Which pool member served the request — used by messages.ts for observeResponse. */
   readonly servedBy: string;
+  /** Final outbound header set sent to Anthropic, after template.apply (and
+   * after the 401-retry refresh path, if it fired). Surfaced for messages_log
+   * bypass-metadata capture — operators need to see the wire-shape the proxy
+   * actually emitted, not just what the client supplied. */
+  readonly outboundHeaders: Readonly<Record<string, string>>;
 }
 
 /**
@@ -57,6 +62,9 @@ export interface UpstreamResult {
 interface FetchOnceResult {
   readonly response: Response;
   readonly streamingTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Snapshot of the headers handed to fetch() — captured here so the outer
+   * callUpstream can surface them in UpstreamResult without re-deriving. */
+  readonly outboundHeaders: Readonly<Record<string, string>>;
 }
 
 /** Bun/Node setTimeout returns a Timer/Timeout object that holds the event
@@ -174,7 +182,7 @@ const fetchOnce = async (
     // no-op if the body already drained.
     const streamingTimer = setTimeout(() => controller.abort(), STREAMING_HARD_CAP_MS);
     unrefTimer(streamingTimer);
-    return { response, streamingTimer };
+    return { response, streamingTimer, outboundHeaders: outbound.headers };
   } catch (e) {
     throw UpstreamFailed(
       redact(`upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`),
@@ -209,7 +217,11 @@ export const callUpstream = async (
   );
 
   if (firstAttempt.response.status !== 401) {
-    return { response: firstAttempt.response, servedBy: first.name };
+    return {
+      response: firstAttempt.response,
+      servedBy: first.name,
+      outboundHeaders: firstAttempt.outboundHeaders,
+    };
   }
 
   // OAuth refresh path — same account, new token. Body of the 401 is
@@ -226,5 +238,9 @@ export const callUpstream = async (
     deps.template,
     deps.pacing,
   );
-  return { response: retryAttempt.response, servedBy: first.name };
+  return {
+    response: retryAttempt.response,
+    servedBy: first.name,
+    outboundHeaders: retryAttempt.outboundHeaders,
+  };
 };
