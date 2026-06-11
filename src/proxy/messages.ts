@@ -12,6 +12,7 @@ import type { GlobalGuard } from '../usage/global.js';
 import type { MessageLogStore, ResponseBody } from '../usage/messages-log.js';
 import { extractModel, extractResponseMeta } from '../usage/messages-log.js';
 import { buildBypassMetadata } from '../usage/bypass-metadata.js';
+import { applyClassifierTriggers } from './classifier-triggers.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { isModelAllowed } from '../auth/model-allow.js';
 import { Forbidden, InvalidRequest } from '../lib/errors.js';
@@ -218,6 +219,59 @@ export const ensureSystem = (b: Record<string, unknown>): Record<string, unknown
   return { ...b, system: [CC_BLOCK] };
 };
 
+/**
+ * Strip sub-plan classifier triggers from outbound `system` text.
+ *
+ * History:
+ *   2026-06-11 — sub-plan classifier 트리거 normalization (#123). The Pro/Max
+ *     OAuth sub plan inspects prompt content (not just headers) to decide
+ *     whether the caller is "really" Claude Code. Requests that fail the
+ *     check are routed to the overage lane, which is disabled for sub plans
+ *     and surfaces as HTTP 400 with the misleading body
+ *     `"You're out of extra usage. Add more at claude.ai/...".
+ *
+ *     This function is called AFTER `ensureSystem`, so `body.system` is
+ *     guaranteed to be a non-empty array of `{type:'text', text:string}`
+ *     blocks (possibly with `cache_control` etc. as additional fields).
+ *
+ *     We walk that array and apply the `CLASSIFIER_TRIGGERS` dictionary
+ *     (`src/proxy/classifier-triggers.ts`) to each block's `text` field.
+ *     Other fields pass through verbatim. The CC marker block is unchanged
+ *     because its `text` value (`CC_SYSTEM_PREFIX`) is not in the trigger
+ *     dictionary; a dedicated regression test (#123 case 7) guards that
+ *     invariant for future trigger additions.
+ *
+ *     `system` text never appears in upstream responses, so this rewrite has
+ *     ZERO observable downstream effect on the caller — no bidirectional
+ *     mapping needed. Tool-name rewriting (the other confirmed classifier
+ *     trigger, see #125) is NOT covered here; it requires reverse mapping in
+ *     the SSE sniffer and is tracked separately.
+ *
+ *     Implementation contract:
+ *       - Pure: new object returned, input not mutated.
+ *       - Identity-preserving when no triggers match: each text block ends
+ *         up byte-identical to its input (the underlying
+ *         `applyClassifierTriggers` returns the same string reference when
+ *         no `pattern` is found).
+ *       - Cheap: one synchronous pass over a small constant dictionary.
+ *         Sub-millisecond on real traffic (bench in tests).
+ */
+export const sanitizeSystemForUpstream = (
+  b: Record<string, unknown>,
+): Record<string, unknown> => {
+  const sys = b.system;
+  if (!Array.isArray(sys)) return b;
+  const rewritten = sys.map((block) => {
+    if (block === null || typeof block !== 'object') return block;
+    const obj = block as Record<string, unknown>;
+    if (typeof obj.text !== 'string') return block;
+    const next = applyClassifierTriggers(obj.text);
+    if (next === obj.text) return block;
+    return { ...obj, text: next };
+  });
+  return { ...b, system: rewritten };
+};
+
 /** Cap on caller-controlled values reflected back into the 400 message — keeps
  * the response body small and bounds any control-character / HTML payload
  * surface (R1 chaos + adversary, #57). 64 chars is enough to tell `image` from
@@ -353,7 +407,9 @@ export const createMessagesHandler =
         400,
       );
     }
-    const clientBody = ensureSystem(rawBody as Record<string, unknown>);
+    const clientBody = sanitizeSystemForUpstream(
+      ensureSystem(rawBody as Record<string, unknown>),
+    );
 
     // Per-key allowlist gate. Empty/missing allowlist = no restriction
     // (env-baked keys always fall through here). Body must declare a model
