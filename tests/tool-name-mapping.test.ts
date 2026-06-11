@@ -246,6 +246,40 @@ describe('hardening regression guards (Chaos #125 review)', () => {
     expect(TOOL_NAME_TRIGGERS.has('session_search')).toBe(true);
   });
 
+  test('TOOL_NAME_TRIGGERS contains the full four-tool fingerprint (#134)', () => {
+    // The sub-plan classifier fires on the simultaneous presence of these
+    // four names in `tools[]`. Removing or aliasing any one breaks the
+    // fingerprint (R2/R3 bisect under #134 on the Bri-shape body). If a
+    // future change removes one, the classifier 400s come back — guard
+    // against accidental deletion here.
+    for (const name of ['session_search', 'skill_manage', 'skill_view', 'skills_list']) {
+      expect(TOOL_NAME_TRIGGERS.has(name)).toBe(true);
+    }
+  });
+
+  test('all four #134 trigger names get aliased by rewriteToolNamesForUpstream', () => {
+    // End-to-end check that the outbound path actually rewrites every
+    // member of the fingerprint set, so a Bri-shape body wouldn't leak
+    // even one of the four literal names to upstream.
+    const body = {
+      tools: [
+        { name: 'session_search' },
+        { name: 'skill_manage' },
+        { name: 'skill_view' },
+        { name: 'skills_list' },
+        { name: 'browser_back' }, // sanity: untouched
+      ],
+    };
+    const aliasMap = createAliasMap();
+    const out = rewriteToolNamesForUpstream(body, TOOL_NAME_TRIGGERS, aliasMap);
+    const names = (out as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+    expect(names[0]).toMatch(/^__cfy_alias_\d+__$/);
+    expect(names[1]).toMatch(/^__cfy_alias_\d+__$/);
+    expect(names[2]).toMatch(/^__cfy_alias_\d+__$/);
+    expect(names[3]).toMatch(/^__cfy_alias_\d+__$/);
+    expect(names[4]).toBe('browser_back');
+  });
+
   test('no registered trigger collides with the alias prefix', () => {
     // If a future trigger entry literally starts with `__cfy_alias_`, the
     // outbound rewrite would produce an alias that looks like a caller-
