@@ -12,7 +12,13 @@ import type { GlobalGuard } from '../usage/global.js';
 import type { MessageLogStore, ResponseBody } from '../usage/messages-log.js';
 import { extractModel, extractResponseMeta } from '../usage/messages-log.js';
 import { buildBypassMetadata } from '../usage/bypass-metadata.js';
-import { applyClassifierTriggers } from './classifier-triggers.js';
+import { applyClassifierTriggers, TOOL_NAME_TRIGGERS } from './classifier-triggers.js';
+import {
+  createAliasMap,
+  createReverseToolNameStream,
+  reverseToolNamesInText,
+  rewriteToolNamesForUpstream,
+} from './tool-name-mapping.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { isModelAllowed } from '../auth/model-allow.js';
 import { Forbidden, InvalidRequest } from '../lib/errors.js';
@@ -411,6 +417,22 @@ export const createMessagesHandler =
       ensureSystem(rawBody as Record<string, unknown>),
     );
 
+    // Tool-name aliasing for the sub-plan classifier (#125). The map is
+    // per-request — declared here so the downstream response transform can
+    // close over it without any module-global state. `outboundBody` is the
+    // shape we send upstream; when no triggers fired it's the same reference
+    // as `clientBody` and the response chain stays a no-op. We deliberately
+    // log this (alias-bearing) shape under `requestBody` so a replay from
+    // `messages_log` produces an upstream-identical request and so operators
+    // can grep for "which caller triggered which alias". Resolving aliases
+    // for the admin UI is a separate follow-up (#131).
+    const aliasMap = createAliasMap();
+    const outboundBody = rewriteToolNamesForUpstream(
+      clientBody,
+      TOOL_NAME_TRIGGERS,
+      aliasMap,
+    );
+
     // Per-key allowlist gate. Empty/missing allowlist = no restriction
     // (env-baked keys always fall through here). Body must declare a model
     // string for the gate to evaluate; absent or non-string falls through
@@ -430,10 +452,10 @@ export const createMessagesHandler =
     const headerNames: string[] = [];
     reqHeaders.forEach((_v, k) => headerNames.push(k.toLowerCase()));
     const bodyKeys =
-      typeof clientBody === 'object' && clientBody !== null
-        ? Object.keys(clientBody as Record<string, unknown>)
+      typeof outboundBody === 'object' && outboundBody !== null
+        ? Object.keys(outboundBody as Record<string, unknown>)
         : [];
-    const model = (clientBody as Record<string, unknown>).model;
+    const model = (outboundBody as Record<string, unknown>).model;
     deps.drift.record({
       ts: Date.now(),
       userKey: user.name,
@@ -459,7 +481,7 @@ export const createMessagesHandler =
     const sessionId = reqHeaders.get('x-claude-code-session-id') ?? undefined;
 
     const upstream = await callUpstream(
-      clientBody,
+      outboundBody,
       c.req.raw.headers,
       sessionId,
       { ...deps, template: chosenTemplate },
@@ -492,7 +514,7 @@ export const createMessagesHandler =
           id: randomUUID(),
           ts: new Date(t0),
           userName: user.name,
-          model: extractModel(clientBody),
+          model: extractModel(outboundBody),
           status: upstream.response.status,
           streaming: isStream,
           durationMs: Date.now() - t0,
@@ -504,7 +526,7 @@ export const createMessagesHandler =
           stopReason: meta.stopReason,
           clientIp: clientIpHint(c),
           userAgent: c.req.header('user-agent') ?? null,
-          requestBody: clientBody,
+          requestBody: outboundBody,
           responseBody,
           errorMessage,
           servedBy: upstream.servedBy,
@@ -536,7 +558,13 @@ export const createMessagesHandler =
     // that case but tap's accumulation continues).
     if (isStream && upstream.response.body !== null) {
       const tap = tapResponseBody(upstream.response.body);
-      const sniffed = sniffUsage(tap.stream, contentType, onUsage);
+      let sniffed = sniffUsage(tap.stream, contentType, onUsage);
+      // Reverse tool-name aliases on the caller-facing branch only. The log
+      // branch (`tap.getRaw()`) deliberately keeps the wire-raw form — see
+      // the alias-policy note above the `aliasMap` declaration and #131.
+      if (aliasMap.hasMappings()) {
+        sniffed = sniffed.pipeThrough(createReverseToolNameStream(aliasMap));
+      }
       // Stream end → write the log. Detached: failures land in the sink.
       void tap.done.then(() => {
         writeLog({ kind: 'sse', raw: tap.getRaw() }, null);
@@ -603,7 +631,13 @@ export const createMessagesHandler =
         ? extractErrorMessage(parsedBody)
         : null;
     writeLog(responseBody, errorMessage);
-    return new Response(bodyText, {
+    // Reverse tool-name aliases on the caller-facing body only. `responseBody`
+    // (already written above) keeps the wire-raw alias form so the log stays
+    // consistent with the SSE branch and with what was actually sent upstream.
+    const clientFacingBody = aliasMap.hasMappings()
+      ? reverseToolNamesInText(bodyText, aliasMap)
+      : bodyText;
+    return new Response(clientFacingBody, {
       status: upstream.response.status,
       statusText: upstream.response.statusText,
       headers: forwardHeaders(upstream.response.headers),

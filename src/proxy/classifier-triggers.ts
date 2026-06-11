@@ -120,6 +120,35 @@ export const CLASSIFIER_TRIGGERS: ReadonlyArray<ClassifierTrigger> = Object.free
  *     returns the original as a single-element array and `join` reconstructs
  *     byte-identical output).
  */
+/**
+ * Tool-name classifier triggers.
+ *
+ * The sub-plan classifier also reads the inbound `tools[].name` set as a
+ * fingerprint (see issue #125). Specific names — confirmed via in-proxy
+ * bisection on the failing traffic recorded under #123 — trip the classifier
+ * when they co-occur with the rest of a non-CC tool set. The same names in
+ * isolation do not trip it; the same set with one of these names renamed does
+ * not trip it. The set is what's being fingerprinted.
+ *
+ * Unlike `CLASSIFIER_TRIGGERS` above, this dictionary is intentionally
+ * **single-direction-from-here**: the data structure is just the membership
+ * test ("is this name a classifier trigger we need to alias?"). The
+ * forward/reverse alias mapping itself lives in `tool-name-mapping.ts` because
+ * it's per-request state, not a static table.
+ *
+ * Maintenance: when a name retires from the classifier (the bisect no longer
+ * reproduces with it alone), remove its entry — but only after confirming the
+ * removal against a recent failing-traffic sample.
+ */
+export const TOOL_NAME_TRIGGERS: ReadonlySet<string> = Object.freeze(
+  new Set<string>([
+    // confirmed 2026-06-11 via #125 (bisected on the #123 failing payload —
+    // tools[0..20] + this name = 400; tools[0..20] with this name renamed = 200;
+    // this name alone with no other non-CC tools = 200).
+    'session_search',
+  ]),
+);
+
 export const applyClassifierTriggers = (text: string): string => {
   // Defensive: the function is exported and may be called by future code paths
   // without going through the `typeof obj.text !== 'string'` guard inside
