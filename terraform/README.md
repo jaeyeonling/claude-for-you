@@ -113,23 +113,31 @@ The `aws_cloudwatch_metric_alarm.network_in_drop` alarm watches for the silent-h
 
 #107's actual signature was NetworkIn 167 KB/min → 2.3 KB/min, sustained for over 20 minutes. The 5-minute, 5-of-5-datapoints evaluation window sits well inside that envelope. `ok_actions` is wired to the same SNS topic, so recovery is also notified.
 
-### Confirm the subscription after first apply
+### Confirm the subscription first — before any trigger test
 
-If `alert_email` is set, AWS sends a confirmation email at apply time. Click the confirmation link, or the SNS subscription stays `PendingConfirmation` and no alerts get delivered.
+Do this **before** running the reboot test below. If you skip it, AWS still publishes alarms to the topic but the email subscription stays in `PendingConfirmation`, AWS drops the delivery silently, and the reboot test below looks like it passes when nothing was actually received.
 
-```bash
-aws sns list-subscriptions-by-topic \
-  --topic-arn "$(terraform output -raw sns_topic_arn)" \
-  --region ap-northeast-2 \
-  --query 'Subscriptions[].SubscriptionArn' --output text
-# A subscription stuck on "PendingConfirmation" means the confirm
-# link wasn't clicked. The token expires after 3 days — re-run
-# `terraform apply` (or `aws sns subscribe`) to send a new one.
-```
+1. After `terraform apply`, AWS emails the address in `alert_email` with a confirmation link. Click it within 3 days.
+2. Verify the subscription is no longer `PendingConfirmation`:
+
+   ```bash
+   aws sns list-subscriptions-by-topic \
+     --topic-arn "$(terraform output -raw sns_topic_arn)" \
+     --region ap-northeast-2 \
+     --query 'Subscriptions[].SubscriptionArn' --output text
+   # A subscription stuck on "PendingConfirmation" means the confirm
+   # link wasn't clicked. The token expires after 3 days — re-run
+   # `terraform apply` (or `aws sns subscribe`) to send a new one.
+   ```
+
+3. Common silent-failure traps:
+   - `alert_email` left at the placeholder from `terraform.tfvars.example` (`*@*.example` is RFC 2606 — AWS will accept it and email a non-existent mailbox).
+   - Confirmation email in spam.
+   - Operator confirmed on one machine, terraform was re-applied from another that thinks the subscription is fresh.
 
 ### Trigger test (reboot simulation)
 
-After apply, confirm the alarm path end-to-end:
+Only after the subscription is `Confirmed`. Confirm the alarm path end-to-end:
 
 ```bash
 aws ec2 reboot-instances \

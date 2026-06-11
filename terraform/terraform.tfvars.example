@@ -23,5 +23,12 @@
 
 # Subscriber for the CloudWatch alarm SNS topic. Leave empty to create
 # the topic with no subscriber (alarms still publish; just nobody
-# receives them). Confirm the SNS subscription email after first apply.
-# alert_email = "ops@example.com"
+# receives them).
+#
+# IMPORTANT: replace the placeholder below with a real address you can
+# receive at. Pasting it as-is creates a subscription that never gets
+# confirmed (AWS will email example.com, nobody answers, the alarm
+# pipeline silently fails). After the first `terraform apply` AWS sends
+# a confirmation email; click the link within 3 days or re-apply to
+# resend.
+# alert_email = "your-alerts-team@your-company.example"

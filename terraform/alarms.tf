@@ -2,22 +2,44 @@
 #
 # Why this file exists separately from main.tf:
 # EC2 status checks ping the hypervisor only — they cannot see an OS-level
-# hang. #107 silently hung the kernel reclaim path; the status check kept
-# reporting `ok` while the host was effectively dead. NetworkIn drop +
-# `TreatMissingData = breaching` together catch both #107 signatures:
-#  1. Traffic falling to ~2.3K bytes/min from ~167K
-#  2. CWAgent / metric publisher going silent altogether
+# hang. The host can be effectively dead while the status check still
+# reports `ok`. NetworkIn drop + `TreatMissingData = breaching` together
+# catch both halves of that gap:
+#  1. Sustained traffic drop on the instance
+#  2. Metric publisher itself going silent
 #
-# Scope of this PR: NetworkIn drop only. The other two signals listed in
-# the original issue are split into separate follow-up PRs (see
-# `.claude/matrix-sessions/111.md` § Follow-up):
-#   - SSM Agent ConnectionLost  → Lambda + DescribeInstanceInformation polling
-#                                 (AWS Cloud Operations Blog standard)
-#   - External /healthz         → Route53 health check + cross-region SNS
+# Scope of this PR: NetworkIn drop only. SSM Agent ConnectionLost and
+# external /healthz are split into separate follow-up PRs; see the
+# "Out of scope (follow-up)" section in terraform/README.md.
 
 # ---------- SNS topic (alarm fan-in) ----------
 resource "aws_sns_topic" "alerts" {
   name = "${var.name}-alerts"
+}
+
+# Defense-in-depth: restrict who can publish to this topic. The AWS
+# default topic policy already gates publishers via IAM, but pinning the
+# allowed principal to CloudWatch + the same-account source ARN means
+# even an IAM mis-grant in the account cannot inject arbitrary alarm
+# messages into the operator's mailbox.
+resource "aws_sns_topic_policy" "alerts" {
+  arn = aws_sns_topic.alerts.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "AllowCloudWatchAlarmsToPublish"
+      Effect    = "Allow"
+      Principal = { Service = "cloudwatch.amazonaws.com" }
+      Action    = "sns:Publish"
+      Resource  = aws_sns_topic.alerts.arn
+      Condition = {
+        ArnLike = {
+          "aws:SourceArn" = "arn:aws:cloudwatch:${var.region}:${data.aws_caller_identity.current.account_id}:alarm:*"
+        }
+      }
+    }]
+  })
 }
 
 # Conditional subscriber. Empty alert_email keeps the topic alive but
@@ -33,18 +55,20 @@ resource "aws_sns_topic_subscription" "email" {
 }
 
 # ---------- NetworkIn drop alarm ----------
-# Parameter rationale lives in .claude/matrix-sessions/111.md § alarm table.
-# Short version inline:
-#   period × evaluation_periods = 5 min sustained window
-#   datapoints_to_alarm = evaluation_periods → all-5-of-5 breaching to fire
-#                         (flicker prevention)
-#   threshold 5 KB/min ≈ 3 % of #107 baseline (~160 KB/min) — well below
-#                         normal idle traffic, well above 0
-#   treat_missing_data = breaching — metric publisher silence is itself the
-#                         second #107 signature
+# Parameter rationale (kept inline so future maintainers don't need
+# session notes or commit archaeology):
+#   period × evaluation_periods = 5-minute sustained window
+#   datapoints_to_alarm = evaluation_periods — all-5-of-5 breaching to
+#                         fire (flicker prevention)
+#   threshold 5 KB/min        — roughly 3 % of the historical idle
+#                               baseline (~160 KB/min); well below
+#                               normal traffic, well above zero
+#   treat_missing_data = breaching — the metric publisher itself going
+#                                    silent is the second half of the
+#                                    failure mode this alarm exists for
 resource "aws_cloudwatch_metric_alarm" "network_in_drop" {
   alarm_name        = "${var.name}-network-in-drop"
-  alarm_description = "OS-level liveness: NetworkIn metric falls below 5 KB/min for 5 consecutive 1-min periods, OR metric publisher silent. Signature of #107 silent hang (NetworkIn 167K → 2.3K bytes/min drop without OOM-killer fire)."
+  alarm_description = "OS-level liveness alarm: fires on sustained NetworkIn < 5 KB/min OR metric publisher silence. See terraform/README.md → Alarms for details."
 
   namespace   = "AWS/EC2"
   metric_name = "NetworkIn"
