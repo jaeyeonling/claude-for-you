@@ -17,11 +17,18 @@ resource "aws_sns_topic" "alerts" {
   name = "${var.name}-alerts"
 }
 
-# Defense-in-depth: restrict who can publish to this topic. The AWS
-# default topic policy already gates publishers via IAM, but pinning the
-# allowed principal to CloudWatch + the same-account source ARN means
-# even an IAM mis-grant in the account cannot inject arbitrary alarm
-# messages into the operator's mailbox.
+# Defense-in-depth: narrow the *service* principal allowed to publish.
+# AWS SNS evaluates topic policy AND identity policy as a union, so an
+# IAM principal in the same account that has `sns:Publish` via its own
+# identity policy can still publish — but cross-service injection
+# (e.g., a misconfigured EventBridge rule pointed at this topic) is
+# blocked. The `aws:SourceArn` condition pins the allowed publisher
+# down to a same-account CloudWatch alarm in this region.
+#
+# Operational note: this also blocks `aws sns publish` from the AWS
+# Console / CLI when the operator's IAM identity policy does NOT grant
+# sns:Publish on this topic. See terraform/README.md → Alarms for the
+# diagnostic publish path.
 resource "aws_sns_topic_policy" "alerts" {
   arn = aws_sns_topic.alerts.arn
 

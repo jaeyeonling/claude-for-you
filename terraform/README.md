@@ -148,6 +148,20 @@ aws ec2 reboot-instances \
 # instance is back and pushing traffic.
 ```
 
+### Diagnostic publish (manual smoke test)
+
+The topic policy explicitly allows only `cloudwatch.amazonaws.com` as a service principal. To send a synthetic message yourself (smoke-testing email delivery without rebooting the instance) your IAM identity must additionally grant `sns:Publish` on this topic — AWS evaluates topic policy and identity policy as a union.
+
+```bash
+aws sns publish \
+  --topic-arn "$(terraform output -raw sns_topic_arn)" \
+  --region ap-northeast-2 \
+  --subject "smoke test" \
+  --message "manual publish to verify subscription delivery"
+```
+
+If this returns `AuthorizationError`, your IAM identity policy is missing `sns:Publish` on the topic ARN. The CloudWatch alarm publish path still works regardless — this only affects manual diagnostics.
+
 ### Known false alarm: deploy cycles
 
 `scripts/deploy.sh` can stop the instance for a few minutes. If a deploy lands during a quiet traffic window, NetworkIn falls below 5 KB/min for the full 5-minute window and the alarm fires even though nothing is wrong. Suppressing the alarm during deploys is a separate follow-up (below); we keep it un-suppressed for now because a real silent hang during quiet hours is exactly the scenario this alarm exists to catch.
