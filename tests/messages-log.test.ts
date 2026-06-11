@@ -296,6 +296,8 @@ describe("createNullMessageLogStore", () => {
       requestBody: {},
       responseBody: null,
       errorMessage: null,
+      servedBy: null,
+      bypassMetadata: null,
     });
     expect(await store.list({ limit: 100 })).toEqual([]);
     expect(await store.get("x")).toBeNull();

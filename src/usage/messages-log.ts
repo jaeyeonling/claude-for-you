@@ -46,6 +46,13 @@ export interface MessageLogRecord {
   readonly requestBody: unknown;
   readonly responseBody: ResponseBody | null;
   readonly errorMessage: string | null;
+  /** Which OAuth pool member served the upstream call. null when the request
+   * never reached the pool (validation reject, etc.). */
+  readonly servedBy: string | null;
+  /** Proxy-side wire metadata: inbound/outbound/upstream header allowlist
+   * snapshots and canary decision. Shape defined in usage/bypass-metadata.ts.
+   * null when the request short-circuited before metadata could be assembled. */
+  readonly bypassMetadata: unknown;
 }
 
 export interface MessageLogSummary {

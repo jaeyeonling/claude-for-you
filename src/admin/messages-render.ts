@@ -298,6 +298,106 @@ const renderResponseBody = (rb: ResponseBody | null, streaming: boolean): string
   return `${streaming ? '' : ''}${reassembled}${tools}${rawView}`;
 };
 
+/**
+ * Render the bypass-metadata section. Defensive shape inspection — the JSONB
+ * blob is `unknown` by contract, since the schema is owned by
+ * usage/bypass-metadata.ts and the admin renderer must not crash on legacy
+ * rows that predate any individual field.
+ */
+const renderHeaderTable = (
+  title: string,
+  headers: Readonly<Record<string, string>>,
+): string => {
+  const entries = Object.entries(headers).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length === 0) {
+    return `<details><summary>${esc(title)} (empty)</summary></details>`;
+  }
+  const rows = entries
+    .map(([k, v]) => `<tr><td><code>${esc(k)}</code></td><td><code>${esc(v)}</code></td></tr>`)
+    .join('');
+  return `<details><summary>${esc(title)} (${entries.length})</summary>
+    <table><thead><tr><th>header</th><th>value</th></tr></thead>
+    <tbody>${rows}</tbody></table></details>`;
+};
+
+const isStringRecord = (v: unknown): v is Record<string, string> => {
+  if (v === null || typeof v !== 'object') return false;
+  for (const value of Object.values(v as Record<string, unknown>)) {
+    if (typeof value !== 'string') return false;
+  }
+  return true;
+};
+
+interface UnknownFingerprint {
+  readonly name: string;
+  readonly length: number;
+}
+
+const isUnknownFingerprintList = (v: unknown): v is readonly UnknownFingerprint[] => {
+  if (!Array.isArray(v)) return false;
+  for (const item of v) {
+    if (item === null || typeof item !== 'object') return false;
+    const it = item as Record<string, unknown>;
+    if (typeof it.name !== 'string' || typeof it.length !== 'number') return false;
+  }
+  return true;
+};
+
+const renderUnknownHeaders = (
+  title: string,
+  list: readonly UnknownFingerprint[],
+): string => {
+  if (list.length === 0) {
+    return `<details><summary>${esc(title)} (none)</summary></details>`;
+  }
+  const rows = list
+    .map(
+      (h) =>
+        `<tr><td><code>${esc(h.name)}</code></td><td>${esc(h.length.toLocaleString())} bytes</td></tr>`,
+    )
+    .join('');
+  return `<details><summary>${esc(title)} (${list.length})</summary>
+    <p style="color:var(--muted);font-size:.75rem;margin:.4rem 0">
+      values NOT stored — name + byte-length only. Use this to detect new SDK
+      headers rolling out (length jumps) or unexpected clients without leaking
+      cookies / auth / forwarded-IP chains.
+    </p>
+    <table><thead><tr><th>header</th><th>length</th></tr></thead>
+    <tbody>${rows}</tbody></table></details>`;
+};
+
+const renderBypassMetadata = (m: unknown): string => {
+  if (m === null || m === undefined || typeof m !== 'object') return '';
+  const obj = m as Record<string, unknown>;
+  const inbound = isStringRecord(obj.inboundHeaders) ? obj.inboundHeaders : {};
+  const outbound = isStringRecord(obj.outboundHeaders) ? obj.outboundHeaders : {};
+  const upstream = isStringRecord(obj.upstreamHeaders) ? obj.upstreamHeaders : {};
+  const unknownInbound = isUnknownFingerprintList(obj.unknownInboundHeaders)
+    ? obj.unknownInboundHeaders
+    : [];
+  const unknownOutbound = isUnknownFingerprintList(obj.unknownOutboundHeaders)
+    ? obj.unknownOutboundHeaders
+    : [];
+  const unknownUpstream = isUnknownFingerprintList(obj.unknownUpstreamHeaders)
+    ? obj.unknownUpstreamHeaders
+    : [];
+  const canary = obj.canary as Record<string, unknown> | null | undefined;
+  const useCandidate =
+    canary && typeof canary.useCandidate === 'boolean' ? canary.useCandidate : false;
+  return `<section class="detail">
+    <h2>proxy bypass metadata</h2>
+    <dl class="kv">
+      <dt>canary</dt><dd>${useCandidate ? '<span class="badge b-warn">candidate</span>' : '<span class="badge b-mute">stable</span>'}</dd>
+    </dl>
+    ${renderHeaderTable('inbound headers (client → proxy)', inbound)}
+    ${renderHeaderTable('outbound headers (proxy → anthropic)', outbound)}
+    ${renderHeaderTable('upstream response headers (anthropic → proxy)', upstream)}
+    ${renderUnknownHeaders('unknown inbound headers', unknownInbound)}
+    ${renderUnknownHeaders('unknown outbound headers', unknownOutbound)}
+    ${renderUnknownHeaders('unknown upstream headers', unknownUpstream)}
+  </section>`;
+};
+
 export const renderMessageDetail = (r: MessageLogRecord): string => {
   return `<!doctype html>
 <html lang="en">
@@ -329,9 +429,12 @@ export const renderMessageDetail = (r: MessageLogRecord): string => {
       <dt>stop_reason</dt><dd>${esc(r.stopReason ?? '—')}</dd>
       <dt>client ip</dt><dd>${esc(r.clientIp ?? '—')}</dd>
       <dt>user agent</dt><dd>${esc(r.userAgent ?? '—')}</dd>
+      <dt>served by</dt><dd>${esc(r.servedBy ?? '—')}</dd>
       ${r.errorMessage ? `<dt>error</dt><dd><span class="badge b-bad">error</span> ${esc(r.errorMessage)}</dd>` : ''}
     </dl>
   </section>
+
+  ${renderBypassMetadata(r.bypassMetadata)}
 
   <section class="detail">
     <h2>request</h2>

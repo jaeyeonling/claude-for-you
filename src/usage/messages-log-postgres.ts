@@ -49,6 +49,8 @@ interface DetailRow {
   readonly request_body: unknown;
   readonly response_body: ResponseBody | null;
   readonly error_message: string | null;
+  readonly served_by: string | null;
+  readonly bypass_metadata: unknown;
 }
 
 interface SummaryRow {
@@ -98,6 +100,8 @@ const toRecord = (r: DetailRow): MessageLogRecord => ({
   requestBody: r.request_body,
   responseBody: r.response_body,
   errorMessage: r.error_message,
+  servedBy: r.served_by,
+  bypassMetadata: r.bypass_metadata,
 });
 
 export const createPostgresMessageLogStore = async (
@@ -129,9 +133,16 @@ export const createPostgresMessageLogStore = async (
       request_body JSONB NOT NULL,
       response_body JSONB,
       preview TEXT NOT NULL DEFAULT '',
-      error_message TEXT
+      error_message TEXT,
+      served_by TEXT,
+      bypass_metadata JSONB
     )
   `;
+  // Idempotent ALTERs for older deployments (table predates the column).
+  // IF NOT EXISTS keeps the create path above and the migration path here
+  // converging on the same shape; PG ignores the no-op on fresh tables.
+  await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS served_by TEXT`;
+  await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS bypass_metadata JSONB`;
   // Indexes: ts-desc is the dashboard's default scan; (user, ts) accelerates
   // per-user views; status-partial gates the "errors only" filter without
   // bloating the index for the 2xx majority.
@@ -163,6 +174,10 @@ export const createPostgresMessageLogStore = async (
         entry.responseBody === null
           ? null
           : sanitizeJsonValue(entry.responseBody);
+      const safeBypassMetadata =
+        entry.bypassMetadata === null || entry.bypassMetadata === undefined
+          ? null
+          : sanitizeJsonValue(entry.bypassMetadata);
       // Extract preview *after* sanitize. The `preview` TEXT column is subject
       // to the same NUL rejection as JSONB, and a NUL anywhere in the last
       // user message would otherwise leak into the column unsanitized.
@@ -176,7 +191,8 @@ export const createPostgresMessageLogStore = async (
           id, ts, user_name, model, status, streaming, duration_ms,
           input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
           service_tier, stop_reason, client_ip, user_agent,
-          request_body, response_body, preview, error_message
+          request_body, response_body, preview, error_message,
+          served_by, bypass_metadata
         ) VALUES (
           ${entry.id}, ${entry.ts}, ${entry.userName}, ${entry.model}, ${entry.status},
           ${entry.streaming}, ${entry.durationMs},
@@ -186,7 +202,9 @@ export const createPostgresMessageLogStore = async (
           ${sql.json(safeRequestBody as never)},
           ${safeResponseBody === null ? null : sql.json(safeResponseBody as never)},
           ${preview},
-          ${entry.errorMessage}
+          ${entry.errorMessage},
+          ${entry.servedBy},
+          ${safeBypassMetadata === null ? null : sql.json(safeBypassMetadata as never)}
         )
       `;
     },
@@ -225,7 +243,8 @@ export const createPostgresMessageLogStore = async (
         SELECT id, ts, user_name, model, status, streaming, duration_ms,
                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                service_tier, stop_reason, client_ip, user_agent,
-               request_body, response_body, error_message
+               request_body, response_body, error_message,
+               served_by, bypass_metadata
           FROM messages_log
          WHERE id = ${id}
       `;

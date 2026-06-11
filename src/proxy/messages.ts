@@ -11,6 +11,7 @@ import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { MessageLogStore, ResponseBody } from '../usage/messages-log.js';
 import { extractModel, extractResponseMeta } from '../usage/messages-log.js';
+import { buildBypassMetadata } from '../usage/bypass-metadata.js';
 import type { UsageTracker } from '../usage/per-user.js';
 import { isModelAllowed } from '../auth/model-allow.js';
 import { Forbidden, InvalidRequest } from '../lib/errors.js';
@@ -422,6 +423,12 @@ export const createMessagesHandler =
     // feature is disabled — in that case `record` is an immediate no-op and
     // the catch never fires. Failures are funneled into a cooldown sink so a
     // DB outage doesn't blow up stderr.
+    const bypassMetadata = buildBypassMetadata({
+      inboundHeaders: reqHeaders,
+      outboundHeaders: upstream.outboundHeaders,
+      upstreamHeaders: upstream.response.headers,
+      canary: { useCandidate: decision.useCandidate },
+    });
     const writeLog = (responseBody: ResponseBody | null, errorMessage: string | null): void => {
       const meta = extractResponseMeta(responseBody);
       void deps.messageLogStore
@@ -444,6 +451,8 @@ export const createMessagesHandler =
           requestBody: clientBody,
           responseBody,
           errorMessage,
+          servedBy: upstream.servedBy,
+          bypassMetadata,
         })
         .catch((err: unknown) => {
           const msg = `[messages-log] write failed: ${err instanceof Error ? err.message : String(err)}`;
