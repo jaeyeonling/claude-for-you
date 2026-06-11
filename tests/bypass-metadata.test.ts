@@ -100,6 +100,10 @@ describe('buildBypassMetadata', () => {
     const upstream = new Headers({
       'anthropic-ratelimit-unified-status': 'allowed',
       'anthropic-ratelimit-unified-reset': '1781162400',
+      // `-remaining` is also consumed by src/usage/global.ts and
+      // src/auth/account-pool.ts at runtime — if it drops out of the
+      // allowlist, post-hoc triage loses the same number the guard saw.
+      'anthropic-ratelimit-unified-remaining': '4200',
       'anthropic-ratelimit-unified-overage-status': 'rejected',
       'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled_until',
       'anthropic-ratelimit-unified-representative-claim': 'five_hour',
@@ -126,6 +130,7 @@ describe('buildBypassMetadata', () => {
 
     expect(m.upstreamHeaders['anthropic-ratelimit-unified-status']).toBe('allowed');
     expect(m.upstreamHeaders['anthropic-ratelimit-unified-reset']).toBe('1781162400');
+    expect(m.upstreamHeaders['anthropic-ratelimit-unified-remaining']).toBe('4200');
     expect(m.upstreamHeaders['anthropic-ratelimit-unified-overage-status']).toBe('rejected');
     expect(m.upstreamHeaders['anthropic-ratelimit-unified-overage-disabled-reason']).toBe(
       'org_level_disabled_until',

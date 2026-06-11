@@ -61,7 +61,11 @@ const OUTBOUND_ALLOWLIST: ReadonlySet<string> = new Set([
  *
  *  2. `anthropic-ratelimit-unified-*` (#122) — sub-plan classification + 5h/7d
  *     bucket surface that the OAuth route returns. Includes:
- *      - `-status` / `-reset`             … aggregate verdict + window reset
+ *      - `-status` / `-reset` / `-remaining` … aggregate verdict, window
+ *        reset, and the remaining-tokens budget that `src/usage/global.ts`
+ *        and `src/auth/account-pool.ts` already consume at runtime. Without
+ *        the value captured here, post-hoc triage of a subscription-headroom
+ *        incident can't replay the same number the guard saw.
  *      - `-overage-{status,disabled-reason}` … the overage-lane verdict and
  *        the slug explaining why overage is disabled when it is
  *      - `-representative-claim` / `-fallback-percentage` … internal routing
@@ -96,6 +100,7 @@ const UPSTREAM_RESPONSE_ALLOWLIST: ReadonlySet<string> = new Set([
   // family structure and where to add new per-model triplets.
   "anthropic-ratelimit-unified-status",
   "anthropic-ratelimit-unified-reset",
+  "anthropic-ratelimit-unified-remaining",
   "anthropic-ratelimit-unified-overage-status",
   "anthropic-ratelimit-unified-overage-disabled-reason",
   "anthropic-ratelimit-unified-representative-claim",
