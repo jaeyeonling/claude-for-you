@@ -131,7 +131,7 @@ Do this **before** running the reboot test below. If you skip it, AWS still publ
    ```
 
 3. Common silent-failure traps:
-   - `alert_email` left at the placeholder from `terraform.tfvars.example` (`*@*.example` is RFC 2606 — AWS will accept it and email a non-existent mailbox).
+   - `alert_email` left at the `terraform.tfvars.example` placeholder (`your-alerts-team@your-company.example` — the `.example` TLD is RFC 2606, so AWS will accept it and email a non-existent mailbox).
    - Confirmation email in spam.
    - Operator confirmed on one machine, terraform was re-applied from another that thinks the subscription is fresh.
 
@@ -150,9 +150,14 @@ aws ec2 reboot-instances \
 
 ### Diagnostic publish (manual smoke test)
 
-The topic policy explicitly allows only `cloudwatch.amazonaws.com` as a service principal. To send a synthetic message yourself (smoke-testing email delivery without rebooting the instance) your IAM identity must additionally grant `sns:Publish` on this topic — AWS evaluates topic policy and identity policy as a union.
+Pre-conditions before this is useful:
+1. SNS subscription is `Confirmed` (see § Confirm the subscription first — a `PendingConfirmation` subscription drops AWS's delivery silently).
+2. `alert_email` is non-empty in tfvars (otherwise the topic has no subscriber and publishing succeeds but nothing arrives).
+
+If those hold, send a synthetic message to verify the SNS → email path without rebooting the instance:
 
 ```bash
+# Replace ap-northeast-2 if your var.region is different.
 aws sns publish \
   --topic-arn "$(terraform output -raw sns_topic_arn)" \
   --region ap-northeast-2 \
@@ -160,7 +165,19 @@ aws sns publish \
   --message "manual publish to verify subscription delivery"
 ```
 
-If this returns `AuthorizationError`, your IAM identity policy is missing `sns:Publish` on the topic ARN. The CloudWatch alarm publish path still works regardless — this only affects manual diagnostics.
+AWS evaluates SNS topic policy and IAM identity policy as a union for same-account access, so your IAM identity needs `sns:Publish` permission on this topic ARN. If you get `AuthorizationError`:
+
+- Attach `sns:Publish` on the topic ARN to your IAM role/user. Minimal statement:
+  ```json
+  {
+    "Effect": "Allow",
+    "Action": "sns:Publish",
+    "Resource": "<sns_topic_arn from terraform output>"
+  }
+  ```
+- Or temporarily switch to an admin role.
+
+The CloudWatch alarm publish path is independent and uses the topic policy's CloudWatch service principal — alarms still publish even when your operator IAM cannot.
 
 ### Known false alarm: deploy cycles
 
