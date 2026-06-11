@@ -20,3 +20,8 @@
 # "Private-repo support"). For public repos with no deploy key populated,
 # cloud-init falls back to anonymous HTTPS clone.
 # git_repo_url = "https://github.com/your-handle/claude-for-you.git"
+
+# Subscriber for the CloudWatch alarm SNS topic. Leave empty to create
+# the topic with no subscriber (alarms still publish; just nobody
+# receives them). Confirm the SNS subscription email after first apply.
+# alert_email = "ops@example.com"
