@@ -328,12 +328,59 @@ const isStringRecord = (v: unknown): v is Record<string, string> => {
   return true;
 };
 
+interface UnknownFingerprint {
+  readonly name: string;
+  readonly length: number;
+}
+
+const isUnknownFingerprintList = (v: unknown): v is readonly UnknownFingerprint[] => {
+  if (!Array.isArray(v)) return false;
+  for (const item of v) {
+    if (item === null || typeof item !== 'object') return false;
+    const it = item as Record<string, unknown>;
+    if (typeof it.name !== 'string' || typeof it.length !== 'number') return false;
+  }
+  return true;
+};
+
+const renderUnknownHeaders = (
+  title: string,
+  list: readonly UnknownFingerprint[],
+): string => {
+  if (list.length === 0) {
+    return `<details><summary>${esc(title)} (none)</summary></details>`;
+  }
+  const rows = list
+    .map(
+      (h) =>
+        `<tr><td><code>${esc(h.name)}</code></td><td>${esc(h.length.toLocaleString())} bytes</td></tr>`,
+    )
+    .join('');
+  return `<details><summary>${esc(title)} (${list.length})</summary>
+    <p style="color:var(--muted);font-size:.75rem;margin:.4rem 0">
+      values NOT stored — name + byte-length only. Use this to detect new SDK
+      headers rolling out (length jumps) or unexpected clients without leaking
+      cookies / auth / forwarded-IP chains.
+    </p>
+    <table><thead><tr><th>header</th><th>length</th></tr></thead>
+    <tbody>${rows}</tbody></table></details>`;
+};
+
 const renderBypassMetadata = (m: unknown): string => {
   if (m === null || m === undefined || typeof m !== 'object') return '';
   const obj = m as Record<string, unknown>;
   const inbound = isStringRecord(obj.inboundHeaders) ? obj.inboundHeaders : {};
   const outbound = isStringRecord(obj.outboundHeaders) ? obj.outboundHeaders : {};
   const upstream = isStringRecord(obj.upstreamHeaders) ? obj.upstreamHeaders : {};
+  const unknownInbound = isUnknownFingerprintList(obj.unknownInboundHeaders)
+    ? obj.unknownInboundHeaders
+    : [];
+  const unknownOutbound = isUnknownFingerprintList(obj.unknownOutboundHeaders)
+    ? obj.unknownOutboundHeaders
+    : [];
+  const unknownUpstream = isUnknownFingerprintList(obj.unknownUpstreamHeaders)
+    ? obj.unknownUpstreamHeaders
+    : [];
   const canary = obj.canary as Record<string, unknown> | null | undefined;
   const useCandidate =
     canary && typeof canary.useCandidate === 'boolean' ? canary.useCandidate : false;
@@ -345,6 +392,9 @@ const renderBypassMetadata = (m: unknown): string => {
     ${renderHeaderTable('inbound headers (client → proxy)', inbound)}
     ${renderHeaderTable('outbound headers (proxy → anthropic)', outbound)}
     ${renderHeaderTable('upstream response headers (anthropic → proxy)', upstream)}
+    ${renderUnknownHeaders('unknown inbound headers', unknownInbound)}
+    ${renderUnknownHeaders('unknown outbound headers', unknownOutbound)}
+    ${renderUnknownHeaders('unknown upstream headers', unknownUpstream)}
   </section>`;
 };
 

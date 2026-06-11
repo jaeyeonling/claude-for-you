@@ -25,6 +25,36 @@ describe('buildBypassMetadata', () => {
     expect(m.inboundHeaders['x-forwarded-for']).toBeUndefined();
   });
 
+  test('non-allowlisted headers surface as name+length fingerprints', () => {
+    const inbound = new Headers({
+      'anthropic-beta': 'context-1m-2025-08-07',
+      cookie: 'session=secret-do-not-log',
+      'x-mystery': 'abcd',
+    });
+    const m = buildBypassMetadata({
+      inboundHeaders: inbound,
+      outboundHeaders: { authorization: 'Bearer x', 'x-internal-tag': 'qq' },
+      upstreamHeaders: new Headers({ 'request-id': 'r', 'x-edge-cache': 'MISS' }),
+      canary: { useCandidate: false },
+    });
+
+    // Values are NEVER in the unknown set, only name+length.
+    const inboundNames = m.unknownInboundHeaders.map((h) => h.name);
+    expect(inboundNames).toContain('cookie');
+    expect(inboundNames).toContain('x-mystery');
+    expect(inboundNames).not.toContain('anthropic-beta');
+    const cookie = m.unknownInboundHeaders.find((h) => h.name === 'cookie');
+    expect(cookie?.length).toBe('session=secret-do-not-log'.length);
+
+    // Outbound + upstream same shape.
+    expect(m.unknownOutboundHeaders.map((h) => h.name)).toEqual(['x-internal-tag']);
+    expect(m.unknownUpstreamHeaders.map((h) => h.name)).toEqual(['x-edge-cache']);
+
+    // Sorted lexicographically.
+    const sorted = [...inboundNames].sort((a, b) => a.localeCompare(b));
+    expect(inboundNames).toEqual(sorted);
+  });
+
   test('redacts Bearer token in outbound authorization', () => {
     const m = buildBypassMetadata({
       inboundHeaders: new Headers(),

@@ -74,6 +74,15 @@ const UPSTREAM_RESPONSE_ALLOWLIST: ReadonlySet<string> = new Set([
   "x-envoy-upstream-service-time",
 ]);
 
+/** Name + byte-length pair for a header that's NOT in the allowlist. The
+ * value itself is dropped — this is the cheapest signal that lets operators
+ * notice a new SDK header rolling out (length jump from 12 → 240 chars) or
+ * an unexpected client appearing, without ever persisting the value. */
+export interface UnknownHeaderFingerprint {
+  readonly name: string;
+  readonly length: number;
+}
+
 export interface BypassMetadata {
   /** Subset of client request headers (allowlist). */
   readonly inboundHeaders: Readonly<Record<string, string>>;
@@ -82,38 +91,69 @@ export interface BypassMetadata {
   readonly outboundHeaders: Readonly<Record<string, string>>;
   /** Subset of Anthropic→proxy response headers (allowlist). */
   readonly upstreamHeaders: Readonly<Record<string, string>>;
+  /** Fingerprints of inbound headers NOT in the allowlist. Names are
+   * lowercased, sorted; values are NOT stored — only length. Lets the
+   * dashboard surface "new SDK header rolling out" without leaking
+   * cookies / auth headers / forwarded chains. */
+  readonly unknownInboundHeaders: readonly UnknownHeaderFingerprint[];
+  /** Fingerprints of outbound headers NOT in the allowlist. Same rationale
+   * as unknownInboundHeaders — diagnostic-only, no values. */
+  readonly unknownOutboundHeaders: readonly UnknownHeaderFingerprint[];
+  /** Fingerprints of upstream-response headers NOT in the allowlist. */
+  readonly unknownUpstreamHeaders: readonly UnknownHeaderFingerprint[];
   /** Canary routing decision for this request. */
   readonly canary: Readonly<{
     useCandidate: boolean;
   }>;
 }
 
+interface SplitHeaders {
+  readonly allowed: Record<string, string>;
+  readonly unknown: readonly UnknownHeaderFingerprint[];
+}
+
+const sortFingerprints = (
+  list: UnknownHeaderFingerprint[],
+): readonly UnknownHeaderFingerprint[] =>
+  Object.freeze(
+    list
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((f) => Object.freeze(f)),
+  );
+
 const collectFromHeaders = (
   headers: Headers,
   allow: ReadonlySet<string>,
-): Record<string, string> => {
-  const out: Record<string, string> = {};
+): SplitHeaders => {
+  const allowed: Record<string, string> = {};
+  const unknown: UnknownHeaderFingerprint[] = [];
   headers.forEach((value, key) => {
     const lower = key.toLowerCase();
     if (allow.has(lower)) {
-      out[lower] = redact(value);
+      allowed[lower] = redact(value);
+    } else {
+      unknown.push({ name: lower, length: value.length });
     }
   });
-  return out;
+  return { allowed, unknown: sortFingerprints(unknown) };
 };
 
 const collectFromRecord = (
   headers: Readonly<Record<string, string>>,
   allow: ReadonlySet<string>,
-): Record<string, string> => {
-  const out: Record<string, string> = {};
+): SplitHeaders => {
+  const allowed: Record<string, string> = {};
+  const unknown: UnknownHeaderFingerprint[] = [];
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase();
     if (allow.has(lower)) {
-      out[lower] = redact(value);
+      allowed[lower] = redact(value);
+    } else {
+      unknown.push({ name: lower, length: value.length });
     }
   }
-  return out;
+  return { allowed, unknown: sortFingerprints(unknown) };
 };
 
 export interface BuildBypassMetadataInput {
@@ -125,19 +165,23 @@ export interface BuildBypassMetadataInput {
 
 export const buildBypassMetadata = (
   input: BuildBypassMetadataInput,
-): BypassMetadata =>
-  Object.freeze({
-    inboundHeaders: Object.freeze(
-      collectFromHeaders(input.inboundHeaders, INBOUND_ALLOWLIST),
-    ),
-    outboundHeaders: Object.freeze(
-      collectFromRecord(input.outboundHeaders, OUTBOUND_ALLOWLIST),
-    ),
-    upstreamHeaders: Object.freeze(
-      collectFromHeaders(input.upstreamHeaders, UPSTREAM_RESPONSE_ALLOWLIST),
-    ),
+): BypassMetadata => {
+  const inbound = collectFromHeaders(input.inboundHeaders, INBOUND_ALLOWLIST);
+  const outbound = collectFromRecord(input.outboundHeaders, OUTBOUND_ALLOWLIST);
+  const upstream = collectFromHeaders(
+    input.upstreamHeaders,
+    UPSTREAM_RESPONSE_ALLOWLIST,
+  );
+  return Object.freeze({
+    inboundHeaders: Object.freeze(inbound.allowed),
+    outboundHeaders: Object.freeze(outbound.allowed),
+    upstreamHeaders: Object.freeze(upstream.allowed),
+    unknownInboundHeaders: inbound.unknown,
+    unknownOutboundHeaders: outbound.unknown,
+    unknownUpstreamHeaders: upstream.unknown,
     canary: Object.freeze({ useCandidate: input.canary.useCandidate }),
   });
+};
 
 export const BYPASS_HEADER_ALLOWLISTS = Object.freeze({
   inbound: INBOUND_ALLOWLIST,
