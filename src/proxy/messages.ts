@@ -125,6 +125,122 @@ export const CC_BLOCK: SystemTextBlock = Object.freeze({
 });
 
 /**
+ * Identity block with NO `cache_control`. Prepended by `ensureSystem` ONLY when
+ * the inbound request already carries the full quota of cache_control
+ * breakpoints Anthropic allows — adding the normal `CC_BLOCK` (which carries one)
+ * would push the total over the limit and Anthropic rejects the whole request
+ * with HTTP 400 "A maximum of 4 blocks with cache_control may be provided.
+ * Found 5" (#136).
+ *
+ * Motivating caller: NousResearch/hermes-agent ships a hardcoded `system_and_3`
+ * cache layout — exactly 4 breakpoints (1 system block + 3 message content
+ * blocks, confirmed in prod). On a direct Anthropic call that is valid; the
+ * proxy's +1 prepend pushed it to 5. For such cc-maxed callers we contribute 0
+ * breakpoints and pass their layout through untouched, preserving their cache
+ * placement. Callers using < 4 breakpoints still get the cache_control-bearing
+ * `CC_BLOCK`, so the #55 prompt-cache anchor stays load-bearing there.
+ *
+ * Deliberately NOT a canonical CC marker: `isCanonicalCcMarker` requires
+ * `cache_control.type === 'ephemeral'`, so this block never trips the #96
+ * transparent-passthrough path. At-cap path only — go through `ensureSystem`,
+ * not this constant directly.
+ */
+export const CC_BLOCK_NO_CACHE: SystemTextBlock = Object.freeze({
+  type: 'text',
+  text: CC_SYSTEM_PREFIX,
+});
+
+/**
+ * Anthropic's hard ceiling on cache_control breakpoints per request, counted
+ * across system + tools + messages combined. Exceeding it is a hard 400 (#136).
+ * Exported so tests assert against the live value instead of a magic literal.
+ */
+export const MAX_CACHE_CONTROL_BLOCKS = 4;
+
+/** True iff `v` is an object carrying an OWN `cache_control` key (one cache
+ * breakpoint). Uses `Object.hasOwn`, not the `in` operator, so a prototype-
+ * polluted `cache_control` on `Object.prototype` can't make an unrelated block
+ * count as a breakpoint (Adversary R1; harmless on Bun's JSON.parse today, but
+ * `hasOwn` is the correct own-property test regardless of runtime). */
+const hasCacheControl = (v: unknown): boolean =>
+  v !== null && typeof v === 'object' && Object.hasOwn(v as Record<string, unknown>, 'cache_control');
+
+/** Count entries in an array that carry an OWN top-level `cache_control` key.
+ * Non-arrays contribute 0. Only each entry's own top-level key counts — a nested
+ * `cache_control` (e.g. inside a tool's `input_schema`) is ordinary JSON Schema,
+ * NOT a cache breakpoint, so it is intentionally not traversed. See
+ * `countCacheControlBlocks` for why each location is counted at this level. */
+const countCacheControlInArray = (arr: unknown): number => {
+  if (!Array.isArray(arr)) return 0;
+  let n = 0;
+  for (const item of arr) {
+    if (hasCacheControl(item)) n += 1;
+  }
+  return n;
+};
+
+/**
+ * Count cache_control breakpoints in a request body by EXPLICIT location:
+ * `system[]` blocks, `tools[]` entries, and each `messages[].content[]` block.
+ *
+ * Anthropic enforces the 4-breakpoint ceiling across system + tools + messages
+ * combined (#136), so all three locations are counted. This is an
+ * explicit-location traversal, NOT a recursive `$..cache_control` walk — a
+ * recursive walk double-counts (a recursive jsonpath returned 10 for a request
+ * with 5 real breakpoints in prod).
+ *
+ * Each location counts a breakpoint only at the level Anthropic honors it:
+ *   - `tools[]`: the `cache_control` on the tool object's TOP level. A
+ *     `cache_control` nested inside `tools[].input_schema` is ordinary JSON
+ *     Schema, NOT a cache breakpoint, and is correctly ignored (Adversary R1).
+ *   - `system[]` / `messages[].content[]`: per content block.
+ *
+ * Message-level `messages[].cache_control` is intentionally NOT counted: it is
+ * not part of Anthropic's documented breakpoint surface, and hermes (the
+ * motivating caller) places breakpoints at content-block level (confirmed in
+ * prod). A string `content` contributes 0. Non-array / non-object shapes are
+ * skipped — the proxy does not validate Anthropic's request schema here;
+ * malformed bodies flow upstream and Anthropic returns its own 400.
+ */
+export const countCacheControlBlocks = (body: Record<string, unknown>): number => {
+  let n = countCacheControlInArray(body.system) + countCacheControlInArray(body.tools);
+  const messages = body.messages;
+  if (Array.isArray(messages)) {
+    for (const msg of messages) {
+      if (msg === null || typeof msg !== 'object') continue;
+      n += countCacheControlInArray((msg as Record<string, unknown>).content);
+    }
+  }
+  return n;
+};
+
+/**
+ * Choose the identity block `ensureSystem` prepends. If prepending a
+ * cache_control-bearing block would exceed Anthropic's ceiling, prepend the
+ * cache_control-free variant so the caller's existing breakpoints all survive
+ * (#136). Otherwise the normal anchor-bearing `CC_BLOCK` (keeps #55 intact for
+ * sub-cap callers). The caller's body is never inspected for mutation here —
+ * only counted.
+ *
+ * Contract: `body` MUST be the ORIGINAL caller body, before any prepend. The
+ * `+ 1` accounts for the breakpoint CC_BLOCK would add. Passing a body whose
+ * `system` already contains a prepended block would over-count by 1 and wrongly
+ * route a sub-cap caller to the no-cache path. `ensureSystem` always calls this
+ * with the untouched input `b`.
+ *
+ * Boundary: caller breakpoints `n` → prepend decision.
+ *   n <= 2  → n+1 <= 3      → CC_BLOCK (room to spare)
+ *   n == 3  → n+1 == 4      → CC_BLOCK (exactly at ceiling, still fits)
+ *   n >= 4  → n+1 >= 5 > 4  → CC_BLOCK_NO_CACHE (would overflow)
+ * An at-cap caller sending n == 4 gets 0 added → stays at 4. A caller already
+ * over the ceiling (n >= 5) is its own contract violation: the no-cache path
+ * adds nothing, so the proxy never makes it worse, but Anthropic still 400s.
+ * That n >= 5 case is out of #136 scope (see tests + operational-pitfalls #20).
+ */
+const pickPrependBlock = (body: Record<string, unknown>): SystemTextBlock =>
+  countCacheControlBlocks(body) + 1 > MAX_CACHE_CONTROL_BLOCKS ? CC_BLOCK_NO_CACHE : CC_BLOCK;
+
+/**
  * Detects whether a `system` block is a "canonical CC marker" — i.e. the exact
  * shape we'd prepend ourselves. Used by `ensureSystem` to skip the prepend when
  * the caller has already shipped one (real CC client). See pitfall #15.
@@ -178,17 +294,23 @@ export const isValidSystemBlock = (block: unknown): boolean => {
  * — either prepended by us or already shipped by the caller. Caller's other
  * blocks are preserved verbatim.
  *
- * Shape rules:
- *   - missing / empty / non-string non-array        → `[CC_BLOCK]`
- *   - non-empty string                              → `[CC_BLOCK, {type:'text', text: caller}]`
+ * Shape rules (`<prepend>` = `pickPrependBlock(b)`, see below):
+ *   - missing / empty / non-string non-array        → `[<prepend>]`
+ *   - non-empty string                              → `[<prepend>, {type:'text', text: caller}]`
  *   - non-empty array, contains canonical marker    → caller passed through (shallow copy)
- *   - non-empty array, no canonical marker          → `[CC_BLOCK, ...caller]`
+ *   - non-empty array, no canonical marker          → `[<prepend>, ...caller]`
  *
  * The "contains canonical marker" branch (#96, post-#97 invariant) skips the
  * prepend when the caller's `system` array already carries a block matching
  * `isCanonicalCcMarker`. This preserves the prefix hash caller cache_control
  * breakpoints rely on (issue #55). Non-canonical callers still get the
  * unconditional prepend (PR #41 entitlement fix preserved).
+ *
+ * `<prepend>` is `CC_BLOCK` (carries a cache_control anchor) by default, but
+ * `pickPrependBlock` swaps in `CC_BLOCK_NO_CACHE` when the caller already holds
+ * the full 4 cache_control breakpoints — otherwise the +1 anchor would exceed
+ * Anthropic's ceiling and 400 the whole request (#136). Either way the caller's
+ * own body is never mutated; only the prepended block differs.
  *
  * Returns a new object — never mutates the input. The transparent branch uses
  * a shallow-copied `system` array (`[...sys]`) so downstream code can't leak
@@ -198,7 +320,7 @@ export const isValidSystemBlock = (block: unknown): boolean => {
 export const ensureSystem = (b: Record<string, unknown>): Record<string, unknown> => {
   const sys = b.system;
   if (typeof sys === 'string' && sys.length > 0) {
-    return { ...b, system: [CC_BLOCK, { type: 'text', text: sys }] };
+    return { ...b, system: [pickPrependBlock(b), { type: 'text', text: sys }] };
   }
   if (Array.isArray(sys) && sys.length > 0) {
     // #57: validate caller-supplied blocks BEFORE the canonical-marker check.
@@ -220,9 +342,11 @@ export const ensureSystem = (b: Record<string, unknown>): Record<string, unknown
     if (sys.some(isCanonicalCcMarker)) {
       return { ...b, system: [...sys] };
     }
-    return { ...b, system: [CC_BLOCK, ...sys] };
+    // #136: prepend block is cap-aware — CC_BLOCK_NO_CACHE when the caller is
+    // already at the 4-breakpoint ceiling, else the anchor-bearing CC_BLOCK.
+    return { ...b, system: [pickPrependBlock(b), ...sys] };
   }
-  return { ...b, system: [CC_BLOCK] };
+  return { ...b, system: [pickPrependBlock(b)] };
 };
 
 /**
