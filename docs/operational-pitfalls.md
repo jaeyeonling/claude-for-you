@@ -442,6 +442,33 @@ PR #41 (2026-06-04 머지, unconditional prepend 도입) 전후 동일 user/mode
 
 ---
 
+## 20. cc-maxed 서드파티 에이전트(hermes-agent)는 CC_BLOCK prepend로 cache_control 4-block 초과 → 400 (#136)
+
+**증상**: 특정 사용자가 NousResearch/hermes-agent로 멀티턴 대화를 돌리면 **첫 1~2턴은 200, 3턴째부터 갑자기 400**이 반복된다. messages_log의 `error_message` = `A maximum of 4 blocks with cache_control may be provided. Found 5`. status=400, streaming=false, user_agent=`Anthropic/Python x.x.x` (SDK 직접 호출이라 canonical CC marker 없음).
+
+**원인**: Anthropic은 `cache_control` breakpoint를 system+tools+messages 합산 **최대 4개**만 허용한다. hermes-agent `agent/prompt_caching.py`는 `system_and_3` 하드코딩 레이아웃으로 **정확히 4개**(system 1 + 마지막 3 non-system 메시지의 content block)를 박는다 — 직접 호출 시 정당. 우리 프록시 `ensureSystem`이 CC_BLOCK(cache_control 포함)을 prepend하면 4+1=5 → 400. 대화 초반엔 non-system 메시지가 3개 미만이라 hermes cc<4 → 프록시 +1 해도 ≤4 → 통과. 3턴째 non-system이 3개에 도달하면 4+1=5로 넘어간다. **서드파티 에이전트라 caller 수정 불가 — 프록시가 떠안아야 하는 구조적 결함이며, hermes-agent를 쓰는 모든 사용자에게 영향.**
+
+**진단 (prod)**: 400 행 request_body에서 cache_control 위치를 명시적으로 센다.
+```sql
+-- 주의: 명시적 위치(system / messages content / tools)만 센다.
+-- $.**.cache_control 재귀 jsonpath는 중복 집계한다(실제 5를 10으로) — 절대 쓰지 말 것.
+-- 이 쿼리만 복붙해도 오진 안 나도록 경고를 쿼리 안에 둔다 (코드의 countCacheControlBlocks와 동일 원칙).
+select
+  jsonb_array_length(coalesce(jsonb_path_query_array(request_body,'$.system[*].cache_control'),'[]'::jsonb)) sys,
+  jsonb_array_length(coalesce(jsonb_path_query_array(request_body,'$.messages[*].content[*].cache_control'),'[]'::jsonb)) msg_content,
+  jsonb_array_length(coalesce(jsonb_path_query_array(request_body,'$.tools[*].cache_control'),'[]'::jsonb)) tools
+from messages_log where status=400 and error_message like '%maximum of 4 blocks%' order by ts desc limit 5;
+```
+hermes 분포: sys=2(프록시 1 + hermes 1), msg_content=3, tools=0.
+
+**해결 (#136, 2-b 전략)**: `ensureSystem`이 cap-aware해졌다. prepend 전 `countCacheControlBlocks`(system+tools+messages content, 명시적 위치)로 caller cc를 세고, +1이 4를 넘으면 `CC_BLOCK_NO_CACHE`(cache_control 없는 변형)를 prepend → 프록시가 breakpoint를 0개 더하므로 caller의 4개가 그대로 통과. caller body 미수정. cc<4 일반 트래픽은 기존 `CC_BLOCK`(anchor 유지, #55). 상세: cc-wire-reference §2a. (여기서 **2-b** = "프록시가 cache_control 없는 블록을 prepend"하는 채택안. **2-a** = 폐기된 대안: "caller의 system-level cache_control 1개를 흡수하고 프록시 anchor는 유지" — 구현하지 않음. 두 안의 설계 비교는 이슈 #136 논의 참조. **주의**: 이 `2-a`/`2-b`는 #136의 설계 안 식별자일 뿐, cc-wire-reference 문서의 `§2a` 섹션과는 무관하다.)
+
+**캐시 영향 (실측 필요)**: at-cap caller(hermes)는 자체 4개 배치가 최적이므로 anchor 제거가 캐시를 깨지 않을 것으로 기대한다. 단 #55의 95→0% 데이터는 cc를 적게(~2개) 쓰는 CC 클라이언트 기반이라 hermes(cc=4)엔 그대로 적용되지 않는다 — **배포 후 messages_log에서 hermes(user_name 또는 UA `Anthropic/Python`) status=200 행의 `cache_read_tokens / (cache_read + cache_creation + input)` 비율을 baseline(~44.8%)과 실측 비교**해야 최종 확정된다. 미달 시 2-a(caller system cc 흡수)로 재검토.
+
+> **검증 수행 시점/주체**: 이 비율 비교는 `scripts/deploy.sh` 배포 직후 **운영자**가 수행한다 — production smoke(브리/hermes 트래픽이 멀티턴 ≥10 요청 쌓인 뒤)와 함께. 즉 이 PR 머지 시점에는 "미확정"이며, 단위 테스트는 cc≤4와 messages cc 보존만 보장한다(비율 보존은 실측 전용). deploy 단계 전까지 acceptance 4번은 open 상태로 둔다.
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```
@@ -460,6 +487,11 @@ Discord에 [billing] ALARM 알람 옴
   │       본인 로컬에서 같은 OAuth 쓰는 중이면 #11
   │     → 재로그인 + 갱신 절차
   │
-  └─ HTTP 500 + code=template_apply_failed|pacing_await_failed?  → proxy 내부 실패 (#19)
-        → upstream 호출 발생 안 함. snapshot/pacing 설정 점검
+  ├─ HTTP 500 + code=template_apply_failed|pacing_await_failed?  → proxy 내부 실패 (#19)
+  │     → upstream 호출 발생 안 함. snapshot/pacing 설정 점검
+  │
+  └─ HTTP 400 + "maximum of 4 blocks with cache_control"?  → cc-maxed caller (#20)
+        → hermes-agent 등 cache_control 4개를 꽉 쓰는 서드파티 에이전트.
+          #136 cap-aware prepend가 배포됐는지 먼저 확인 (미배포면 deploy).
+          배포됐는데도 나면 #20의 SQL로 cc 분포 진단 (재귀 jsonpath 금지)
 ```

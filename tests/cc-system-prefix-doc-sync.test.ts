@@ -58,4 +58,18 @@ describe('CC_SYSTEM_PREFIX docs sync', () => {
     expect(docText).toContain('text === CC_SYSTEM_PREFIX');
     expect(docText).toContain("cache_control.type === 'ephemeral'");
   });
+
+  // #136 made the prepend cap-aware: a caller already at the 4-breakpoint
+  // ceiling gets CC_BLOCK_NO_CACHE (no cache_control) instead of CC_BLOCK, so
+  // the proxy's +1 doesn't overflow Anthropic's limit. Same doc-drift class the
+  // #55 ephemeral-anchor guard above defends. Two SEPARATE tests so a failure
+  // names exactly which substring drifted (a single combined assert would only
+  // report "expected true, received false" — the 2026-06-02 misdiagnosis class).
+  test('cc-wire-reference.md §2a names the CC_BLOCK_NO_CACHE constant (#136)', () => {
+    expect(docText).toContain('CC_BLOCK_NO_CACHE');
+  });
+
+  test('cc-wire-reference.md §2a documents the 4-breakpoint ceiling phrase (#136)', () => {
+    expect(docText).toContain('4-breakpoint ceiling');
+  });
 });

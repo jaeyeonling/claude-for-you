@@ -3,6 +3,9 @@ import {
   ensureSystem,
   CC_SYSTEM_PREFIX,
   CC_BLOCK,
+  CC_BLOCK_NO_CACHE,
+  countCacheControlBlocks,
+  MAX_CACHE_CONTROL_BLOCKS,
   isCanonicalCcMarker,
   isValidSystemBlock,
 } from '../src/proxy/messages.js';
@@ -433,6 +436,222 @@ describe('ensureSystem', () => {
       expect(isValidSystemBlock({ type: 'image' })).toBe(false);
       expect(isValidSystemBlock({ type: 'text' })).toBe(false);
       expect(isValidSystemBlock({ type: 'text', text: 42 })).toBe(false);
+    });
+  });
+
+  // cache_control 4-block cap (#136). Anthropic rejects requests carrying more
+  // than 4 cache_control breakpoints (system + tools + messages combined). The
+  // proxy's unconditional CC_BLOCK prepend pushed cc-maxed callers (e.g.
+  // NousResearch/hermes-agent's `system_and_3` layout: 1 system + 3 message
+  // content breakpoints) from 4 to 5 → HTTP 400. `ensureSystem` now prepends the
+  // cache_control-free CC_BLOCK_NO_CACHE for such callers, contributing 0
+  // breakpoints and leaving the caller's body untouched. Sub-cap callers keep
+  // the anchor-bearing CC_BLOCK (#55 unaffected).
+  describe('— cache_control 4-block cap (#136)', () => {
+    const ccBlock = () => ({
+      type: 'text' as const,
+      text: 'body',
+      cache_control: { type: 'ephemeral' as const },
+    });
+    const msgWithCc = (role: string) => ({
+      role,
+      content: [{ type: 'text', text: 'x', cache_control: { type: 'ephemeral' as const } }],
+    });
+
+    describe('countCacheControlBlocks', () => {
+      test('hermes-shape (system 1 + 3 message content blocks) = 4', () => {
+        const body = {
+          system: [ccBlock()],
+          messages: [msgWithCc('user'), msgWithCc('assistant'), msgWithCc('user')],
+        };
+        expect(countCacheControlBlocks(body)).toBe(4);
+      });
+
+      test('body with no cache_control = 0', () => {
+        const body = {
+          system: [{ type: 'text', text: 's' }],
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }],
+          tools: [{ name: 't' }],
+        };
+        expect(countCacheControlBlocks(body)).toBe(0);
+      });
+
+      test('counts tools[].cache_control (Anthropic counts tools in the limit)', () => {
+        const body = {
+          tools: [{ name: 'a' }, { name: 'b', cache_control: { type: 'ephemeral' } }],
+        };
+        expect(countCacheControlBlocks(body)).toBe(1);
+      });
+
+      test('string message content contributes 0, no throw', () => {
+        const body = {
+          system: [ccBlock()],
+          messages: [{ role: 'user', content: 'plain string content' }],
+        };
+        expect(countCacheControlBlocks(body)).toBe(1); // system block only
+      });
+
+      test('malformed shapes are skipped without throwing', () => {
+        expect(countCacheControlBlocks({ system: 'str', messages: 42, tools: null })).toBe(0);
+        // null/non-object messages skipped; content array still counted
+        expect(
+          countCacheControlBlocks({ messages: [null, 7, { content: [null, ccBlock()] }] }),
+        ).toBe(1);
+      });
+
+      test('message-level cache_control is NOT counted (not Anthropic breakpoint surface)', () => {
+        const body = {
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }], cache_control: { type: 'ephemeral' } }],
+        };
+        expect(countCacheControlBlocks(body)).toBe(0);
+      });
+    });
+
+    describe('CC_BLOCK_NO_CACHE constant', () => {
+      test('same identity text as CC_BLOCK, but no cache_control key', () => {
+        expect(CC_BLOCK_NO_CACHE.text).toBe(CC_SYSTEM_PREFIX);
+        expect('cache_control' in CC_BLOCK_NO_CACHE).toBe(false);
+      });
+
+      test('not a canonical CC marker → never trips #96 passthrough', () => {
+        expect(isCanonicalCcMarker(CC_BLOCK_NO_CACHE)).toBe(false);
+      });
+
+      test('frozen singleton', () => {
+        expect(Object.isFrozen(CC_BLOCK_NO_CACHE)).toBe(true);
+      });
+    });
+
+    describe('ensureSystem cap-aware prepend', () => {
+      test('hermes-shape → CC_BLOCK_NO_CACHE prepended, caller body untouched, total stays 4', () => {
+        const sysBlock = ccBlock();
+        const messages = [msgWithCc('user'), msgWithCc('assistant'), msgWithCc('user')];
+        const out = ensureSystem({ system: [sysBlock], messages });
+        const sys = out.system as Array<Record<string, unknown>>;
+        expect(sys).toHaveLength(2);
+        expect(sys[0]).toBe(CC_BLOCK_NO_CACHE); // no-cache variant prepended
+        expect('cache_control' in sys[0]).toBe(false);
+        expect(sys[1]).toBe(sysBlock); // caller's system block by reference, cc preserved
+        expect(out.messages).toBe(messages); // messages never touched
+        expect(countCacheControlBlocks(out)).toBe(4); // 0 (prepend) + 1 (sys) + 3 (content)
+      });
+
+      test('3rd-turn boundary: n=3 keeps CC_BLOCK, n=4 switches to NO_CACHE', () => {
+        const out3 = ensureSystem({
+          system: [ccBlock()],
+          messages: [msgWithCc('user'), msgWithCc('assistant')], // system 1 + content 2 = 3
+        });
+        expect((out3.system as unknown[])[0]).toBe(CC_BLOCK); // 3+1=4 ≤ 4
+
+        const out4 = ensureSystem({
+          system: [ccBlock()],
+          messages: [msgWithCc('user'), msgWithCc('assistant'), msgWithCc('user')], // = 4
+        });
+        expect((out4.system as unknown[])[0]).toBe(CC_BLOCK_NO_CACHE); // 4+1=5 > 4
+      });
+
+      test('regression: sub-cap caller still gets cache_control-bearing CC_BLOCK', () => {
+        const out = ensureSystem({ system: 'persona', messages: [msgWithCc('user')] });
+        const sys = out.system as unknown[];
+        expect(sys[0]).toBe(CC_BLOCK); // n=1, +1=2 ≤ 4
+        expect(isCanonicalCcMarker(sys[0])).toBe(true);
+      });
+
+      test('string system + 4 message-content breakpoints → NO_CACHE, caller text preserved', () => {
+        const messages = [msgWithCc('u'), msgWithCc('a'), msgWithCc('b'), msgWithCc('c')];
+        const out = ensureSystem({ system: 'persona', messages });
+        const sys = out.system as Array<Record<string, unknown>>;
+        expect(sys).toHaveLength(2);
+        expect(sys[0]).toBe(CC_BLOCK_NO_CACHE);
+        expect(sys[1]).toEqual({ type: 'text', text: 'persona' });
+        expect(out.messages).toBe(messages);
+      });
+
+      test('array system without cc + 4 tools breakpoints → NO_CACHE', () => {
+        const out = ensureSystem({
+          system: [{ type: 'text', text: 's' }], // valid (#57), no cc
+          tools: [
+            { name: 'a', cache_control: { type: 'ephemeral' } },
+            { name: 'b', cache_control: { type: 'ephemeral' } },
+            { name: 'c', cache_control: { type: 'ephemeral' } },
+            { name: 'd', cache_control: { type: 'ephemeral' } },
+          ],
+        });
+        expect((out.system as unknown[])[0]).toBe(CC_BLOCK_NO_CACHE); // n=4, +1=5 > 4
+      });
+
+      test('does not mutate caller body on the cap path', () => {
+        const input = {
+          system: [ccBlock()],
+          messages: [msgWithCc('user'), msgWithCc('assistant'), msgWithCc('user')],
+        };
+        const before = JSON.stringify(input);
+        ensureSystem(input);
+        expect(JSON.stringify(input)).toBe(before);
+      });
+
+      test('NO_CACHE prepend is the same singleton across calls', () => {
+        const mk = () => ({
+          system: [ccBlock()],
+          messages: [msgWithCc('u'), msgWithCc('a'), msgWithCc('u2')],
+        });
+        const a = ensureSystem(mk()).system as unknown[];
+        const b = ensureSystem(mk()).system as unknown[];
+        expect(a[0]).toBe(b[0]);
+        expect(a[0]).toBe(CC_BLOCK_NO_CACHE);
+      });
+
+      test('#96 canonical passthrough unaffected even at cap (caller owns identity)', () => {
+        // A caller shipping a canonical marker takes the passthrough path and is
+        // never prepended — so cap-aware logic does not apply. cc=5 here is the
+        // caller's own responsibility (out of #136 scope): the proxy adds nothing,
+        // so the 5 breakpoints pass through and Anthropic 400s. We assert the
+        // proxy does not touch the count, NOT that it "fixes" the overflow.
+        const canonical = { type: 'text' as const, text: CC_SYSTEM_PREFIX, cache_control: { type: 'ephemeral' as const } };
+        const messages = [msgWithCc('u'), msgWithCc('a'), msgWithCc('b')];
+        const body = { system: [canonical, ccBlock()], messages }; // 2 + 3 = 5
+        expect(countCacheControlBlocks(body)).toBe(5);
+        const out = ensureSystem(body);
+        const sys = out.system as unknown[];
+        expect(sys).toHaveLength(2); // passthrough, no prepend
+        expect(sys[0]).toBe(canonical);
+        expect(countCacheControlBlocks(out)).toBe(5); // proxy added 0 — unchanged
+      });
+
+      test('caller already over ceiling (n=5) on prepend path → NO_CACHE, proxy adds 0 (scope-out, pitfall #20)', () => {
+        // A caller sending 5 breakpoints already violates Anthropic's limit
+        // BEFORE the proxy touches anything. The cap-aware path must not make it
+        // worse: CC_BLOCK_NO_CACHE adds 0, so 5 stays 5 (Anthropic still 400s).
+        // This is the documented out-of-#136-scope case (caller contract
+        // violation). The proxy's only guarantee is "never worsen".
+        const messages = [msgWithCc('u'), msgWithCc('a'), msgWithCc('b')]; // 3
+        const body = { system: [ccBlock(), ccBlock()], messages }; // 2 + 3 = 5
+        expect(countCacheControlBlocks(body)).toBe(5);
+        const out = ensureSystem(body);
+        const sys = out.system as unknown[];
+        expect(sys[0]).toBe(CC_BLOCK_NO_CACHE); // 0 breakpoints added
+        expect(countCacheControlBlocks(out)).toBe(5); // unchanged — not worsened
+      });
+
+      test('boundary tracks MAX_CACHE_CONTROL_BLOCKS, not a hardcoded literal', () => {
+        // Ground-truth the boundary against the exported constant so a future
+        // ceiling change can't leave this test asserting a stale number.
+        expect(MAX_CACHE_CONTROL_BLOCKS).toBe(4);
+        // n = MAX - 1 → +1 == MAX → still CC_BLOCK
+        const atMinusOne = {
+          system: [ccBlock()],
+          messages: Array.from({ length: MAX_CACHE_CONTROL_BLOCKS - 2 }, (_, i) => msgWithCc(`u${i}`)),
+        };
+        expect(countCacheControlBlocks(atMinusOne)).toBe(MAX_CACHE_CONTROL_BLOCKS - 1);
+        expect((ensureSystem(atMinusOne).system as unknown[])[0]).toBe(CC_BLOCK);
+        // n = MAX → +1 > MAX → CC_BLOCK_NO_CACHE
+        const atCap = {
+          system: [ccBlock()],
+          messages: Array.from({ length: MAX_CACHE_CONTROL_BLOCKS - 1 }, (_, i) => msgWithCc(`u${i}`)),
+        };
+        expect(countCacheControlBlocks(atCap)).toBe(MAX_CACHE_CONTROL_BLOCKS);
+        expect((ensureSystem(atCap).system as unknown[])[0]).toBe(CC_BLOCK_NO_CACHE);
+      });
     });
   });
 });
