@@ -510,6 +510,15 @@ const clientIpHint = (c: Context): string | null => {
   return c.req.header('x-real-ip') ?? null;
 };
 
+/**
+ * True for 2xx/3xx responses. Used to gate observation sinks (#86, #87): an
+ * upstream error response — especially a 429 surfaced verbatim since #44 —
+ * carries no trustworthy quota or service_tier signal, so we must not ingest
+ * its headers/body into durable guard or canary state. `< 400` is deliberately
+ * broader than a 429-only check: no 4xx/5xx response is a reliable signal.
+ */
+const isSuccessStatus = (status: number): boolean => status < 400;
+
 export const createMessagesHandler =
   (deps: MessagesDeps) =>
   async (c: Context): Promise<Response> => {
@@ -612,10 +621,16 @@ export const createMessagesHandler =
     );
 
     // Update subscription headroom both globally and per-member.
-    deps.globalGuard.observeHeaders(upstream.response.headers);
+    // #86: only observe the global guard's headroom from a success response.
+    // A transient 429 surfaced verbatim (post-#44) would otherwise be read as
+    // a durable quota signal and could block subsequent requests proxy-wide.
+    if (isSuccessStatus(upstream.response.status)) {
+      deps.globalGuard.observeHeaders(upstream.response.headers);
+    }
     deps.pool.observeResponse(upstream.servedBy, upstream.response.headers);
     // Learn organization-id from the response — improves future account_uuid
-    // fingerprint injection. Per-request, low overhead.
+    // fingerprint injection. Per-request, low overhead. Org-id is present and
+    // valid even on 429s, so this stays ungated.
     deps.accountLearner.observe(upstream.response.headers);
 
     const contentType = upstream.response.headers.get('content-type') ?? '';
@@ -670,7 +685,15 @@ export const createMessagesHandler =
         void deps.usageErrorSink(msg);
       });
       deps.billingMonitor.observe(usage.serviceTier, upstream.response.headers);
-      if (decision.useCandidate && usage.serviceTier && usage.serviceTier !== 'standard') {
+      // #87: only a 2xx response carries a meaningful service_tier. A 429
+      // error body (or any non-2xx) must not auto-trip the canary — that would
+      // silently abort a stable→candidate rollout on a transient rate limit.
+      if (
+        isSuccessStatus(upstream.response.status) &&
+        decision.useCandidate &&
+        usage.serviceTier &&
+        usage.serviceTier !== 'standard'
+      ) {
         deps.canary.trip(`candidate served service_tier=${usage.serviceTier}`);
       }
     };
