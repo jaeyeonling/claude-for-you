@@ -124,6 +124,9 @@ const fireRequest = (app: Hono): Promise<Response> =>
     body: REQUEST_BODY,
   });
 
+// service_tier 'usage-based' is non-standard (BillingMonitor treats anything
+// !== 'standard' as an alarm-worthy tier), so this body exercises both the
+// billing alarm and the canary trip when it lands on a 2xx.
 const usageBody = { type: 'message', usage: { service_tier: 'usage-based', input_tokens: 1, output_tokens: 1 } };
 
 const upstreamResponse = (
@@ -135,6 +138,10 @@ const upstreamResponse = (
     headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
   });
 
+// callUpstream (src/proxy/upstream.ts) reaches the network via the global
+// fetch, so replacing globalThis.fetch intercepts the upstream round-trip
+// without a real request. If upstream.ts ever switches to an injected/imported
+// fetch, this mock stops intercepting — update both together.
 let originalFetch: typeof globalThis.fetch;
 const mockUpstream = (response: Response): void => {
   globalThis.fetch = (async () => response) as typeof globalThis.fetch;
