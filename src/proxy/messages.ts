@@ -510,6 +510,19 @@ const clientIpHint = (c: Context): string | null => {
   return c.req.header('x-real-ip') ?? null;
 };
 
+/**
+ * True for non-error (2xx/3xx) responses. Gates every observation sink that
+ * could misread an error response as a durable signal (#86, #87, and the
+ * check-R1 adversary/maintainer follow-up): an upstream error — especially a
+ * 429 surfaced verbatim since #44 — carries no trustworthy quota, routing, or
+ * service_tier signal, so its headers/body must not feed the global guard,
+ * per-member routing, the billing alarm, or the canary. `< 400` (not 429-only)
+ * because no 4xx/5xx response is a reliable signal; 3xx never reaches this
+ * layer (fetch follows redirects) but is harmless to admit. Accounting
+ * (tracker.record) and org-id learning stay ungated — both are valid on errors.
+ */
+const isNonErrorStatus = (status: number): boolean => status < 400;
+
 export const createMessagesHandler =
   (deps: MessagesDeps) =>
   async (c: Context): Promise<Response> => {
@@ -611,11 +624,20 @@ export const createMessagesHandler =
       { ...deps, template: chosenTemplate },
     );
 
-    // Update subscription headroom both globally and per-member.
-    deps.globalGuard.observeHeaders(upstream.response.headers);
-    deps.pool.observeResponse(upstream.servedBy, upstream.response.headers);
+    // Update subscription headroom both globally and per-member. Gate both on
+    // a non-error status: a transient 429 surfaced verbatim (post-#44) carries
+    // no trustworthy headroom signal. #86 covered globalGuard; check-R1
+    // (adversary) flagged pool.observeResponse as the same vector — an induced
+    // 429 must not skew per-member routing either. (Today the *-remaining
+    // header is never emitted, so this is defensive; the dead-routing fix is a
+    // separate account-pool follow-up.)
+    if (isNonErrorStatus(upstream.response.status)) {
+      deps.globalGuard.observeHeaders(upstream.response.headers);
+      deps.pool.observeResponse(upstream.servedBy, upstream.response.headers);
+    }
     // Learn organization-id from the response — improves future account_uuid
-    // fingerprint injection. Per-request, low overhead.
+    // fingerprint injection. Per-request, low overhead. Org-id is present and
+    // valid even on 429s, so this stays ungated.
     deps.accountLearner.observe(upstream.response.headers);
 
     const contentType = upstream.response.headers.get('content-type') ?? '';
@@ -665,11 +687,19 @@ export const createMessagesHandler =
     // Common usage-observation callback. Fire-and-forget DB write (we don't
     // block the response on accounting), then alarm sinks.
     const onUsage = (usage: import('../usage/sniff.js').SniffedUsage): void => {
+      // Accounting reflects actual token consumption regardless of status, so
+      // tracker.record stays ungated. The two SIGNAL consumers below
+      // (billing alarm, canary) must ignore a non-2xx service_tier — #87 plus
+      // check-R1 (adversary/maintainer) flagged gating only canary.trip while
+      // leaving billingMonitor.observe open as an inconsistent half-fix.
       void deps.tracker.record(user.name, usage).catch((err: unknown) => {
         const msg = `[usage] record failed: ${err instanceof Error ? err.message : String(err)}`;
         void deps.usageErrorSink(msg);
       });
+      if (!isNonErrorStatus(upstream.response.status)) return;
       deps.billingMonitor.observe(usage.serviceTier, upstream.response.headers);
+      // A 429 error body (or any non-2xx) must not auto-trip the canary — that
+      // would silently abort a stable→candidate rollout on a transient limit.
       if (decision.useCandidate && usage.serviceTier && usage.serviceTier !== 'standard') {
         deps.canary.trip(`candidate served service_tier=${usage.serviceTier}`);
       }
