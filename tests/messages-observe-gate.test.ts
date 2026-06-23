@@ -6,7 +6,7 @@ import { createCanaryController, type CanaryController } from '../src/canary.js'
 import { createPacingEnforcer } from '../src/pacing.js';
 import { createDriftAnalyzer } from '../src/usage/drift-analyzer.js';
 import { createAccountLearner } from '../src/account-learner.js';
-import { createBillingMonitor } from '../src/usage/billing-monitor.js';
+import { createBillingMonitor, type BillingMonitor } from '../src/usage/billing-monitor.js';
 import { createNullMessageLogStore } from '../src/usage/messages-log.js';
 import type { AccountPool } from '../src/auth/account-pool.js';
 import type { ClaudeTemplate } from '../src/template/types.js';
@@ -14,14 +14,18 @@ import type { UsageTracker } from '../src/usage/per-user.js';
 import type { AuthenticatedUser } from '../src/auth/api-key.js';
 
 /**
- * End-to-end gate tests for #86 (globalGuard.observeHeaders) and #87
- * (canary.trip). The production handler has no test harness, so we mount it
- * in a bare Hono app with a fake auth middleware and a mocked upstream fetch.
+ * End-to-end gate tests for the "ignore error-response signals" narrowing
+ * (#86 globalGuard.observeHeaders, #87 canary.trip, plus the check-R1
+ * follow-up that extended the gate to pool.observeResponse and
+ * billingMonitor.observe). The production handler has no test harness, so we
+ * mount it in a bare Hono app with a fake auth middleware and a mocked
+ * upstream fetch.
  *
- * Real `createGlobalGuard` / `createCanaryController` are used so we can assert
- * directly on their post-request state (snapshot), rather than spying on call
- * sites — the gate is correct iff a 429 leaves that state untouched while a
- * 2xx drives it.
+ * Real GlobalGuard / CanaryController / BillingMonitor are used (plus a pool
+ * call counter) so we can assert directly on post-request state: the gate is
+ * correct iff an error response leaves all four signal sinks untouched while a
+ * 2xx still drives them. Accounting (tracker.record) and org-id learning stay
+ * ungated by design and are not asserted here.
  */
 
 const TEST_USER: AuthenticatedUser = { name: 'alice', role: 'user' };
@@ -38,13 +42,19 @@ const stubTemplate = (): ClaudeTemplate =>
     }),
   });
 
-const stubPool = (): AccountPool =>
+interface PoolCalls {
+  observeResponse: number;
+}
+
+const stubPool = (calls: PoolCalls): AccountPool =>
   Object.freeze({
     getAccessToken: async () => ({ name: 'primary', token: 'tok-1' }),
     getAccessTokenExcluding: async () => null,
     forceRefresh: async () => 'tok-2',
     replaceOAuth: async () => {},
-    observeResponse: () => {},
+    observeResponse: () => {
+      calls.observeResponse += 1;
+    },
     snapshot: () => ({ members: [], sessionAssignments: {} }),
   });
 
@@ -58,6 +68,8 @@ interface Harness {
   readonly app: Hono;
   readonly guard: GlobalGuard;
   readonly canary: CanaryController;
+  readonly billingMonitor: BillingMonitor;
+  readonly poolCalls: PoolCalls;
 }
 
 const buildHarness = (params: {
@@ -71,14 +83,16 @@ const buildHarness = (params: {
     percent: params.canaryPercent,
   });
   const drift = createDriftAnalyzer();
+  const billingMonitor = createBillingMonitor({ sink: async () => {}, drift });
+  const poolCalls: PoolCalls = { observeResponse: 0 };
   const deps: MessagesDeps = {
-    pool: stubPool(),
+    pool: stubPool(poolCalls),
     template: stubTemplate(),
     candidateTemplate,
     canary,
     tracker: stubTracker(),
     globalGuard: guard,
-    billingMonitor: createBillingMonitor({ sink: async () => {}, drift }),
+    billingMonitor,
     accountLearner: createAccountLearner('test-uuid'),
     pacing: createPacingEnforcer({ minGapMs: 0 }),
     drift,
@@ -94,7 +108,7 @@ const buildHarness = (params: {
   });
   app.post('/v1/messages', createMessagesHandler(deps));
 
-  return { app, guard, canary };
+  return { app, guard, canary, billingMonitor, poolCalls };
 };
 
 const REQUEST_BODY = JSON.stringify({
@@ -109,6 +123,8 @@ const fireRequest = (app: Hono): Promise<Response> =>
     headers: { 'content-type': 'application/json' },
     body: REQUEST_BODY,
   });
+
+const usageBody = { type: 'message', usage: { service_tier: 'usage-based', input_tokens: 1, output_tokens: 1 } };
 
 const upstreamResponse = (
   status: number,
@@ -131,64 +147,70 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-describe('observe gate — #86 globalGuard.observeHeaders', () => {
-  test('a 429 carrying unified-remaining does NOT poison the subscription guard', async () => {
+describe('observe gate — #86 globalGuard + pool routing', () => {
+  test('a 429 carrying unified-remaining does NOT poison the guard or pool routing', async () => {
     // Arrange: threshold enabled; upstream returns a 429 advertising 0 headroom.
-    const { app, guard } = buildHarness({ thresholdTokens: 1000, canaryPercent: 0 });
+    const { app, guard, poolCalls } = buildHarness({ thresholdTokens: 1000, canaryPercent: 0 });
     mockUpstream(upstreamResponse(429, { headers: { 'anthropic-ratelimit-unified-remaining': '0' } }));
 
     // Act
     await fireRequest(app);
 
-    // Assert: observeHeaders was gated out → guard never saw the misleading 0.
+    // Assert: both observeHeaders and pool.observeResponse were gated out.
     expect(guard.snapshot().remaining).toBeNull();
     expect(() => guard.assertSubscriptionHealthy()).not.toThrow();
+    expect(poolCalls.observeResponse).toBe(0);
   });
 
-  test('a 2xx carrying unified-remaining STILL drives the subscription guard', async () => {
+  test('a 400 is gated the same as a 429 (predicate is < 400, not 429-only)', async () => {
+    const { app, guard, poolCalls } = buildHarness({ thresholdTokens: 1000, canaryPercent: 0 });
+    mockUpstream(upstreamResponse(400, { headers: { 'anthropic-ratelimit-unified-remaining': '0' } }));
+
+    await fireRequest(app);
+
+    expect(guard.snapshot().remaining).toBeNull();
+    expect(poolCalls.observeResponse).toBe(0);
+  });
+
+  test('a 2xx carrying unified-remaining STILL drives the guard and pool routing', async () => {
     // Arrange: same threshold, but the low-headroom signal arrives on a 200.
-    const { app, guard } = buildHarness({ thresholdTokens: 1000, canaryPercent: 0 });
+    const { app, guard, poolCalls } = buildHarness({ thresholdTokens: 1000, canaryPercent: 0 });
     mockUpstream(upstreamResponse(200, { headers: { 'anthropic-ratelimit-unified-remaining': '0' } }));
 
     // Act
     await fireRequest(app);
 
-    // Assert: observeHeaders ran → guard would block the next request.
+    // Assert: observeHeaders + pool.observeResponse ran on the success response.
     expect(guard.snapshot().remaining).toBe(0);
     expect(() => guard.assertSubscriptionHealthy()).toThrow();
+    expect(poolCalls.observeResponse).toBe(1);
   });
 });
 
-describe('observe gate — #87 canary.trip', () => {
-  test('a 429 carrying a non-standard service_tier does NOT trip the canary', async () => {
+describe('observe gate — #87 canary + billing alarm', () => {
+  test('a 429 with a non-standard service_tier trips NOTHING (canary + billing alarm)', async () => {
     // Arrange: canary forced on (percent=100); upstream 429 with a usage block.
-    const { app, canary } = buildHarness({ thresholdTokens: 0, canaryPercent: 100 });
-    mockUpstream(
-      upstreamResponse(429, {
-        body: { type: 'message', usage: { service_tier: 'usage-based', input_tokens: 1, output_tokens: 1 } },
-      }),
-    );
+    const { app, canary, billingMonitor } = buildHarness({ thresholdTokens: 0, canaryPercent: 100 });
+    mockUpstream(upstreamResponse(429, { body: usageBody }));
 
     // Act
     await fireRequest(app);
 
-    // Assert: gate blocked the trip — a transient 429 can't abort the rollout.
+    // Assert: neither the canary nor the billing alarm reacts to an error body.
     expect(canary.snapshot().tripped).toBe(false);
+    expect(billingMonitor.snapshot().nonStandardCount).toBe(0);
   });
 
-  test('a 2xx carrying a non-standard service_tier STILL trips the canary', async () => {
+  test('a 2xx with a non-standard service_tier STILL trips the canary and billing alarm', async () => {
     // Arrange: same canary, but the non-standard tier arrives on a 200.
-    const { app, canary } = buildHarness({ thresholdTokens: 0, canaryPercent: 100 });
-    mockUpstream(
-      upstreamResponse(200, {
-        body: { type: 'message', usage: { service_tier: 'usage-based', input_tokens: 1, output_tokens: 1 } },
-      }),
-    );
+    const { app, canary, billingMonitor } = buildHarness({ thresholdTokens: 0, canaryPercent: 100 });
+    mockUpstream(upstreamResponse(200, { body: usageBody }));
 
     // Act
     await fireRequest(app);
 
-    // Assert: a real candidate-side non-standard tier still trips.
+    // Assert: a real candidate-side non-standard tier still trips + alarms.
     expect(canary.snapshot().tripped).toBe(true);
+    expect(billingMonitor.snapshot().nonStandardCount).toBe(1);
   });
 });
