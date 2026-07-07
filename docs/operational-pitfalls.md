@@ -469,6 +469,26 @@ hermes 분포: sys=2(프록시 1 + hermes 1), msg_content=3, tools=0.
 
 ---
 
+## 21. 새 모델 계열(Fable 등)이 프록시 사용자 `/model`에 안 뜬다 — gateway discovery `/v1/models`
+
+**증상**: Anthropic이 새 모델 **계열**(예: Fable, `claude-fable-5`)을 출시했는데, 프록시 경유 Claude Code 사용자의 `/model` picker에는 안 뜬다. 같은 CLI 버전(예: 2.1.201)의 **직결 API 사용자는 자동으로 본다**. 반면 sonnet/opus 같은 기존 계열의 **버전 업**(4-7 → 4-8)은 프록시 사용자에게도 예전부터 자동 인식됐다.
+
+**원인**: Claude Code는 endpoint에 따라 picker를 다르게 채운다.
+- **first-party**(`api.anthropic.com`): CLI 번들 **built-in 목록** → 새 계열은 CLI 업그레이드로 등장.
+- **커스텀 `ANTHROPIC_BASE_URL` 게이트웨이**(우리): built-in으로 새 계열을 띄우지 **않고**, **gateway model discovery**로 학습한다 — 시작 시 `GET /v1/models?limit=1000`(3초 타임아웃, 리다이렉트=실패). 출처: 공식 Claude Code gateway-protocol 문서.
+
+sonnet/opus **버전 업**이 자동이었던 건 그게 클라이언트의 **코어 alias**(`sonnet`/`opus`/`haiku`)라서, alias가 요청 시점에 upstream에서 concrete 버전으로 resolve되기 때문 — discovery도 프록시도 무관. **새 계열**은 discovery로만 뜬다. 우리 프록시가 `/v1/models`를 404시키면 그 유일한 경로가 막힌다.
+
+**해결**: 프록시가 `GET /v1/models`를 서빙한다 (`src/proxy/models.ts` → `src/app.ts` 등록). pool OAuth 토큰으로 upstream `/v1/models`에 **프록시-스루**(401 시 forceRefresh 1회 재시도, 응답 verbatim 전달, 폴백·필터 없음). 이걸로 Fable과 앞으로의 모든 새 계열이 자동 노출된다.
+
+**클라이언트 조건 (필수, 프록시만으론 부족)**: 각 사용자가 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`을 설정해야 한다 (기본 OFF, CC ≥ 2.1.129). 캐시는 `~/.claude/cache/gateway-models.json`.
+
+**주의 (allowlist)**: `/v1/models`는 upstream 전체 목록을 **필터 없이** 반환한다. 그래서 `allowedModels`가 어떤 계열을 제외한 restricted 키는 그 모델을 picker에서 보긴 하지만 send 시 `403 model_not_allowed`(`src/proxy/messages.ts`)가 난다. 실제 사용하려면 해당 키에 계열(예: `claude-fable-*`)을 추가해야 한다.
+
+**운영 검증**: `curl -sS "$ANTHROPIC_BASE_URL/v1/models?limit=1000" -H "x-api-key: <프록시-키>" | jq '.data[].id'` → `claude-fable-5` 포함 확인. 실패 시 upstream이 구독 OAuth 토큰으로 `/v1/models`를 안 받는지(헤더 부족 등) 점검 — 폴백이 없으므로 이 경우 picker는 조용히 빈 채로 남는다.
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```

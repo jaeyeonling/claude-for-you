@@ -38,6 +38,7 @@ import { createPacingEnforcer } from './pacing.js';
 import { createConcurrencyLimiter, createPerKeyConcurrencyLimiter } from './proxy/concurrency.js';
 import { createIpRateLimiter } from './proxy/rate-limit.js';
 import { createMessagesHandler } from './proxy/messages.js';
+import { createModelsHandler } from './proxy/models.js';
 import {
   createExtractedTemplate,
   recommendedMinGapMs,
@@ -209,15 +210,24 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
         ),
     }),
   );
-  // Per-IP token-bucket: a leaked key from a single source IP can no longer
-  // pin the whole concurrency pool. perSecond=0 disables the middleware.
-  app.use('/v1/messages', createIpRateLimiter({ perSecond: config.perIpRateLimitPerSecond }));
-  // Per-key cap first so a single key gets a clear "your slot quota" error
-  // before colliding with the shared global pool. Both are wired; one key
-  // can't monopolize and the proxy still has a hard global ceiling.
-  app.use('/v1/messages', createPerKeyConcurrencyLimiter(config.maxConcurrentRequestsPerKey));
-  // Global concurrency cap across all clients.
-  app.use('/v1/messages', createConcurrencyLimiter(config.maxConcurrentRequests));
+  // Fan-out defenses, shared across BOTH inference paths — /v1/messages and the
+  // /v1/models discovery GET. Same middleware instances → one per-IP token
+  // bucket, one per-key ceiling, and one global ceiling spanning both routes, so
+  // a leaked key (or a client stuck in a restart loop hammering discovery)
+  // can't burn the shared OAuth account's request-rate headroom out from under
+  // legitimate /v1/messages traffic. /v1/models used to skip these entirely
+  // (persona R1 adversary/watchdog HIGH). Order within the trio: per-IP →
+  // per-key (clear "your slot quota" error before the shared pool) → global.
+  // perSecond=0 / max<=0 disables each. bodyLimit stays messages-only above
+  // (a GET /v1/models has no body).
+  const ipRateLimiter = createIpRateLimiter({ perSecond: config.perIpRateLimitPerSecond });
+  const perKeyLimiter = createPerKeyConcurrencyLimiter(config.maxConcurrentRequestsPerKey);
+  const globalLimiter = createConcurrencyLimiter(config.maxConcurrentRequests);
+  for (const inferencePath of ['/v1/messages', '/v1/models'] as const) {
+    app.use(inferencePath, ipRateLimiter);
+    app.use(inferencePath, perKeyLimiter);
+    app.use(inferencePath, globalLimiter);
+  }
   app.post(
     '/v1/messages',
     createMessagesHandler({
@@ -236,6 +246,16 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
       messageLogErrorSink,
     }),
   );
+
+  // Gateway model discovery. Claude Code (with
+  // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1) queries this at startup to
+  // learn which model families this gateway serves — the only way a new family
+  // like Fable reaches a proxied client's /model picker. It runs under /v1/*
+  // auth + capture (capture self-gates to /v1/messages, so it's a no-op here)
+  // and the shared fan-out defenses (per-IP / per-key / global caps registered
+  // above for both inference paths); only bodyLimit stays messages-only (a GET
+  // has no body). See docs/operational-pitfalls.md #21.
+  app.get('/v1/models', createModelsHandler({ pool }));
 
   const testResultStore = createTestResultStore();
   // Loopback fetcher resolves to `app.fetch` at call time — keeps the

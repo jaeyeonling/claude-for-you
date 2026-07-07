@@ -217,6 +217,16 @@ History note: between 2026-05-28 and 2026-05-29 the proxy was incorrectly stripp
 
 If you DO see a `429 "Usage credits are required for long context requests"` now, that's a real upstream message — the subscription account's long-context usage budget is exhausted. Wait for the rate-limit reset window or contact your operator.
 
+### A brand-new model (e.g. Fable) is missing from `/model`
+
+When Anthropic ships a **new model family**, direct-API users see it after upgrading Claude Code, but through a proxy it only appears if your client asks the gateway for the model list. Set this in your environment (same place you export other Claude Code vars), then restart `claude`:
+
+```bash
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+```
+
+It's off by default and needs Claude Code ≥ 2.1.129. New *versions* of models you already see (e.g. opus/sonnet moving up a version) do **not** need this — only brand-new families like Fable. If it's still missing after setting the flag and restarting, ask your operator to confirm the proxy serves `/v1/models`.
+
 ### `Please run /login` on every restart
 
 If you're on the Recommended setup, this usually means `~/.claude/settings.json` got reverted or has a typo. Run `cat ~/.claude/settings.json` and confirm `apiKeyHelper` is an absolute path and `env.ANTHROPIC_BASE_URL` is set.
