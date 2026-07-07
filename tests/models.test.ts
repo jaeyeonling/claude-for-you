@@ -190,6 +190,24 @@ describe('createModelsHandler — upstream pass-through', () => {
     expect(calls.forceRefresh).toBe(0);
   });
 
+  test('token fetch failure (getAccessToken rejects) → 502 upstream_failed, no upstream call', async () => {
+    // A network-level throw during the OAuth refresh inside getAccessToken must
+    // map to the 502 upstream contract, not escape as a generic 500.
+    installFetch([]); // upstream must never be reached
+    const { pool } = stubPool({
+      getAccessToken: async () => {
+        throw new Error('oauth refresh network failure');
+      },
+    });
+
+    const res = await mount(pool).request('/v1/models');
+
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: { type: string } };
+    expect(body.error.type).toBe('upstream_failed');
+    expect(fetchCallCount).toBe(0);
+  });
+
   test('content-type defaults to application/json when upstream omits it', async () => {
     installFetch([new Response(JSON.stringify(FABLE_LIST), { status: 200 })]);
     const { pool } = stubPool();

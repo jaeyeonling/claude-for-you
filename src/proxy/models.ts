@@ -74,8 +74,19 @@ export const createModelsHandler =
 
     // Session-less GET (discovery runs at startup, not inside a session).
     // getAccessToken picks the highest-headroom pool member and refreshes a
-    // stale token before returning.
-    const { name, token } = await deps.pool.getAccessToken(undefined);
+    // stale token before returning. Normalize a failure here to the same 502
+    // upstream contract as the branches below — a network-level throw during
+    // the OAuth token refresh (oauth.ts fetches the token endpoint unguarded)
+    // would otherwise escape as a generic 500.
+    let name: string;
+    let token: string;
+    try {
+      ({ name, token } = await deps.pool.getAccessToken(undefined));
+    } catch (err: unknown) {
+      throw UpstreamFailed(
+        redact(`models token fetch failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    }
 
     // Single fetch with transport-error → 502 normalization. Closes over
     // upstreamUrl; `attempt` distinguishes the first call from the 401 retry in
