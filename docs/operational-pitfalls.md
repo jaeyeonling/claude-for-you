@@ -515,3 +515,39 @@ Discord에 [billing] ALARM 알람 옴
           #136 cap-aware prepend가 배포됐는지 먼저 확인 (미배포면 deploy).
           배포됐는데도 나면 #20의 SQL로 cc 분포 진단 (재귀 jsonpath 금지)
 ```
+
+## 복구 런북 — 배포 롤백 · OAuth 토큰 복구
+
+배포(`scripts/deploy.sh`)는 EC2를 `origin/main`으로 `git reset --hard` → docker build → `docker compose up -d --force-recreate`. **복구 명령은 전부 로컬 터미널/브라우저에서 AWS SSM으로 실행되며 프록시를 경유하지 않는다** — 프록시가 죽어도, (프록시를 base-url로 쓰는) 배포 세션이 죽어도 복구 가능. **배포 전 이 런북을 프록시와 무관한 별도 터미널에 띄워둘 것.**
+
+> ⚠️ **IP 바인딩 (토큰 사망 원인)**: 프록시가 발급/사용하는 OAuth access token을 **다른 IP에서 사용하면 무효화**된다(#11 single-holder rotation과 같은 계열의 anti-abuse). 그래서 **로컬에서 프록시 토큰을 뽑아 `api.anthropic.com`을 직접 치는 검증은 금지** — 토큰이 죽어 운영 프록시까지 내려간다. upstream 검증은 (a) 배포 후 프록시를 통해서(프록시 자기 IP), 또는 (b) EC2 SSM 세션 안(같은 IP)에서만.
+
+### R1 — 코드가 `/v1/messages`를 깸 (토큰은 정상)
+
+증상: `scripts/smoke.sh` 실패 / 502지만 `[oauth] refresh failed`는 아님. → 코드 롤백 (SSM 직통, IP 무관):
+
+```bash
+GOOD=<마지막-정상-SHA>            # 배포 전 `git rev-parse origin/main`으로 미리 확보
+git push origin "$GOOD:main" --force && bash scripts/deploy.sh   # ~2~5분
+git push origin "$GOOD:deploy" --force                            # deploy 마커 동기화
+```
+
+`git revert -m 1 <머지커밋> && git push origin main && bash scripts/deploy.sh`도 동일 효과(히스토리 보존). 되돌리는 실제 레버는 `origin/main` + `deploy.sh`뿐 — deploy 브랜치를 reset하지 말 것.
+
+### R2 — OAuth 토큰/RT 자체가 죽음
+
+증상: 전 요청 502 `invalid_grant` / `[oauth] refresh failed` (코드 롤백해도 안 고쳐짐). 원인: IP 불일치, `claude /logout`(#1), 무관 revoke(#10), single-holder 충돌(#11), RT TTL 만료.
+
+1. **fresh RT 발급**: 원래 `ANTHROPIC_OAUTH_REFRESH_TOKEN`을 뽑던 방식으로 재인증 → 새 `sk-ant-ort01-…`.
+2. **프록시에 주입** (둘 중 하나):
+   - **(권장·빠름, `/admin` 살아있을 때)** 브라우저 `http://<프록시-호스트>/admin` 접속(프록시 키로 인증) → oauth replace 폼에 새 refreshToken 붙여넣고 제출. 재시작 불필요. RT는 **저장만** 되고 실제 refresh는 EC2가 자기 IP로 수행 → IP 안전. curl: `POST /admin/oauth/replace`(`memberName=default`, `src/admin/oauth.ts`).
+   - **(폴백, `/admin`도 죽음)** SSM env 갱신 후 재배포:
+     ```bash
+     aws ssm get-parameter --name /claude-for-you/env --with-decryption --query Parameter.Value --output text > /tmp/env
+     # /tmp/env: ANTHROPIC_OAUTH_REFRESH_TOKEN 새 값으로. ANTHROPIC_OAUTH_ACCESS_TOKEN/_EXPIRES_AT 줄은 삭제(즉시 refresh 유도)
+     aws ssm put-parameter --name /claude-for-you/env --type SecureString --overwrite --value "$(cat /tmp/env)"
+     shred -u /tmp/env && bash scripts/deploy.sh
+     ```
+3. **새 RT는 프록시에만 둘 것.** 로컬 claude에서 같은 OAuth를 계속 쓰면 single-holder 충돌로 재사망(#11). 로컬은 OAuth 없는 클라이언트로 유지(user-guide 권장 설정). 토큰 무효화 상세는 #1/#10/#11.
+
+**왜 IP 안전한가**: R1/R2-SSM은 `aws ssm`·`git` → AWS API 직통(프록시 경유 X). R2-admin은 RT를 저장만 하고 refresh(=토큰 사용)는 EC2가 자기 IP로 수행. 로컬에서 upstream을 프록시 토큰으로 직접 치지 않는 한 토큰은 안 죽는다.
