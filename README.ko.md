@@ -184,8 +184,29 @@ curl -sS -u admin:<운영자-키> -X PATCH \
 > 프록시 URL: `http://<프록시-호스트>`
 > API 키: `<위 응답의 값>`
 > 설정 방법: [`docs/user-guide.ko.md`](./docs/user-guide.ko.md) — **권장 설정**을 따른다.
+> 새 모델 계열(예: Fable)을 `/model`에서 보려면 환경변수 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`도 설정한다 (아래 [모델 디스커버리](#모델-디스커버리-새-모델-계열) 참고).
 
 사용자 가이드에는 권장 설정(Keychain + `apiKeyHelper`), 배너로 인증 모드 확인, 401/429 흔한 함정, 그리고 본인 Claude Max를 같은 머신에서 병행 사용하는 사용자를 위한 대안 설정이 정리되어 있음. 영문판: [`docs/user-guide.md`](./docs/user-guide.md).
+
+## 모델 디스커버리 (새 모델 계열)
+
+새 모델 **계열**(예: Fable, `claude-fable-5`)이 출시되면, 프록시를 통해 접속하는 사용자의 Claude Code `/model` 목록에는 **다음 두 조건이 모두** 충족될 때만 나타난다:
+
+1. **프록시가 `GET /v1/models`를 서빙한다.** 서빙한다 — 이 엔드포인트는 pool의 OAuth 토큰으로 Anthropic upstream 모델 목록을 프록시-스루하므로, 새 계열이 프록시 변경 없이 자동으로 노출된다.
+2. **클라이언트가 gateway 디스커버리를 켠다.** 각 사용자가 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`을 설정해야 한다 (기본 OFF, Claude Code ≥ 2.1.129 필요). 이 플래그가 없으면 Claude Code는 `/v1/models`를 호출하지 않아 새 계열이 목록에 안 뜬다 — 프록시 사용자가 직결 API 동료는 이미 보는 모델을 못 보는 전형적 원인이다.
+
+같은 계열 내의 **버전** 상승(예: `claude-opus-4-7` → `claude-opus-4-8`)은 플래그도 엔드포인트도 필요 없다: Claude Code의 내장 `opus`/`sonnet`/`haiku` alias를 타고, 실제 concrete 버전은 요청 시점에 upstream에서 resolve되기 때문이다.
+
+운영자 측 검증:
+
+```bash
+curl -sS "$ANTHROPIC_BASE_URL/v1/models?limit=1000" -H "x-api-key: <프록시-키>" | jq '.data[].id'
+# 목록에 claude-fable-5가 있어야 한다
+```
+
+상세 트러블슈팅: [`docs/operational-pitfalls.md` §21](./docs/operational-pitfalls.md).
+
+> **Restricted 키.** `GET /v1/models`는 upstream 전체 목록을 필터 없이 반환하므로, `allowedModels`가 어떤 계열을 제외한 사용자는 그 모델을 picker에서 *보긴* 하지만 send 시 `403 model_not_allowed`가 난다. 해당 키에 계열(예: `claude-fable-*`)을 추가해야 실제로 쓸 수 있다.
 
 ## Admin 엔드포인트
 

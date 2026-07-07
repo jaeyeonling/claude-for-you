@@ -184,8 +184,29 @@ Message you send them:
 > Proxy URL: `http://<proxy-host>`
 > API key: `<value from the response above>`
 > Setup: [`docs/user-guide.md`](./docs/user-guide.md) — follow the **Recommended setup**.
+> To see brand-new model families (e.g. Fable) in `/model`, also set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in your environment (see [Model discovery](#model-discovery-new-model-families) below).
 
 The user guide covers the Recommended setup (Keychain + `apiKeyHelper`), the `API Usage Billing` banner check, the usual 401 / 429 traps, and an Alternative for users who keep their personal Claude Max on the same machine. Korean translation at [`docs/user-guide.ko.md`](./docs/user-guide.ko.md).
+
+## Model discovery (new model families)
+
+When a brand-new model **family** ships (e.g. Fable, `claude-fable-5`), it appears in a proxied user's Claude Code `/model` picker only when **both** of these hold:
+
+1. **The proxy serves `GET /v1/models`.** It does — the endpoint forwards to Anthropic's upstream model list using the pool's OAuth token, so new families surface automatically with no proxy change.
+2. **The client opts into gateway discovery.** Each user sets `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` (off by default; needs Claude Code ≥ 2.1.129). Without it, Claude Code never calls `/v1/models` and new families stay hidden — this is the usual reason a proxied user doesn't see a model their direct-API colleagues already see.
+
+Model *version* bumps within an existing family (e.g. `claude-opus-4-7` → `claude-opus-4-8`) need neither flag nor endpoint: they ride Claude Code's built-in `opus` / `sonnet` / `haiku` aliases, which resolve to the current concrete version upstream at request time.
+
+Verify from the operator side:
+
+```bash
+curl -sS "$ANTHROPIC_BASE_URL/v1/models?limit=1000" -H "x-api-key: <proxy-key>" | jq '.data[].id'
+# should list claude-fable-5 among the models
+```
+
+Full troubleshooting: [`docs/operational-pitfalls.md` §21](./docs/operational-pitfalls.md).
+
+> **Restricted keys.** `GET /v1/models` returns the full upstream list unfiltered, so a user whose `allowedModels` excludes a family will *see* it in the picker but hit `403 model_not_allowed` at send time. Add the family (e.g. `claude-fable-*`) to their key to make it usable.
 
 ## Admin endpoints
 
@@ -235,6 +256,7 @@ src/
 ├── server.ts             # Entry point + wiring
 ├── proxy/
 │   ├── messages.ts       # /v1/messages handler (hot path)
+│   ├── models.ts         # /v1/models handler (gateway model discovery)
 │   ├── upstream.ts       # Outbound to api.anthropic.com
 │   └── concurrency.ts    # Application-layer rate limiter
 ├── auth/

@@ -215,6 +215,16 @@ claude -p "reply with the single word: pong" --model claude-sonnet-4-6
 
 지금 `429 "Usage credits are required for long context requests"`가 보인다면, 그건 진짜 upstream 메시지 — 구독 계정의 long-context 사용량 예산이 소진된 것. rate-limit 리셋 윈도우 대기하거나 운영자에게 문의.
 
+### 새 모델(예: Fable)이 `/model`에 안 보임
+
+Anthropic이 **새 모델 계열**을 출시하면, 직결 API 사용자는 Claude Code 업그레이드 후 보이지만, 프록시 경유에서는 클라이언트가 게이트웨이에 모델 목록을 요청해야만 나타난다. 환경변수에 아래를 설정(다른 Claude Code 변수 export하는 곳과 동일)하고 `claude`를 재시작한다:
+
+```bash
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+```
+
+기본 OFF이며 Claude Code ≥ 2.1.129 필요. 이미 보이는 모델의 **버전** 상승(예: opus/sonnet 버전 업)은 이 플래그가 필요 없다 — Fable 같은 완전히 새 계열에만 해당. 플래그 설정 + 재시작 후에도 안 보이면, 운영자에게 프록시가 `/v1/models`를 서빙하는지 확인 요청.
+
 ### 재시작할 때마다 `Please run /login`
 
 권장 설정 중이라면 `~/.claude/settings.json`이 reverted되었거나 typo가 있을 가능성. `cat ~/.claude/settings.json`으로 `apiKeyHelper`가 절대 경로이고 `env.ANTHROPIC_BASE_URL`이 설정되어 있는지 확인.

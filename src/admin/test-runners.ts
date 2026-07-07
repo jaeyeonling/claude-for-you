@@ -379,10 +379,16 @@ export const createKeyInvokeHandler =
 const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com/v1/messages';
 
 /**
- * Single source of truth for direct (no-template) calls to api.anthropic.com.
- * Used by BOTH `upstream-direct` and `verify-entitlement` so a future change
- * to the beta flag, version header, or timeout lands in one place — preventing
- * the kind of silent drift that #41 fixed at the proxy layer.
+ * Direct (no-template) POST helper for admin's two Anthropic probes —
+ * `upstream-direct` and `verify-entitlement` — so a future change to the beta
+ * flag, version header, or timeout lands in one place for BOTH of them
+ * (preventing the kind of silent drift that #41 fixed at the proxy layer).
+ *
+ * NOT the single source of truth for the whole codebase: `proxy/models.ts`
+ * (the GET /v1/models discovery handler) deliberately keeps its own copy of the
+ * same OAuth header set + 20s timeout — see that file's `buildHeaders` comment
+ * for why it isn't shared. If you change the OAuth beta flag / version header
+ * here, mirror it there (and vice-versa).
  */
 const callAnthropicDirect = async (
   token: string,

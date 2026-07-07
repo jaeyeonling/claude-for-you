@@ -469,6 +469,26 @@ hermes 분포: sys=2(프록시 1 + hermes 1), msg_content=3, tools=0.
 
 ---
 
+## 21. 새 모델 계열(Fable 등)이 프록시 사용자 `/model`에 안 뜬다 — gateway discovery `/v1/models`
+
+**증상**: Anthropic이 새 모델 **계열**(예: Fable, `claude-fable-5`)을 출시했는데, 프록시 경유 Claude Code 사용자의 `/model` picker에는 안 뜬다. 같은 CLI 버전(예: 2.1.201)의 **직결 API 사용자는 자동으로 본다**. 반면 sonnet/opus 같은 기존 계열의 **버전 업**(4-7 → 4-8)은 프록시 사용자에게도 예전부터 자동 인식됐다.
+
+**원인**: Claude Code는 endpoint에 따라 picker를 다르게 채운다.
+- **first-party**(`api.anthropic.com`): CLI 번들 **built-in 목록** → 새 계열은 CLI 업그레이드로 등장.
+- **커스텀 `ANTHROPIC_BASE_URL` 게이트웨이**(우리): built-in으로 새 계열을 띄우지 **않고**, **gateway model discovery**로 학습한다 — 시작 시 `GET /v1/models?limit=1000`(3초 타임아웃, 리다이렉트=실패). 출처: 공식 Claude Code gateway-protocol 문서.
+
+sonnet/opus **버전 업**이 자동이었던 건 그게 클라이언트의 **코어 alias**(`sonnet`/`opus`/`haiku`)라서, alias가 요청 시점에 upstream에서 concrete 버전으로 resolve되기 때문 — discovery도 프록시도 무관. **새 계열**은 discovery로만 뜬다. 우리 프록시가 `/v1/models`를 404시키면 그 유일한 경로가 막힌다.
+
+**해결**: 프록시가 `GET /v1/models`를 서빙한다 (`src/proxy/models.ts` → `src/app.ts` 등록). pool OAuth 토큰으로 upstream `/v1/models`에 **프록시-스루**(401 시 forceRefresh 1회 재시도, 응답 verbatim 전달, 폴백·필터 없음). 이걸로 Fable과 앞으로의 모든 새 계열이 자동 노출된다.
+
+**클라이언트 조건 (필수, 프록시만으론 부족)**: 각 사용자가 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`을 설정해야 한다 (기본 OFF, CC ≥ 2.1.129). 캐시는 `~/.claude/cache/gateway-models.json`.
+
+**주의 (allowlist)**: `/v1/models`는 upstream 전체 목록을 **필터 없이** 반환한다. 그래서 `allowedModels`가 어떤 계열을 제외한 restricted 키는 그 모델을 picker에서 보긴 하지만 send 시 `403 model_not_allowed`(`src/proxy/messages.ts`)가 난다. 실제 사용하려면 해당 키에 계열(예: `claude-fable-*`)을 추가해야 한다.
+
+**운영 검증**: `curl -sS "$ANTHROPIC_BASE_URL/v1/models?limit=1000" -H "x-api-key: <프록시-키>" | jq '.data[].id'` → `claude-fable-5` 포함 확인. 실패 시 upstream이 구독 OAuth 토큰으로 `/v1/models`를 안 받는지(헤더 부족 등) 점검. 프록시엔 폴백이 없지만 **CC는 자체 built-in 목록으로 폴백**하므로, picker가 비는 게 아니라 **기존 계열(sonnet/opus/haiku)만 보이고 새 계열(fable)만 안 뜬 상태**로 조용히 degrade한다(=고치기 전과 동일).
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```
@@ -495,3 +515,39 @@ Discord에 [billing] ALARM 알람 옴
           #136 cap-aware prepend가 배포됐는지 먼저 확인 (미배포면 deploy).
           배포됐는데도 나면 #20의 SQL로 cc 분포 진단 (재귀 jsonpath 금지)
 ```
+
+## 복구 런북 — 배포 롤백 · OAuth 토큰 복구
+
+배포(`scripts/deploy.sh`)는 EC2를 `origin/main`으로 `git reset --hard` → docker build → `docker compose up -d --force-recreate`. **복구 명령은 전부 로컬 터미널/브라우저에서 AWS SSM으로 실행되며 프록시를 경유하지 않는다** — 프록시가 죽어도, (프록시를 base-url로 쓰는) 배포 세션이 죽어도 복구 가능. **배포 전 이 런북을 프록시와 무관한 별도 터미널에 띄워둘 것.**
+
+> ⚠️ **IP 바인딩 (토큰 사망 원인)**: 프록시가 발급/사용하는 OAuth access token을 **다른 IP에서 사용하면 무효화**된다(#11 single-holder rotation과 같은 계열의 anti-abuse). 그래서 **로컬에서 프록시 토큰을 뽑아 `api.anthropic.com`을 직접 치는 검증은 금지** — 토큰이 죽어 운영 프록시까지 내려간다. upstream 검증은 (a) 배포 후 프록시를 통해서(프록시 자기 IP), 또는 (b) EC2 SSM 세션 안(같은 IP)에서만.
+
+### R1 — 코드가 `/v1/messages`를 깸 (토큰은 정상)
+
+증상: `scripts/smoke.sh` 실패 / 502지만 `[oauth] refresh failed`는 아님. → 코드 롤백 (SSM 직통, IP 무관):
+
+```bash
+GOOD=<마지막-정상-SHA>            # 배포 전 `git rev-parse origin/main`으로 미리 확보
+git push origin "$GOOD:main" --force && bash scripts/deploy.sh   # ~2~5분
+git push origin "$GOOD:deploy" --force                            # deploy 마커 동기화
+```
+
+`git revert -m 1 <머지커밋> && git push origin main && bash scripts/deploy.sh`도 동일 효과(히스토리 보존). 되돌리는 실제 레버는 `origin/main` + `deploy.sh`뿐 — deploy 브랜치를 reset하지 말 것.
+
+### R2 — OAuth 토큰/RT 자체가 죽음
+
+증상: 전 요청 502 `invalid_grant` / `[oauth] refresh failed` (코드 롤백해도 안 고쳐짐). 원인: IP 불일치, `claude /logout`(#1), 무관 revoke(#10), single-holder 충돌(#11), RT TTL 만료.
+
+1. **fresh RT 발급**: 원래 `ANTHROPIC_OAUTH_REFRESH_TOKEN`을 뽑던 방식으로 재인증 → 새 `sk-ant-ort01-…`.
+2. **프록시에 주입** (둘 중 하나):
+   - **(권장·빠름, `/admin` 살아있을 때)** 브라우저 `http://<프록시-호스트>/admin` 접속(프록시 키로 인증) → oauth replace 폼에 새 refreshToken 붙여넣고 제출. 재시작 불필요. RT는 **저장만** 되고 실제 refresh는 EC2가 자기 IP로 수행 → IP 안전. curl: `POST /admin/oauth/replace`(`memberName=default`, `src/admin/oauth.ts`).
+   - **(폴백, `/admin`도 죽음)** SSM env 갱신 후 재배포:
+     ```bash
+     aws ssm get-parameter --name /claude-for-you/env --with-decryption --query Parameter.Value --output text > /tmp/env
+     # /tmp/env: ANTHROPIC_OAUTH_REFRESH_TOKEN 새 값으로. ANTHROPIC_OAUTH_ACCESS_TOKEN/_EXPIRES_AT 줄은 삭제(즉시 refresh 유도)
+     aws ssm put-parameter --name /claude-for-you/env --type SecureString --overwrite --value "$(cat /tmp/env)"
+     shred -u /tmp/env && bash scripts/deploy.sh
+     ```
+3. **새 RT는 프록시에만 둘 것.** 로컬 claude에서 같은 OAuth를 계속 쓰면 single-holder 충돌로 재사망(#11). 로컬은 OAuth 없는 클라이언트로 유지(user-guide 권장 설정). 토큰 무효화 상세는 #1/#10/#11.
+
+**왜 IP 안전한가**: R1/R2-SSM은 `aws ssm`·`git` → AWS API 직통(프록시 경유 X). R2-admin은 RT를 저장만 하고 refresh(=토큰 사용)는 EC2가 자기 IP로 수행. 로컬에서 upstream을 프록시 토큰으로 직접 치지 않는 한 토큰은 안 죽는다.
