@@ -39,6 +39,7 @@ import { createConcurrencyLimiter, createPerKeyConcurrencyLimiter } from './prox
 import { createIpRateLimiter } from './proxy/rate-limit.js';
 import { createMessagesHandler } from './proxy/messages.js';
 import { createModelsHandler } from './proxy/models.js';
+import { createOutcomeObserver } from './proxy/observe-outcome.js';
 import {
   createExtractedTemplate,
   recommendedMinGapMs,
@@ -197,6 +198,16 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     throw ConfigError('api-key store is empty — set API_KEYS env or populate API_KEYS_PATH file');
   }
 
+  // Outermost on /v1/messages, registered BEFORE the api-key middleware so it
+  // observes EVERY failure that dies before the handler's own log write —
+  // including the api-key 401 and the concurrency/quota 429 — and records a
+  // one-row pre-handler outcome to messages_log (#144). Hono orders middleware
+  // by registration, not path specificity, so this must precede the /v1/*
+  // api-key `use` below for the 401 case to be captured.
+  app.use(
+    '/v1/messages',
+    createOutcomeObserver({ store: messageLogStore, errorSink: messageLogErrorSink }),
+  );
   app.use('/v1/*', createApiKeyMiddleware(apiKeyStore));
   app.use('/v1/*', createCaptureMiddleware(captureCfg));
   app.use(

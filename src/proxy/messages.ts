@@ -501,7 +501,9 @@ export interface MessagesDeps {
  * trusted forwarder this is meaningless, but we capture whatever the client
  * sent for log forensics — it's a hint, not a security control.
  */
-const clientIpHint = (c: Context): string | null => {
+// Exported so the pre-handler outcome observer (observe-outcome.ts, #144)
+// derives client IP identically — one definition of "who is the caller".
+export const clientIpHint = (c: Context): string | null => {
   const xff = c.req.header('x-forwarded-for');
   if (xff) {
     const first = xff.split(',')[0]?.trim();
@@ -623,6 +625,13 @@ export const createMessagesHandler =
       sessionId,
       { ...deps, template: chosenTemplate },
     );
+    // From here the handler OWNS the log write (writeLog fires on both the
+    // streaming tap.done and the non-streaming path below). Flag it so the
+    // outermost outcome observer (#144) does not double-record. Set before the
+    // stream/non-stream split so it's true by the time the handler returns a
+    // Response and the observer's `await next()` resolves. Every row written
+    // past this point reached upstream → source 'upstream'.
+    c.set('logged', true);
 
     // Update subscription headroom both globally and per-member. Gate both on
     // a non-error status: a transient 429 surfaced verbatim (post-#44) carries
@@ -677,6 +686,9 @@ export const createMessagesHandler =
           errorMessage,
           servedBy: upstream.servedBy,
           bypassMetadata,
+          // Reached Anthropic and got a response (2xx or its own 4xx/5xx) —
+          // this is the upstream's outcome, not the proxy's (#144).
+          source: 'upstream',
         })
         .catch((err: unknown) => {
           const msg = `[messages-log] write failed: ${err instanceof Error ? err.message : String(err)}`;

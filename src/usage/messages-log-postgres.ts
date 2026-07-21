@@ -4,6 +4,7 @@ import type {
   MessageLogRecord,
   MessageLogStore,
   MessageLogSummary,
+  MessageSource,
   ResponseBody,
 } from "./messages-log.js";
 import { extractPreview, sanitizeJsonValue } from "./messages-log.js";
@@ -51,6 +52,7 @@ interface DetailRow {
   readonly error_message: string | null;
   readonly served_by: string | null;
   readonly bypass_metadata: unknown;
+  readonly source: MessageSource | null;
 }
 
 interface SummaryRow {
@@ -65,6 +67,7 @@ interface SummaryRow {
   readonly output_tokens: number;
   readonly service_tier: string | null;
   readonly preview: string;
+  readonly source: MessageSource | null;
 }
 
 const toSummary = (r: SummaryRow): MessageLogSummary => ({
@@ -79,6 +82,7 @@ const toSummary = (r: SummaryRow): MessageLogSummary => ({
   outputTokens: r.output_tokens,
   serviceTier: r.service_tier,
   preview: r.preview,
+  source: r.source ?? null,
 });
 
 const toRecord = (r: DetailRow): MessageLogRecord => ({
@@ -102,6 +106,7 @@ const toRecord = (r: DetailRow): MessageLogRecord => ({
   errorMessage: r.error_message,
   servedBy: r.served_by,
   bypassMetadata: r.bypass_metadata,
+  source: r.source ?? null,
 });
 
 export const createPostgresMessageLogStore = async (
@@ -143,6 +148,8 @@ export const createPostgresMessageLogStore = async (
   // converging on the same shape; PG ignores the no-op on fresh tables.
   await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS served_by TEXT`;
   await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS bypass_metadata JSONB`;
+  // Failure-origin classifier (issue #144). NULL on rows written before it.
+  await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS source TEXT`;
   // Indexes: ts-desc is the dashboard's default scan; (user, ts) accelerates
   // per-user views; status-partial gates the "errors only" filter without
   // bloating the index for the 2xx majority.
@@ -192,7 +199,7 @@ export const createPostgresMessageLogStore = async (
           input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
           service_tier, stop_reason, client_ip, user_agent,
           request_body, response_body, preview, error_message,
-          served_by, bypass_metadata
+          served_by, bypass_metadata, source
         ) VALUES (
           ${entry.id}, ${entry.ts}, ${entry.userName}, ${entry.model}, ${entry.status},
           ${entry.streaming}, ${entry.durationMs},
@@ -204,7 +211,8 @@ export const createPostgresMessageLogStore = async (
           ${preview},
           ${entry.errorMessage},
           ${entry.servedBy},
-          ${safeBypassMetadata === null ? null : sql.json(safeBypassMetadata as never)}
+          ${safeBypassMetadata === null ? null : sql.json(safeBypassMetadata as never)},
+          ${entry.source ?? null}
         )
       `;
     },
@@ -216,6 +224,7 @@ export const createPostgresMessageLogStore = async (
       const userName = filters.userName ?? null;
       const model = filters.model ?? null;
       const statusClass = filters.statusClass ?? "all";
+      const source = filters.source ?? null;
       const search =
         filters.search && filters.search.length > 0 ? filters.search : null;
       const before = filters.before ?? null;
@@ -223,13 +232,14 @@ export const createPostgresMessageLogStore = async (
 
       const rows = await sql<SummaryRow[]>`
         SELECT id, ts, user_name, model, status, streaming, duration_ms,
-               input_tokens, output_tokens, service_tier, preview
+               input_tokens, output_tokens, service_tier, preview, source
           FROM messages_log
          WHERE (${userName}::text IS NULL OR user_name = ${userName})
            AND (${model}::text IS NULL OR model = ${model})
            AND (${statusClass}::text = 'all'
                 OR (${statusClass}::text = 'success' AND status >= 200 AND status < 300)
                 OR (${statusClass}::text = 'error'   AND status >= 400))
+           AND (${source}::text IS NULL OR source = ${source})
            AND (${search}::text IS NULL OR preview ILIKE '%' || ${search}::text || '%')
            AND (${before}::timestamptz IS NULL OR ts < ${before})
          ORDER BY ts DESC
@@ -244,7 +254,7 @@ export const createPostgresMessageLogStore = async (
                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                service_tier, stop_reason, client_ip, user_agent,
                request_body, response_body, error_message,
-               served_by, bypass_metadata
+               served_by, bypass_metadata, source
           FROM messages_log
          WHERE id = ${id}
       `;
