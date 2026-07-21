@@ -198,18 +198,22 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     throw ConfigError('api-key store is empty — set API_KEYS env or populate API_KEYS_PATH file');
   }
 
-  // Outermost on /v1/messages, registered BEFORE the api-key middleware so it
-  // observes EVERY failure that dies before the handler's own log write —
-  // including the api-key 401 and the concurrency/quota 429 — and records a
-  // one-row pre-handler outcome to messages_log (#144). Hono orders middleware
-  // by registration, not path specificity, so this must precede the /v1/*
-  // api-key `use` below for the 401 case to be captured.
+  app.use('/v1/*', createApiKeyMiddleware(apiKeyStore));
+  app.use('/v1/*', createCaptureMiddleware(captureCfg));
+  // Records a one-row pre-handler outcome to messages_log for any /v1/messages
+  // failure that dies before the handler's own log write — the proxy's own
+  // concurrency/quota 429, a 413/400, a template/pacing 500, a failed upstream
+  // fetch 502 (#144). Registered AFTER api-key (not outermost) on purpose: an
+  // outermost observer would write a DB row for every unauthenticated 401,
+  // letting a keyless client flood messages_log (write-amplification DoS —
+  // check-R1 adversary/chaos). After api-key, only authenticated requests reach
+  // it, so writes are bounded by valid-key holders; the observer additionally
+  // self-throttles writes globally. Sits before bodyLimit + the limiters below
+  // so it still observes their 413/429 rejections.
   app.use(
     '/v1/messages',
     createOutcomeObserver({ store: messageLogStore, errorSink: messageLogErrorSink }),
   );
-  app.use('/v1/*', createApiKeyMiddleware(apiKeyStore));
-  app.use('/v1/*', createCaptureMiddleware(captureCfg));
   app.use(
     '/v1/messages',
     bodyLimit({

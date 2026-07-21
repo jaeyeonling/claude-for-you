@@ -53,6 +53,20 @@ export type MessageSource = "client" | "proxy" | "upstream";
 export const classifyProxySource = (status: number): "proxy" | "client" =>
   status === 429 || status >= 500 ? "proxy" : "client";
 
+/**
+ * Pull `error.message` from an already-parsed Anthropic/DomainError-shaped
+ * error envelope (`{ error: { message } }`). Returns null when the shape does
+ * not match. Shared by the non-streaming handler path and the outcome observer
+ * so the envelope contract has a single definition.
+ */
+export const extractErrorMessage = (parsed: unknown): string | null => {
+  if (parsed === null || typeof parsed !== "object") return null;
+  const err = (parsed as Record<string, unknown>).error;
+  if (err === null || typeof err !== "object") return null;
+  const m = (err as Record<string, unknown>).message;
+  return typeof m === "string" ? m : null;
+};
+
 export interface MessageLogRecord {
   readonly id: string;
   readonly ts: Date;

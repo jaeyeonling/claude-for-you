@@ -376,3 +376,45 @@ describe('createOutcomeObserver — pre-handler failure capture (#144)', () => {
     expect(sinkMsgs.some((m) => m.includes('observe-outcome'))).toBe(true);
   });
 });
+
+describe('createOutcomeObserver — robustness (#144 check-R1 fixes)', () => {
+  test('non-JSON error body records errorMessage=null and preserves status (no 500)', async () => {
+    const store = fakeStore();
+    const app = new Hono();
+    app.use(
+      '/v1/messages',
+      createOutcomeObserver({ store, errorSink: async () => {} }),
+    );
+    // Handler returns a non-JSON body with a 4xx — extractErrorMessage must
+    // miss gracefully, the row still records, and the client status is intact.
+    app.post('/v1/messages', (c) => c.text('plain boom', 400));
+    app.onError((_e, c) => c.json({ error: 'x' }, 500));
+    const res = await postMsg(app);
+    expect(res.status).toBe(400); // not swapped to 500
+    expect(store.records).toHaveLength(1);
+    expect(store.records[0]!.errorMessage).toBeNull();
+    expect(store.records[0]!.source).toBe('client');
+  });
+
+  test('global write throttle sheds excess rows under a failure storm, responses unaffected', async () => {
+    const store = fakeStore();
+    const app = new Hono();
+    app.use(
+      '/v1/messages',
+      createOutcomeObserver({ store, errorSink: async () => {} }),
+    );
+    app.post('/v1/messages', () => {
+      throw TooManyRequests('cap');
+    });
+    app.onError((err, c) =>
+      c.json({ error: 'x' }, err instanceof DomainError ? (err.status as 429) : 500),
+    );
+    // Fire well past the burst (40) in a tight loop (same-ms → minimal refill).
+    const results = await Promise.all(Array.from({ length: 60 }, () => postMsg(app)));
+    // Every client response is the true 429 — throttling never touches responses.
+    expect(results.every((r) => r.status === 429)).toBe(true);
+    // Some rows were shed: fewer recorded than requests (bounded by the bucket).
+    expect(store.records.length).toBeLessThan(60);
+    expect(store.records.length).toBeGreaterThan(0);
+  });
+});

@@ -10,7 +10,7 @@ import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { MessageLogStore, ResponseBody } from '../usage/messages-log.js';
-import { extractModel, extractResponseMeta } from '../usage/messages-log.js';
+import { extractErrorMessage, extractModel, extractResponseMeta } from '../usage/messages-log.js';
 import { buildBypassMetadata } from '../usage/bypass-metadata.js';
 import { applyClassifierTriggers, TOOL_NAME_TRIGGERS } from './classifier-triggers.js';
 import {
@@ -26,6 +26,17 @@ import { extractUsage, safeParseJson, sniffUsage } from '../usage/sniff.js';
 import { log } from '../lib/logger.js';
 import { callUpstream } from './upstream.js';
 import { tapResponseBody } from './response-tap.js';
+
+declare module 'hono' {
+  interface ContextVariableMap {
+    /** Set true by this handler once it owns the messages_log write (after a
+     * successful callUpstream), so the outermost outcome observer
+     * (observe-outcome.ts, #144) does not double-record the same request.
+     * Declared here — at the producer — mirroring how `user` is declared in
+     * the api-key middleware that sets it. */
+    logged: boolean;
+  }
+}
 
 /**
  * Claude Code identity prefix that Anthropic's Claude.ai-OAuth entitlement
@@ -809,15 +820,3 @@ export const createMessagesHandler =
       headers: forwardHeaders(upstream.response.headers),
     });
   };
-
-/**
- * Best-effort pull of `error.message` from an Anthropic-shaped error body.
- * Returns null when the body doesn't match the expected envelope.
- */
-const extractErrorMessage = (parsed: unknown): string | null => {
-  if (parsed === null || typeof parsed !== 'object') return null;
-  const err = (parsed as Record<string, unknown>).error;
-  if (err === null || typeof err !== 'object') return null;
-  const m = (err as Record<string, unknown>).message;
-  return typeof m === 'string' ? m : null;
-};

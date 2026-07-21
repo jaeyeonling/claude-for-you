@@ -40,12 +40,15 @@ const tierBadge = (tier: string | null): string => {
   return `<span class="badge b-bad">${esc(tier)}</span>`;
 };
 
-// Failure-origin badge (#144). client = caller's fault (grey), proxy = our
-// infra limit/failure (amber), upstream = Anthropic returned it (red). null on
-// legacy rows / successes → mute dash.
+// Failure-origin badge (#144). CATEGORICAL colors, not severity — the row's
+// severity is already carried by the status badge. `upstream` is written for
+// EVERY request that reached Anthropic (including 2xx success), so it must NOT
+// look alarming (a red badge on healthy traffic misreads as "error" —
+// check-R1 first-timer). proxy = our infra (amber), upstream = Anthropic
+// (neutral blue/info), client = caller (grey), null/legacy = mute dash.
 const sourceBadge = (source: MessageSource | null | undefined): string => {
   if (source === 'proxy') return `<span class="badge b-warn">proxy</span>`;
-  if (source === 'upstream') return `<span class="badge b-bad">upstream</span>`;
+  if (source === 'upstream') return `<span class="badge b-info">upstream</span>`;
   if (source === 'client') return `<span class="badge b-mute">client</span>`;
   return `<span class="badge b-mute">—</span>`;
 };
@@ -70,6 +73,7 @@ a:hover{text-decoration:underline}
 .b-good{background:oklch(72% 0.16 145 / 0.18);color:var(--good)}
 .b-warn{background:oklch(78% 0.18 60 / 0.18);color:var(--warn)}
 .b-bad{background:oklch(70% 0.22 25 / 0.2);color:var(--bad)}
+.b-info{background:oklch(72% 0.18 220 / 0.18);color:var(--accent)}
 .b-mute{background:oklch(40% 0 0 / 0.25);color:var(--muted)}
 table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden}
 th,td{text-align:left;padding:.55rem .8rem;border-bottom:1px solid var(--border);font-size:.82rem;vertical-align:top}
@@ -184,12 +188,12 @@ ${rows
         <option value="error"${filters.status === 'error' ? ' selected' : ''}>4xx/5xx</option>
       </select>
     </label>
-    <label>source
+    <label title="upstream = reached Anthropic (any status); proxy = our own limit/failure (429 cap, 5xx, 502); client = caller rejected (400/413)">source
       <select name="source">
         <option value="all"${filters.source === 'all' ? ' selected' : ''}>all</option>
-        <option value="upstream"${filters.source === 'upstream' ? ' selected' : ''}>upstream</option>
-        <option value="proxy"${filters.source === 'proxy' ? ' selected' : ''}>proxy</option>
-        <option value="client"${filters.source === 'client' ? ' selected' : ''}>client</option>
+        <option value="upstream"${filters.source === 'upstream' ? ' selected' : ''}>upstream (Anthropic)</option>
+        <option value="proxy"${filters.source === 'proxy' ? ' selected' : ''}>proxy (our infra)</option>
+        <option value="client"${filters.source === 'client' ? ' selected' : ''}>client (caller)</option>
       </select>
     </label>
     <button type="submit">filter</button>

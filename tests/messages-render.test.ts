@@ -128,6 +128,20 @@ describe('renderMessagesList', () => {
     // The source <select> reflects the active filter.
     expect(html).toContain('option value="proxy" selected');
   });
+
+  test('a successful upstream row does NOT get an error-colored source badge (#144)', () => {
+    const html = renderMessagesList({
+      rows: [sampleSummary({ source: 'upstream', status: 200 })],
+      filters: { q: '', user: '', model: '', status: 'all', source: 'all' },
+      nextCursor: null,
+      hasPrev: false,
+    });
+    // upstream is written for every request that reached Anthropic, including
+    // 2xx success — its badge must be categorical (b-info), never the b-bad
+    // class used for error statuses, or healthy traffic reads as failing.
+    expect(html).toContain('<span class="badge b-info">upstream</span>');
+    expect(html).not.toContain('<span class="badge b-bad">upstream</span>');
+  });
 });
 
 describe('renderMessageDetail', () => {
