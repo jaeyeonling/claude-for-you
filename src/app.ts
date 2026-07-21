@@ -39,6 +39,7 @@ import { createConcurrencyLimiter, createPerKeyConcurrencyLimiter } from './prox
 import { createIpRateLimiter } from './proxy/rate-limit.js';
 import { createMessagesHandler } from './proxy/messages.js';
 import { createModelsHandler } from './proxy/models.js';
+import { createOutcomeObserver } from './proxy/observe-outcome.js';
 import {
   createExtractedTemplate,
   recommendedMinGapMs,
@@ -199,6 +200,20 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
 
   app.use('/v1/*', createApiKeyMiddleware(apiKeyStore));
   app.use('/v1/*', createCaptureMiddleware(captureCfg));
+  // Records a one-row pre-handler outcome to messages_log for any /v1/messages
+  // failure that dies before the handler's own log write — the proxy's own
+  // concurrency/quota 429, a 413/400, a template/pacing 500, a failed upstream
+  // fetch 502 (#144). Registered AFTER api-key (not outermost) on purpose: an
+  // outermost observer would write a DB row for every unauthenticated 401,
+  // letting a keyless client flood messages_log (write-amplification DoS —
+  // check-R1 adversary/chaos). After api-key, only authenticated requests reach
+  // it, so writes are bounded by valid-key holders; the observer additionally
+  // self-throttles writes globally. Sits before bodyLimit + the limiters below
+  // so it still observes their 413/429 rejections.
+  app.use(
+    '/v1/messages',
+    createOutcomeObserver({ store: messageLogStore, errorSink: messageLogErrorSink }),
+  );
   app.use(
     '/v1/messages',
     bodyLimit({

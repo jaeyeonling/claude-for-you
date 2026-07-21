@@ -1,11 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import {
+  classifyProxySource,
   createNullMessageLogStore,
   extractModel,
   extractPreview,
   extractResponseMeta,
   sanitizeJsonValue,
 } from "../src/usage/messages-log.js";
+
+describe("classifyProxySource", () => {
+  test("429 (proxy concurrency/quota cap) → proxy", () => {
+    expect(classifyProxySource(429)).toBe("proxy");
+  });
+  test("5xx (template/pacing/fetch failure) → proxy", () => {
+    expect(classifyProxySource(500)).toBe("proxy");
+    expect(classifyProxySource(502)).toBe("proxy");
+  });
+  test("other 4xx (bad key / oversized / malformed) → client", () => {
+    expect(classifyProxySource(400)).toBe("client");
+    expect(classifyProxySource(401)).toBe("client");
+    expect(classifyProxySource(413)).toBe("client");
+  });
+});
 
 describe("extractPreview", () => {
   test("returns string content of the last user message", () => {

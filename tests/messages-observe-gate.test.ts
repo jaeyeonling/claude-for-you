@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Hono } from 'hono';
 import { createMessagesHandler, type MessagesDeps } from '../src/proxy/messages.js';
+import { createOutcomeObserver } from '../src/proxy/observe-outcome.js';
+import type { AccountLearner } from '../src/account-learner.js';
+import type {
+  MessageLogRecord,
+  MessageLogStore,
+  MessageLogSummary,
+} from '../src/usage/messages-log.js';
 import { createGlobalGuard, type GlobalGuard } from '../src/usage/global.js';
 import { createCanaryController, type CanaryController } from '../src/canary.js';
 import { createPacingEnforcer } from '../src/pacing.js';
@@ -219,5 +226,92 @@ describe('observe gate — #87 canary + billing alarm', () => {
     // Assert: a real candidate-side non-standard tier still trips + alarms.
     expect(canary.snapshot().tripped).toBe(true);
     expect(billingMonitor.snapshot().nonStandardCount).toBe(1);
+  });
+});
+
+// Regression guard for the CodeRabbit "Major" (#144): the handler must claim
+// `c.set('logged', true)` ONLY at the point its writeLog is guaranteed — NOT
+// early right after callUpstream. If a step between callUpstream and the write
+// throws for a genuine failure, `logged` must stay false so the outcome
+// observer still records the row (otherwise the failure is invisible to BOTH
+// paths). We inject the throw via accountLearner.observe (called after
+// callUpstream, before the stream/non-stream writeLog).
+describe('#144 — logged flag is not claimed before the write (CodeRabbit Major)', () => {
+  const capturingStore = (): { store: MessageLogStore; records: MessageLogRecord[] } => {
+    const records: MessageLogRecord[] = [];
+    return {
+      records,
+      store: {
+        async record(e: MessageLogRecord): Promise<void> {
+          records.push(e);
+        },
+        async list(): Promise<readonly MessageLogSummary[]> {
+          return [];
+        },
+        async get(): Promise<MessageLogRecord | null> {
+          return null;
+        },
+      },
+    };
+  };
+
+  // Full AccountLearner surface — only observe() is exercised here (it fires at
+  // messages.ts:662, before writeLog); the rest are inert stubs so the fixture
+  // is type-complete (tests/ is excluded from tsc, so an incomplete literal
+  // would otherwise pass unnoticed).
+  const throwingLearner: AccountLearner = Object.freeze({
+    observe(): void {
+      throw new Error('injected: accountLearner.observe fails after callUpstream');
+    },
+    current: () => null,
+    override: () => {},
+    bootstrap: async () => null,
+  });
+
+  test('a throw between callUpstream and writeLog leaves logged=false → observer records it', async () => {
+    const { store, records } = capturingStore();
+    const drift = createDriftAnalyzer();
+    const deps: MessagesDeps = {
+      pool: stubPool({ observeResponse: 0 }),
+      template: stubTemplate(),
+      candidateTemplate: stubTemplate(),
+      canary: createCanaryController({ candidate: stubTemplate(), percent: 0 }),
+      tracker: stubTracker(),
+      globalGuard: createGlobalGuard({ thresholdTokens: 0 }),
+      billingMonitor: createBillingMonitor({ sink: async () => {}, drift }),
+      accountLearner: throwingLearner, // throws at messages.ts:662, before writeLog
+      pacing: createPacingEnforcer({ minGapMs: 0 }),
+      drift,
+      usageErrorSink: async () => {},
+      messageLogStore: store,
+      messageLogErrorSink: async () => {},
+    };
+
+    const app = new Hono();
+    app.use('/v1/messages', async (c, next) => {
+      c.set('user', TEST_USER);
+      await next();
+    });
+    // Observer mounted like production (wraps the handler).
+    app.use(
+      '/v1/messages',
+      createOutcomeObserver({ store, errorSink: async () => {} }),
+    );
+    app.post('/v1/messages', createMessagesHandler(deps));
+    app.onError((_e, c) => c.json({ error: { type: 'internal', message: 'x' } }, 500));
+
+    // Upstream resolves 200 (non-streaming) — so we're PAST callUpstream when
+    // accountLearner.observe throws.
+    mockUpstream(upstreamResponse(200, { body: { type: 'message' } }));
+
+    const res = await fireRequest(app);
+
+    // The internal throw surfaces as 500 to the client...
+    expect(res.status).toBe(500);
+    // ...and crucially the observer recorded exactly one row (logged was NOT
+    // prematurely set), classified proxy (500) — the failure is NOT invisible.
+    expect(records).toHaveLength(1);
+    expect(records[0]!.status).toBe(500);
+    expect(records[0]!.source).toBe('proxy');
   });
 });

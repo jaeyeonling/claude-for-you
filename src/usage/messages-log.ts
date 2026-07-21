@@ -27,6 +27,46 @@ export type ResponseBody =
    * verbatim. */
   | Readonly<{ kind: "text"; raw: string }>;
 
+/**
+ * Origin of a logged outcome — lets the admin dashboard tell a proxy-side
+ * failure apart from an Anthropic one at a glance (issue #144):
+ *   - `upstream` — the request reached Anthropic and it returned a response
+ *     (2xx OR its own 4xx/5xx, e.g. a real `rate_limit_error` 429). servedBy
+ *     is set.
+ *   - `proxy`    — the proxy itself rejected/failed before/around the upstream
+ *     call: its own concurrency/quota 429, template/pacing 500, or a failed
+ *     fetch (502). Never reached Anthropic.
+ *   - `client`   — the caller's request was rejected on its own merits: bad
+ *     api key (401), oversized/malformed body (413/400).
+ * Null on rows written before this column existed.
+ */
+export type MessageSource = "client" | "proxy" | "upstream";
+
+/**
+ * Classify a pre-handler failure (observed by the outcome middleware, which
+ * never reached upstream) into `proxy` vs `client` from its HTTP status alone.
+ * Status is the robust signal — DomainError `code` is not (e.g. `Unauthorized`
+ * carries code `'unauthorized'`, not its default message). A 429 here is always
+ * the proxy's own cap/quota (an upstream 429 is logged by the handler as
+ * `upstream`); 5xx is a proxy/internal failure; other 4xx are the client's.
+ */
+export const classifyProxySource = (status: number): "proxy" | "client" =>
+  status === 429 || status >= 500 ? "proxy" : "client";
+
+/**
+ * Pull `error.message` from an already-parsed Anthropic/DomainError-shaped
+ * error envelope (`{ error: { message } }`). Returns null when the shape does
+ * not match. Shared by the non-streaming handler path and the outcome observer
+ * so the envelope contract has a single definition.
+ */
+export const extractErrorMessage = (parsed: unknown): string | null => {
+  if (parsed === null || typeof parsed !== "object") return null;
+  const err = (parsed as Record<string, unknown>).error;
+  if (err === null || typeof err !== "object") return null;
+  const m = (err as Record<string, unknown>).message;
+  return typeof m === "string" ? m : null;
+};
+
 export interface MessageLogRecord {
   readonly id: string;
   readonly ts: Date;
@@ -53,6 +93,9 @@ export interface MessageLogRecord {
    * snapshots and canary decision. Shape defined in usage/bypass-metadata.ts.
    * null when the request short-circuited before metadata could be assembled. */
   readonly bypassMetadata: unknown;
+  /** Failure origin (see MessageSource). Optional so existing writers/tests
+   * that predate the column keep compiling; null on legacy rows. */
+  readonly source?: MessageSource | null;
 }
 
 export interface MessageLogSummary {
@@ -67,6 +110,8 @@ export interface MessageLogSummary {
   readonly outputTokens: number;
   readonly serviceTier: string | null;
   readonly preview: string;
+  /** Failure origin (see MessageSource). Optional/null as on MessageLogRecord. */
+  readonly source?: MessageSource | null;
 }
 
 export type StatusClass = "all" | "success" | "error";
@@ -75,6 +120,8 @@ export interface ListFilters {
   readonly userName?: string;
   readonly model?: string;
   readonly statusClass?: StatusClass;
+  /** Filter by failure origin (client | proxy | upstream). */
+  readonly source?: MessageSource;
   /** Substring match against `preview` (last user message excerpt). */
   readonly search?: string;
   /** Pagination cursor: rows strictly older than `before`. */

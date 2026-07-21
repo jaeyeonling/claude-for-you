@@ -57,7 +57,7 @@ describe('renderMessagesList', () => {
   test('renders a row with HTML-escaped preview', () => {
     const html = renderMessagesList({
       rows: [sampleSummary({ preview: '<script>alert(1)</script>' })],
-      filters: { q: '', user: '', model: '', status: 'all' },
+      filters: { q: '', user: '', model: '', status: 'all', source: 'all' },
       nextCursor: null,
       hasPrev: false,
     });
@@ -69,7 +69,7 @@ describe('renderMessagesList', () => {
   test('shows empty state when no rows', () => {
     const html = renderMessagesList({
       rows: [],
-      filters: { q: '', user: '', model: '', status: 'all' },
+      filters: { q: '', user: '', model: '', status: 'all', source: 'all' },
       nextCursor: null,
       hasPrev: false,
     });
@@ -79,7 +79,7 @@ describe('renderMessagesList', () => {
   test('emits older→ link only when nextCursor is set', () => {
     const withCursor = renderMessagesList({
       rows: [sampleSummary()],
-      filters: { q: 'foo', user: '', model: '', status: 'all' },
+      filters: { q: 'foo', user: '', model: '', status: 'all', source: 'all' },
       nextCursor: '2026-05-30T09:00:00.000Z',
       hasPrev: false,
     });
@@ -89,7 +89,7 @@ describe('renderMessagesList', () => {
 
     const noCursor = renderMessagesList({
       rows: [sampleSummary()],
-      filters: { q: '', user: '', model: '', status: 'all' },
+      filters: { q: '', user: '', model: '', status: 'all', source: 'all' },
       nextCursor: null,
       hasPrev: false,
     });
@@ -99,7 +99,7 @@ describe('renderMessagesList', () => {
   test('preserves filter values in the form inputs', () => {
     const html = renderMessagesList({
       rows: [],
-      filters: { q: 'bug', user: 'alice', model: 'claude-haiku-4-5', status: 'error' },
+      filters: { q: 'bug', user: 'alice', model: 'claude-haiku-4-5', status: 'error', source: 'all' },
       nextCursor: null,
       hasPrev: false,
     });
@@ -107,6 +107,41 @@ describe('renderMessagesList', () => {
     expect(html).toContain('value="alice"');
     expect(html).toContain('value="claude-haiku-4-5"');
     expect(html).toContain('option value="error" selected');
+  });
+
+  test('renders the source badge per row and marks the source filter selected (#144)', () => {
+    const html = renderMessagesList({
+      rows: [
+        sampleSummary({ source: 'proxy', status: 429 }),
+        sampleSummary({ id: '00000000-0000-0000-0000-000000000002', source: 'upstream', status: 429 }),
+        sampleSummary({ id: '00000000-0000-0000-0000-000000000003', source: null }),
+      ],
+      filters: { q: '', user: '', model: '', status: 'all', source: 'proxy' },
+      nextCursor: null,
+      hasPrev: false,
+    });
+    // Distinct badges for proxy vs upstream (the whole point of #144).
+    expect(html).toContain('>proxy</span>');
+    expect(html).toContain('>upstream</span>');
+    // Legacy/null source renders the mute dash, never crashes.
+    expect(html).toContain('>—</span>');
+    // The source <select> reflects the active filter.
+    expect(html).toContain('option value="proxy" selected');
+  });
+
+  test('a successful upstream row does NOT get an error-colored source badge (#144)', () => {
+    const html = renderMessagesList({
+      rows: [sampleSummary({ source: 'upstream', status: 200 })],
+      filters: { q: '', user: '', model: '', status: 'all', source: 'all' },
+      nextCursor: null,
+      hasPrev: false,
+    });
+    // upstream is written for every request that reached Anthropic, including
+    // 2xx success — its badge must be categorical (b-info), never the b-bad
+    // class used for error statuses, or healthy traffic reads as failing.
+    expect(html).toContain('class="badge b-info"');
+    expect(html).toContain('>upstream</span>');
+    expect(html).not.toContain('<span class="badge b-bad">upstream</span>');
   });
 });
 

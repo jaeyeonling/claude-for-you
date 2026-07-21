@@ -10,7 +10,7 @@ import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { DriftAnalyzer } from '../usage/drift-analyzer.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { MessageLogStore, ResponseBody } from '../usage/messages-log.js';
-import { extractModel, extractResponseMeta } from '../usage/messages-log.js';
+import { extractErrorMessage, extractModel, extractResponseMeta } from '../usage/messages-log.js';
 import { buildBypassMetadata } from '../usage/bypass-metadata.js';
 import { applyClassifierTriggers, TOOL_NAME_TRIGGERS } from './classifier-triggers.js';
 import {
@@ -26,6 +26,17 @@ import { extractUsage, safeParseJson, sniffUsage } from '../usage/sniff.js';
 import { log } from '../lib/logger.js';
 import { callUpstream } from './upstream.js';
 import { tapResponseBody } from './response-tap.js';
+
+declare module 'hono' {
+  interface ContextVariableMap {
+    /** Set true by this handler once it owns the messages_log write (after a
+     * successful callUpstream), so the outermost outcome observer
+     * (observe-outcome.ts, #144) does not double-record the same request.
+     * Declared here — at the producer — mirroring how `user` is declared in
+     * the api-key middleware that sets it. */
+    logged: boolean;
+  }
+}
 
 /**
  * Claude Code identity prefix that Anthropic's Claude.ai-OAuth entitlement
@@ -501,7 +512,9 @@ export interface MessagesDeps {
  * trusted forwarder this is meaningless, but we capture whatever the client
  * sent for log forensics — it's a hint, not a security control.
  */
-const clientIpHint = (c: Context): string | null => {
+// Exported so the pre-handler outcome observer (observe-outcome.ts, #144)
+// derives client IP identically — one definition of "who is the caller".
+export const clientIpHint = (c: Context): string | null => {
   const xff = c.req.header('x-forwarded-for');
   if (xff) {
     const first = xff.split(',')[0]?.trim();
@@ -623,6 +636,14 @@ export const createMessagesHandler =
       sessionId,
       { ...deps, template: chosenTemplate },
     );
+    // NOTE: `c.set('logged', true)` is deliberately NOT set here. It is claimed
+    // only at the two points where the handler's writeLog is actually
+    // guaranteed (streaming return + non-streaming post-writeLog below). If a
+    // step between here and the write throws for a genuine failure
+    // (accountLearner.observe, buildBypassMetadata, body parse, …), `logged`
+    // stays false so the outcome observer (#144) still records the row —
+    // otherwise the failure would be invisible to BOTH paths (CodeRabbit
+    // Major). Every row the handler writes reached upstream → source 'upstream'.
 
     // Update subscription headroom both globally and per-member. Gate both on
     // a non-error status: a transient 429 surfaced verbatim (post-#44) carries
@@ -677,6 +698,9 @@ export const createMessagesHandler =
           errorMessage,
           servedBy: upstream.servedBy,
           bypassMetadata,
+          // Reached Anthropic and got a response (2xx or its own 4xx/5xx) —
+          // this is the upstream's outcome, not the proxy's (#144).
+          source: 'upstream',
         })
         .catch((err: unknown) => {
           const msg = `[messages-log] write failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -723,6 +747,11 @@ export const createMessagesHandler =
       void tap.done.then(() => {
         writeLog({ kind: 'sse', raw: tap.getRaw() }, null);
       });
+      // The handler now owns this row (writeLog wired via tap.done) — claim it
+      // so the observer does not double-record. Streaming responses are 2xx
+      // (errors are JSON, not SSE), so the observer's status<400 guard would
+      // skip anyway; this keeps the invariant explicit.
+      c.set('logged', true);
       return new Response(sniffed, {
         status: upstream.response.status,
         statusText: upstream.response.statusText,
@@ -785,6 +814,10 @@ export const createMessagesHandler =
         ? extractErrorMessage(parsedBody)
         : null;
     writeLog(responseBody, errorMessage);
+    // Row is now written — claim it so the observer does not double-record.
+    // Set AFTER writeLog: any throw before this point (body read/parse above)
+    // leaves `logged` false, so the observer records the failure instead.
+    c.set('logged', true);
     // Reverse tool-name aliases on the caller-facing body only. `responseBody`
     // (already written above) keeps the wire-raw alias form so the log stays
     // consistent with the SSE branch and with what was actually sent upstream.
@@ -797,15 +830,3 @@ export const createMessagesHandler =
       headers: forwardHeaders(upstream.response.headers),
     });
   };
-
-/**
- * Best-effort pull of `error.message` from an Anthropic-shaped error body.
- * Returns null when the body doesn't match the expected envelope.
- */
-const extractErrorMessage = (parsed: unknown): string | null => {
-  if (parsed === null || typeof parsed !== 'object') return null;
-  const err = (parsed as Record<string, unknown>).error;
-  if (err === null || typeof err !== 'object') return null;
-  const m = (err as Record<string, unknown>).message;
-  return typeof m === 'string' ? m : null;
-};
