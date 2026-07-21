@@ -1,4 +1,9 @@
-import type { MessageLogRecord, MessageLogSummary, ResponseBody } from '../usage/messages-log.js';
+import type {
+  MessageLogRecord,
+  MessageLogSummary,
+  MessageSource,
+  ResponseBody,
+} from '../usage/messages-log.js';
 
 /**
  * Pure renderers for /admin/messages (list) and /admin/messages/:id (detail).
@@ -33,6 +38,16 @@ const tierBadge = (tier: string | null): string => {
   if (!tier) return `<span class="badge b-mute">—</span>`;
   if (tier === 'standard') return `<span class="badge b-good">${esc(tier)}</span>`;
   return `<span class="badge b-bad">${esc(tier)}</span>`;
+};
+
+// Failure-origin badge (#144). client = caller's fault (grey), proxy = our
+// infra limit/failure (amber), upstream = Anthropic returned it (red). null on
+// legacy rows / successes → mute dash.
+const sourceBadge = (source: MessageSource | null | undefined): string => {
+  if (source === 'proxy') return `<span class="badge b-warn">proxy</span>`;
+  if (source === 'upstream') return `<span class="badge b-bad">upstream</span>`;
+  if (source === 'client') return `<span class="badge b-mute">client</span>`;
+  return `<span class="badge b-mute">—</span>`;
 };
 
 const STYLE = `
@@ -86,6 +101,7 @@ export interface MessagesListSnapshot {
     user: string;
     model: string;
     status: 'all' | 'success' | 'error';
+    source: 'all' | MessageSource;
   }>;
   readonly nextCursor: string | null;
   readonly hasPrev: boolean;
@@ -109,7 +125,7 @@ export const renderMessagesList = (s: MessagesListSnapshot): string => {
       : `<table>
   <thead>
     <tr>
-      <th>time (utc)</th><th>user</th><th>model</th><th>status</th>
+      <th>time (utc)</th><th>user</th><th>model</th><th>status</th><th>source</th>
       <th>stream</th><th class="num">dur</th><th class="num">in/out</th>
       <th>tier</th><th>preview</th>
     </tr>
@@ -122,6 +138,7 @@ ${rows
       <td>${esc(r.userName)}</td>
       <td>${esc(r.model ?? '—')}</td>
       <td>${statusBadge(r.status)}</td>
+      <td>${sourceBadge(r.source ?? null)}</td>
       <td>${r.streaming ? '<span class="badge b-mute">sse</span>' : '<span class="badge b-mute">json</span>'}</td>
       <td class="num">${esc(fmtDurMs(r.durationMs))}</td>
       <td class="num">${esc(r.inputTokens.toLocaleString())}/${esc(r.outputTokens.toLocaleString())}</td>
@@ -137,7 +154,7 @@ ${rows
     nextCursor || hasPrev
       ? `<div class="pager">
   ${hasPrev ? `<a href="/admin/messages">← newest</a>` : ''}
-  ${nextCursor ? `<a href="/admin/messages${qs({ q: filters.q, user: filters.user, model: filters.model, status: filters.status === 'all' ? null : filters.status, before: nextCursor })}">older →</a>` : ''}
+  ${nextCursor ? `<a href="/admin/messages${qs({ q: filters.q, user: filters.user, model: filters.model, status: filters.status === 'all' ? null : filters.status, source: filters.source === 'all' ? null : filters.source, before: nextCursor })}">older →</a>` : ''}
 </div>`
       : '';
 
@@ -165,6 +182,14 @@ ${rows
         <option value="all"${filters.status === 'all' ? ' selected' : ''}>all</option>
         <option value="success"${filters.status === 'success' ? ' selected' : ''}>2xx</option>
         <option value="error"${filters.status === 'error' ? ' selected' : ''}>4xx/5xx</option>
+      </select>
+    </label>
+    <label>source
+      <select name="source">
+        <option value="all"${filters.source === 'all' ? ' selected' : ''}>all</option>
+        <option value="upstream"${filters.source === 'upstream' ? ' selected' : ''}>upstream</option>
+        <option value="proxy"${filters.source === 'proxy' ? ' selected' : ''}>proxy</option>
+        <option value="client"${filters.source === 'client' ? ' selected' : ''}>client</option>
       </select>
     </label>
     <button type="submit">filter</button>
@@ -421,6 +446,7 @@ export const renderMessageDetail = (r: MessageLogRecord): string => {
       <dt>user</dt><dd>${esc(r.userName)}</dd>
       <dt>model</dt><dd>${esc(r.model ?? '—')}</dd>
       <dt>status</dt><dd>${statusBadge(r.status)}</dd>
+      <dt>source</dt><dd>${sourceBadge(r.source ?? null)}</dd>
       <dt>streaming</dt><dd>${r.streaming ? 'sse' : 'json'}</dd>
       <dt>duration</dt><dd>${esc(fmtDurMs(r.durationMs))}</dd>
       <dt>tokens (in / out)</dt><dd>${esc(r.inputTokens.toLocaleString())} / ${esc(r.outputTokens.toLocaleString())}</dd>

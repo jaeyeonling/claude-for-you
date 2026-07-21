@@ -1,5 +1,10 @@
 import type { Context } from 'hono';
-import type { ListFilters, MessageLogStore, StatusClass } from '../usage/messages-log.js';
+import type {
+  ListFilters,
+  MessageLogStore,
+  MessageSource,
+  StatusClass,
+} from '../usage/messages-log.js';
 import { renderMessageDetail, renderMessagesList } from './messages-render.js';
 
 /**
@@ -12,6 +17,11 @@ const PAGE_LIMIT = 100;
 
 const parseStatusClass = (raw: string | undefined): StatusClass => {
   if (raw === 'success' || raw === 'error') return raw;
+  return 'all';
+};
+
+const parseSource = (raw: string | undefined): 'all' | MessageSource => {
+  if (raw === 'client' || raw === 'proxy' || raw === 'upstream') return raw;
   return 'all';
 };
 
@@ -33,12 +43,14 @@ export const createMessagesListHandler =
     const user = (url.searchParams.get('user') ?? '').trim();
     const model = (url.searchParams.get('model') ?? '').trim();
     const status = parseStatusClass(url.searchParams.get('status') ?? undefined);
+    const source = parseSource(url.searchParams.get('source') ?? undefined);
     const before = parseBefore(url.searchParams.get('before') ?? undefined);
 
     const filters: ListFilters = {
       ...(user.length > 0 ? { userName: user } : {}),
       ...(model.length > 0 ? { model } : {}),
       ...(status !== 'all' ? { statusClass: status } : {}),
+      ...(source !== 'all' ? { source } : {}),
       ...(q.length > 0 ? { search: q } : {}),
       ...(before ? { before } : {}),
       limit: PAGE_LIMIT,
@@ -55,7 +67,7 @@ export const createMessagesListHandler =
     return c.html(
       renderMessagesList({
         rows,
-        filters: { q, user, model, status },
+        filters: { q, user, model, status, source },
         nextCursor,
         hasPrev: before !== undefined,
       }),
