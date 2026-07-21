@@ -636,13 +636,14 @@ export const createMessagesHandler =
       sessionId,
       { ...deps, template: chosenTemplate },
     );
-    // From here the handler OWNS the log write (writeLog fires on both the
-    // streaming tap.done and the non-streaming path below). Flag it so the
-    // outermost outcome observer (#144) does not double-record. Set before the
-    // stream/non-stream split so it's true by the time the handler returns a
-    // Response and the observer's `await next()` resolves. Every row written
-    // past this point reached upstream → source 'upstream'.
-    c.set('logged', true);
+    // NOTE: `c.set('logged', true)` is deliberately NOT set here. It is claimed
+    // only at the two points where the handler's writeLog is actually
+    // guaranteed (streaming return + non-streaming post-writeLog below). If a
+    // step between here and the write throws for a genuine failure
+    // (accountLearner.observe, buildBypassMetadata, body parse, …), `logged`
+    // stays false so the outcome observer (#144) still records the row —
+    // otherwise the failure would be invisible to BOTH paths (CodeRabbit
+    // Major). Every row the handler writes reached upstream → source 'upstream'.
 
     // Update subscription headroom both globally and per-member. Gate both on
     // a non-error status: a transient 429 surfaced verbatim (post-#44) carries
@@ -746,6 +747,11 @@ export const createMessagesHandler =
       void tap.done.then(() => {
         writeLog({ kind: 'sse', raw: tap.getRaw() }, null);
       });
+      // The handler now owns this row (writeLog wired via tap.done) — claim it
+      // so the observer does not double-record. Streaming responses are 2xx
+      // (errors are JSON, not SSE), so the observer's status<400 guard would
+      // skip anyway; this keeps the invariant explicit.
+      c.set('logged', true);
       return new Response(sniffed, {
         status: upstream.response.status,
         statusText: upstream.response.statusText,
@@ -808,6 +814,10 @@ export const createMessagesHandler =
         ? extractErrorMessage(parsedBody)
         : null;
     writeLog(responseBody, errorMessage);
+    // Row is now written — claim it so the observer does not double-record.
+    // Set AFTER writeLog: any throw before this point (body read/parse above)
+    // leaves `logged` false, so the observer records the failure instead.
+    c.set('logged', true);
     // Reverse tool-name aliases on the caller-facing body only. `responseBody`
     // (already written above) keeps the wire-raw alias form so the log stays
     // consistent with the SSE branch and with what was actually sent upstream.

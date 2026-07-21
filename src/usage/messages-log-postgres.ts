@@ -156,6 +156,11 @@ export const createPostgresMessageLogStore = async (
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_ts ON messages_log (ts DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_user_ts ON messages_log (user_name, ts DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_status_ts ON messages_log (status, ts DESC) WHERE status >= 400`;
+  // Partial index for the `source` dashboard filter (#144) — mirrors the
+  // status-partial pattern. NULL (legacy rows / the null-store's absence) is
+  // excluded since the filter never queries it. Justified now because #145
+  // will aggregate proxy-vs-upstream counts over this column.
+  await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_source_ts ON messages_log (source, ts DESC) WHERE source IS NOT NULL`;
 
   // `preview ILIKE '%foo%'` has a leading-wildcard pattern that a plain B-tree
   // can't help with. pg_trgm + GIN gives us proper sub-string acceleration —
