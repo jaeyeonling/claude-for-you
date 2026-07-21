@@ -255,10 +255,17 @@ describe('#144 — logged flag is not claimed before the write (CodeRabbit Major
     };
   };
 
+  // Full AccountLearner surface — only observe() is exercised here (it fires at
+  // messages.ts:662, before writeLog); the rest are inert stubs so the fixture
+  // is type-complete (tests/ is excluded from tsc, so an incomplete literal
+  // would otherwise pass unnoticed).
   const throwingLearner: AccountLearner = Object.freeze({
     observe(): void {
       throw new Error('injected: accountLearner.observe fails after callUpstream');
     },
+    current: () => null,
+    override: () => {},
+    bootstrap: async () => null,
   });
 
   test('a throw between callUpstream and writeLog leaves logged=false → observer records it', async () => {
