@@ -164,15 +164,23 @@ const fakeStore = (opts: { rejectRecord?: boolean } = {}): FakeStore => {
 const USER: AuthenticatedUser = { name: 'alice', role: 'user' } as AuthenticatedUser;
 
 interface ObsAppOpts {
-  /** Set c.var.user before the failing step (simulates post-auth failure). */
+  /** Set c.var.user in the pre-auth middleware (simulates a valid api key). */
   readonly setUser?: boolean;
-  /** Run inside the /v1/* middleware — throw here to model a middleware reject
-   * (concurrency/api-key/quota); omit to fall through to the handler. */
-  readonly wildcard?: (c: Context) => void;
+  /** Throw inside the /v1/* pre-auth middleware — models the api-key middleware
+   * rejecting (401) BEFORE the observer runs. The observer must NOT see it. */
+  readonly failAuth?: () => never;
+  /** Throw inside a /v1/messages middleware registered AFTER the observer —
+   * models the IP/key/global concurrency limiters. The observer DOES see it. */
+  readonly postThrow?: () => never;
   /** The POST handler. Default: 200 + logged=true (a "handler owns the log"). */
   readonly handler?: (c: Context) => Response | Promise<Response>;
 }
 
+// Mirrors the real app.ts registration order so the observer's placement
+// invariant is under test (not an inverted toy topology):
+//   api-key (/v1/*)  →  observer (/v1/messages)  →  limiters (/v1/messages)  →  handler
+// The observer wraps everything AFTER api-key, so an api-key 401 is never
+// observed (the fix for the check-R1 pre-auth write-amplification finding).
 const buildObsApp = (
   opts: ObsAppOpts,
   storeOpts: { rejectRecord?: boolean } = {},
@@ -180,6 +188,13 @@ const buildObsApp = (
   const store = fakeStore(storeOpts);
   const sinkMsgs: string[] = [];
   const app = new Hono();
+  // 1. api-key stand-in (/v1/*), registered FIRST → outermost.
+  app.use('/v1/*', async (c, next) => {
+    if (opts.setUser) c.set('user', USER);
+    if (opts.failAuth) opts.failAuth();
+    await next();
+  });
+  // 2. observer (/v1/messages), after api-key.
   app.use(
     '/v1/messages',
     createOutcomeObserver({
@@ -189,9 +204,9 @@ const buildObsApp = (
       },
     }),
   );
-  app.use('/v1/*', async (c, next) => {
-    if (opts.setUser) c.set('user', USER);
-    if (opts.wildcard) opts.wildcard(c);
+  // 3. limiter stand-in (/v1/messages), after the observer → observed on throw.
+  app.use('/v1/messages', async (c, next) => {
+    if (opts.postThrow) opts.postThrow();
     await next();
   });
   app.post(
@@ -223,10 +238,10 @@ const postMsg = (app: Hono): Promise<Response> =>
   });
 
 describe('createOutcomeObserver — pre-handler failure capture (#144)', () => {
-  test('(a) proxy concurrency 429 (post-auth) → one proxy row, real userName', async () => {
+  test('(a) proxy concurrency 429 (limiter after observer) → one proxy row, real userName', async () => {
     const { app, store } = buildObsApp({
       setUser: true,
-      wildcard: () => {
+      postThrow: () => {
         throw TooManyRequests('max concurrent requests reached (120)');
       },
     });
@@ -242,21 +257,23 @@ describe('createOutcomeObserver — pre-handler failure capture (#144)', () => {
     expect(row.model).toBeNull();
     expect(row.clientIp).toBe('203.0.113.9');
     expect(row.userAgent).toBe('claude-cli/test');
-    // errorMessage best-effort extracted from the onError JSON body.
+    // errorMessage best-effort extracted (+redacted) from the onError JSON body.
     expect(row.errorMessage).toBe('max concurrent requests reached (120)');
   });
 
-  test('(b) api-key 401 (pre-auth) → one client row, userName sentinel "-"', async () => {
+  // Regression guard for the check-R1 CRITICAL (pre-auth write-amplification
+  // DoS): the observer is registered AFTER api-key, so an unauthenticated 401
+  // is thrown before the observer runs and produces ZERO log rows. If a future
+  // edit swaps the two app.use registrations back, THIS test fails.
+  test('(b) api-key 401 (pre-auth, before observer) → ZERO rows written', async () => {
     const { app, store } = buildObsApp({
-      wildcard: () => {
-        throw Unauthorized('invalid api key');
+      failAuth: () => {
+        throw Unauthorized('missing api key');
       },
     });
     const res = await postMsg(app);
     expect(res.status).toBe(401);
-    expect(store.records).toHaveLength(1);
-    expect(store.records[0]!.source).toBe('client');
-    expect(store.records[0]!.userName).toBe('-');
+    expect(store.records).toHaveLength(0);
   });
 
   test('(c) non-throw 413 (bodyLimit-style) → one client row', async () => {
@@ -362,7 +379,7 @@ describe('createOutcomeObserver — pre-handler failure capture (#144)', () => {
   test('(k) store.record rejection does not change the client response', async () => {
     const { app, store, sinkMsgs } = buildObsApp(
       {
-        wildcard: () => {
+        postThrow: () => {
           throw TooManyRequests('cap');
         },
       },

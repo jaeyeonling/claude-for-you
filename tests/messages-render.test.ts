@@ -139,7 +139,8 @@ describe('renderMessagesList', () => {
     // upstream is written for every request that reached Anthropic, including
     // 2xx success — its badge must be categorical (b-info), never the b-bad
     // class used for error statuses, or healthy traffic reads as failing.
-    expect(html).toContain('<span class="badge b-info">upstream</span>');
+    expect(html).toContain('class="badge b-info"');
+    expect(html).toContain('>upstream</span>');
     expect(html).not.toContain('<span class="badge b-bad">upstream</span>');
   });
 });

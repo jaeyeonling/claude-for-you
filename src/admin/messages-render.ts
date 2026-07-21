@@ -47,10 +47,13 @@ const tierBadge = (tier: string | null): string => {
 // check-R1 first-timer). proxy = our infra (amber), upstream = Anthropic
 // (neutral blue/info), client = caller (grey), null/legacy = mute dash.
 const sourceBadge = (source: MessageSource | null | undefined): string => {
-  if (source === 'proxy') return `<span class="badge b-warn">proxy</span>`;
-  if (source === 'upstream') return `<span class="badge b-info">upstream</span>`;
-  if (source === 'client') return `<span class="badge b-mute">client</span>`;
-  return `<span class="badge b-mute">—</span>`;
+  if (source === 'proxy')
+    return `<span class="badge b-warn" title="our infra rejected/failed before or around upstream (429 cap, 5xx, 502)">proxy</span>`;
+  if (source === 'upstream')
+    return `<span class="badge b-info" title="reached Anthropic — it returned this (any status, incl. 2xx)">upstream</span>`;
+  if (source === 'client')
+    return `<span class="badge b-mute" title="caller's request rejected on its merits (400/413)">client</span>`;
+  return `<span class="badge b-mute" title="no source recorded (legacy row)">—</span>`;
 };
 
 const STYLE = `

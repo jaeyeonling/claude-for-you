@@ -59,7 +59,16 @@ import { clientIpHint } from './messages.js';
 /** Max observer log-writes per second (global, not per-IP: an authenticated
  * caller's X-Forwarded-For is spoofable, so a per-IP bucket could be bypassed
  * by rotating the header; a single global bucket bounds total DB write pressure
- * regardless). Generous vs. real failure rates — only a storm hits it. */
+ * regardless). Generous vs. real failure rates — only a storm hits it.
+ *
+ * This exists to protect the messages_log connection pool
+ * (`postgres(..., { max: 2 })` in usage/messages-log-postgres.ts) from a
+ * 429/5xx write storm. If that pool size changes, revisit these — the cap
+ * should stay comfortably above what `max` connections can drain, so writes
+ * shed here rather than queue unboundedly in postgres.js. (Trade-off: a single
+ * busy key can exhaust the shared budget and hide other keys' failure rows —
+ * acceptable for this small trusted-key deployment; a per-key sub-budget would
+ * be the multi-tenant answer.) */
 const WRITE_TOKENS_PER_SEC = 20;
 const WRITE_BURST = 40;
 /** Cooldown between "dropped N rows" warnings so the drop itself can't flood
@@ -152,7 +161,7 @@ export const createOutcomeObserver = (deps: OutcomeObserverDeps) => {
         })
         .catch((err: unknown) => {
           const m = `[observe-outcome] write failed: ${err instanceof Error ? err.message : String(err)}`;
-          void deps.errorSink(m);
+          void deps.errorSink(m).catch(() => undefined);
         });
     } catch (err: unknown) {
       // Observation itself faulted — swallow to preserve the client response.
