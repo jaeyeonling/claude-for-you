@@ -1,4 +1,5 @@
 import type { AccountPoolSnapshot } from '../auth/account-pool.js';
+import type { Degradable } from '../lib/degrade.js';
 import type { CanaryStats } from '../canary.js';
 import type { AlertConfig } from '../alerts-store.js';
 import type { UsageSnapshot } from '../usage/per-user.js';
@@ -35,7 +36,9 @@ export interface AdminPageSnapshot {
   readonly poolSnap: AccountPoolSnapshot;
   readonly billingSnap: BillingMonitorSnapshot;
   readonly guardSnap: GlobalGuardSnapshot;
-  readonly usageSnap: UsageSnapshot;
+  /** Degradable because it is the only DB-backed panel on the page. `ok:false`
+   * renders an inline warning instead of taking the whole dashboard down. */
+  readonly usageSnap: Degradable<UsageSnapshot>;
   readonly canarySnap: CanaryStats;
   readonly alertConfig: AlertConfig;
   readonly apiKeyRows: readonly ApiKeyRow[];
@@ -138,13 +141,16 @@ export const renderLiveSections = (s: AdminPageSnapshot): string => {
       ? '<span class="badge b-bad">tripped</span>'
       : `<span class="badge b-good">${esc(s.canarySnap.percent)}%</span>`;
 
-  const usageRows =
-    Object.entries(s.usageSnap)
-      .map(
-        ([name, v]) =>
-          `<dt>${esc(name)}</dt><dd>${esc(v.tokens.toLocaleString())} tok <span class="badge b-mute">${esc(v.day)}</span></dd>`,
-      )
-      .join('') || `<dt class="tag" style="grid-column:span 2">no usage yet today</dt><dd></dd>`;
+  const usageRows = !s.usageSnap.ok
+    ? `<dt><span class="badge b-bad">unavailable</span></dt>` +
+      `<dd>${esc(s.usageSnap.reason)}<div class="tag">per-user usage is the only DB-backed panel; ` +
+      `everything else on this page is in-memory and still current.</div></dd>`
+    : Object.entries(s.usageSnap.value)
+        .map(
+          ([name, v]) =>
+            `<dt>${esc(name)}</dt><dd>${esc(v.tokens.toLocaleString())} tok <span class="badge b-mute">${esc(v.day)}</span></dd>`,
+        )
+        .join('') || `<dt class="tag" style="grid-column:span 2">no usage yet today</dt><dd></dd>`;
 
   const keyRows =
     s.apiKeyRows
@@ -204,7 +210,20 @@ export const renderLiveSections = (s: AdminPageSnapshot): string => {
     );
   };
 
-  return `
+  // Rendered inside the live region (not the static header) so the SSE tick
+  // clears it the moment the dependency recovers — a banner in <header> would
+  // survive as a stale scare until the operator hard-reloads.
+  const degradedBanner = s.usageSnap.ok
+    ? ''
+    : `<section style="grid-column:1/-1;border-color:var(--bad)">
+    <h2 style="color:var(--bad)">degraded</h2>
+    <div>database-backed panels are unavailable — <code>${esc(s.usageSnap.reason)}</code></div>
+    <div class="tag">Proxy traffic may also be affected: per-key quota checks and the
+    messages log share this database. Check <code>docker logs claude-for-you</code> and the
+    RDS instance state.</div>
+  </section>`;
+
+  return `${degradedBanner}
   <section>
     <h2>billing health</h2>
     <dl class="kv">
@@ -868,6 +887,38 @@ const LIVE_SCRIPT = `
   });
 })();
 `;
+
+/**
+ * Last-resort admin error page, rendered by `app.onError` for unhandled
+ * exceptions on /admin/*. Everything reachable is expected to degrade
+ * gracefully (see src/lib/degrade.ts) — landing here means a path was missed,
+ * so the page's job is to say so and point at the log, not to explain the bug.
+ *
+ * No error detail is interpolated: onError has already logged the redacted
+ * message + stack, and an admin page is not the place to re-surface a string
+ * whose provenance (driver? upstream? our own template?) is unknown.
+ */
+export const renderAdminError = (now: Date): string => `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>claude-for-you · admin (error)</title>
+<style>${STYLE}</style>
+</head><body>
+<header><h1>claude-for-you · admin</h1><span class="tag">unhandled error</span></header>
+<main>
+  <section style="grid-column:1/-1;border-color:var(--bad)">
+    <h2 style="color:var(--bad)">this page failed to render</h2>
+    <p>The proxy itself may still be serving traffic — this failure is scoped to the
+    admin surface.</p>
+    <p class="tag">Timestamp: <code>${esc(now.toISOString())}</code>. The redacted
+    message and stack trace were written to the container log; find them with
+    <code>docker logs --since 5m claude-for-you</code>. Known cause from
+    2026-07-30: the database ran out of storage
+    (<code>docs/operational-pitfalls.md</code> §22).</p>
+    <p><a href="/admin" style="color:var(--accent)">retry</a></p>
+  </section>
+</main>
+</body></html>`;
 
 export const renderAdminHtml = (s: AdminPageSnapshot): string => {
   return `<!doctype html>

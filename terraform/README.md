@@ -102,7 +102,14 @@ sudo docker compose up -d
 
 ## Alarms
 
-The `aws_cloudwatch_metric_alarm.network_in_drop` alarm watches for the silent-hang signature from #107.
+Two alarms publish to the `${var.name}-alerts` SNS topic:
+
+| Alarm | Watches for |
+|---|---|
+| `aws_cloudwatch_metric_alarm.network_in_drop` | the silent-hang signature from #107 |
+| `aws_cloudwatch_metric_alarm.rds_free_storage` | RDS running out of disk before it becomes an outage (#22) |
+
+> Alarm names must keep the `${var.name}-` prefix. The SNS topic policy only permits publishes from `alarm:${var.name}-*`, so a differently-named alarm fails silently — it transitions to ALARM and nothing is delivered.
 
 ### How it fires
 
@@ -110,6 +117,15 @@ The `aws_cloudwatch_metric_alarm.network_in_drop` alarm watches for the silent-h
 |---|---|
 | NetworkIn < 5 KB/min for 5 consecutive 1-min periods | `LessThanThreshold` + statistic `Sum` + period 60 s × eval 5 |
 | Metric publisher (CWAgent / EC2 itself) goes silent | `TreatMissingData = breaching` |
+| RDS `FreeStorageSpace` < 15 % of `allocated_storage`, 2 × 5-min periods | `LessThanThreshold` + statistic `Minimum` |
+
+### RDS free storage — why 15 %
+
+Storage autoscaling (`max_allocated_storage`) triggers at roughly 10 % free, so this alarm deliberately fires *first*: autoscaling silently raises the monthly bill, and sustained growth is something the operator should decide about rather than discover on an invoice. The threshold is computed from `allocated_storage`, so it tracks resizes automatically.
+
+The failure this exists to prevent is documented in `docs/operational-pitfalls.md` §22: on 2026-07-30 the volume filled completely, Postgres entered recovery mode, and the first signal was the admin dashboard returning `internal_error`. A full volume cannot be recovered by deleting rows — `DELETE` needs WAL write space — so the only exit is expansion. Hearing about it at 15 % is the difference between a `terraform apply` and an outage.
+
+`treat_missing_data` is `missing` here, not `breaching` (as on the EC2 alarm): a silent RDS metric means the instance is stopped or mid-modification, which is not something a *storage* alarm should claim to have detected.
 
 `#107`'s actual signature was NetworkIn 167 KB/min → 2.3 KB/min, sustained for over 20 minutes. The 5-minute, 5-of-5-datapoints evaluation window sits well inside that envelope. `ok_actions` is wired to the same SNS topic, so recovery is also notified.
 

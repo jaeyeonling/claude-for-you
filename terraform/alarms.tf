@@ -105,3 +105,52 @@ resource "aws_cloudwatch_metric_alarm" "network_in_drop" {
   alarm_actions = [aws_sns_topic.alerts.arn]
   ok_actions    = [aws_sns_topic.alerts.arn]
 }
+
+# ---------- RDS free-storage alarm ----------
+# Added after the 2026-07-30 outage: the instance filled its 20GB volume,
+# Postgres entered recovery mode, and the first signal anyone got was the admin
+# dashboard returning `internal_error`. There was no storage alarm at all.
+#
+# Parameter rationale:
+#   threshold 15 % of allocated_storage — RDS storage autoscaling triggers at
+#     roughly 10 % free, so 15 % puts this alarm AHEAD of the automatic growth.
+#     That ordering is deliberate: autoscaling silently increases the monthly
+#     bill, and the operator should hear about sustained growth before AWS
+#     starts buying disk on their behalf. Recompute if allocated_storage moves.
+#   period 300 / evaluation_periods 2 — RDS publishes FreeStorageSpace every
+#     60s; a 10-minute sustained window filters the transient dips caused by
+#     WAL churn and autovacuum without delaying a real fill-up meaningfully
+#     (going from 15 % to 0 % takes days at this traffic level, not minutes).
+#   statistic Minimum — the worst datapoint in the window is the one that
+#     matters; Average would let a brief recovery mask a downward trend.
+#   treat_missing_data missingData — unlike the EC2 liveness alarm, silence here
+#     is not itself the failure mode. RDS not publishing means the instance is
+#     stopped or being modified, which the storage alarm should not claim to
+#     have detected. Instance-level death is a separate concern.
+#
+# Alarm name MUST keep the `${var.name}-` prefix — the SNS topic policy above
+# only permits publishes from alarms matching `alarm:${var.name}-*`.
+resource "aws_cloudwatch_metric_alarm" "rds_free_storage" {
+  alarm_name        = "${var.name}-rds-free-storage"
+  alarm_description = "RDS free storage below 15% of allocated. A full volume puts Postgres into recovery mode and takes the admin dashboard down with it (2026-07-30). See docs/operational-pitfalls.md section 22."
+
+  namespace   = "AWS/RDS"
+  metric_name = "FreeStorageSpace"
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.app.identifier
+  }
+  statistic = "Minimum"
+
+  period              = 300
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+
+  # allocated_storage is in GiB; FreeStorageSpace is published in bytes.
+  threshold           = aws_db_instance.app.allocated_storage * 1024 * 1024 * 1024 * 0.15
+  comparison_operator = "LessThanThreshold"
+
+  treat_missing_data = "missing"
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+}

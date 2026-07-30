@@ -489,6 +489,57 @@ sonnet/opus **버전 업**이 자동이었던 건 그게 클라이언트의 **�
 
 ---
 
+## 22. RDS 스토리지가 꽉 차면 어드민 전체가 `internal_error` — 대시보드가 자기 진단을 막는다
+
+**증상**: 브라우저로 `/admin`에 들어가면 HTML 대신 이것만 나온다.
+
+```json
+{"error":{"type":"internal_error","message":"internal error"}}
+```
+
+`/v1/messages` 프록시 트래픽은 살아 있고, EC2도 healthy다.
+
+> **왜 프록시는 안 죽었나 (조건부다, 운에 맡기지 말 것)**: 핫패스의 DB 접점 세 개 중 둘은 안전하다 — `tracker.record()`와 messages_log 기록은 `void … .catch()` fire-and-forget. 위험한 건 `src/proxy/messages.ts:548`의 `await deps.tracker.assertCanRequest()`로, **잡히지 않는다**. 지금 살아 있는 이유는 `DAILY_TOKEN_LIMIT_PER_KEY`가 비어 있어서 `assertCanRequest`가 쿼리 전에 early-return하기 때문이다. **일일 한도를 켜는 순간 같은 사고가 전면 프록시 장애(모든 요청 500)로 번진다.** fail-open/fail-closed 정책 결정은 별도 이슈.
+
+**원인 체인**:
+
+```
+RDS claude-for-you-db → DBInstanceStatus=storage-full (20GB gp3, 오토스케일링 미설정)
+  → Postgres "No space left on device" → recovery mode 루프
+  → src/usage/per-user-postgres.ts:snapshot() 이 PostgresError throw
+  → src/app.ts:onError 의 비-DomainError fallback → 500 internal_error
+```
+
+핵심은 **`/admin`의 유일한 I/O가 `tracker.snapshot()` 하나였다**는 것(`src/admin/page.ts`). 나머지 패널(pool·billing·guard·canary·keys)은 전부 인메모리인데, 그 하나가 던지는 순간 Hono의 onError가 페이지 전체를 버렸다. **DB 장애를 진단해야 할 화면이 DB 장애로 함께 죽는 구조.**
+
+`docker ps`에 postgres 컨테이너가 없다고 당황하지 말 것 — 프로덕션은 RDS를 쓰고, `docker-compose.yml`의 postgres 서비스는 `profiles: ['dev']`로 로컬 전용이다. 로그에 보이는 `severity: WARNING ... No space left on device` JSON 덩어리는 postgres.js 클라이언트가 **서버 notice를 그대로 출력**한 것이라 app 컨테이너 로그에 섞여 나온다.
+
+**진단 (순서대로)**:
+
+```bash
+# 1. 어느 의존성이 죽었는지 — onError가 redact된 스택을 남긴다
+aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
+  --parameters 'commands=["docker logs --tail 120 claude-for-you 2>&1 | tail -60"]'
+# 2. RDS 상태 — storage-full 이면 여기서 끝
+aws rds describe-db-instances --db-instance-identifier claude-for-you-db \
+  --query 'DBInstances[0].{status:DBInstanceStatus,alloc:AllocatedStorage,maxAlloc:MaxAllocatedStorage}'
+```
+
+**조치**: `allocated_storage` 상향 + `max_allocated_storage`(오토스케일링) 설정 후 `terraform apply`. 반영에 ~9분, 이후 `storage-optimization` 상태로 몇 시간 더 머문다(서비스는 정상).
+
+> ⚠️ **꽉 찬 상태에서 행을 지워서 복구하려 하지 말 것.** MVCC라 `DELETE`도 새 튜플 버전과 WAL 쓰기를 요구한다 — 공간이 없으면 삭제 자체가 실패한다. `VACUUM FULL`은 테이블 사본을 만들어서 더 나쁘다. **탈출구는 스토리지 확장뿐이다.**
+
+> ⚠️ **RDS는 스토리지 변경 후 최적화 완료 또는 6시간 동안 추가 스토리지 변경을 거부한다.** 한 번에 넉넉히 올릴 것. 나눠서 두 번 올리려다 두 번째가 `InvalidDBInstanceState`로 막힌다.
+
+**재발 방지 (구현됨)**:
+- `terraform/alarms.tf` → `${var.name}-rds-free-storage` 알람(할당량의 15% 미만, 오토스케일링 발동 지점보다 **먼저** 울린다). 이번 사고 때는 스토리지 알람이 아예 없었다.
+- `src/lib/degrade.ts` → `attempt()`. DB 읽기 실패가 예외가 아니라 **값**이 되어, 죽은 패널만 경고를 띄우고 나머지는 그대로 렌더된다. `/admin`, `/admin/stats`, `/admin/events`(SSE), `/admin/messages`에 적용.
+- `/admin/*`의 unhandled 예외는 JSON이 아니라 **HTML 오류 페이지**를 반환한다 — 브라우저로 보는 화면에 raw JSON을 주면 어느 의존성이 죽었는지 알 수 없다.
+
+**근본 원인은 따로 있다**: `messages_log`가 요청/응답 전문을 저장하는데 보존 정책이 없었다(#13). 10주에 20GB. 스토리지 확장은 시간을 사는 것이고, 해결은 S3 콜드 스토리지 아카이빙이다.
+
+---
+
 ## 알람을 받았을 때 의사결정 흐름
 
 ```
@@ -509,6 +560,10 @@ Discord에 [billing] ALARM 알람 옴
   │
   ├─ HTTP 500 + code=template_apply_failed|pacing_await_failed?  → proxy 내부 실패 (#19)
   │     → upstream 호출 발생 안 함. snapshot/pacing 설정 점검
+  │
+  ├─ (SNS 이메일) claude-for-you-rds-free-storage ALARM?  → DB 스토리지 고갈 임박 (#22)
+  │     → 아직 여유가 있는 상태에서 울린 것(할당량 15%). storage-full이 되면
+  │       어드민이 죽고 삭제로도 복구가 안 되니 지금 확장하거나 아카이빙을 돌린다
   │
   └─ HTTP 400 + "maximum of 4 blocks with cache_control"?  → cc-maxed caller (#20)
         → hermes-agent 등 cache_control 4개를 꽉 쓰는 서드파티 에이전트.

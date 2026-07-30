@@ -11,6 +11,7 @@ import type { CanaryController } from '../canary.js';
 import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { UsageTracker } from '../usage/per-user.js';
+import { attempt } from '../lib/degrade.js';
 import { renderLiveSections } from './render.js';
 import type { TestResultStore } from './test-runners.js';
 
@@ -62,7 +63,11 @@ export const createAdminEventsHandler =
           poolSnap: deps.pool.snapshot(),
           billingSnap: deps.billingMonitor.snapshot(),
           guardSnap: deps.globalGuard.snapshot(),
-          usageSnap: await deps.tracker.snapshot(),
+          // Must not throw: an exception here escapes the streamSSE callback
+          // and kills the stream, so a DB blip would freeze the dashboard at
+          // its last tick with no visible reason. attempt() degrades instead,
+          // and the next tick recovers on its own.
+          usageSnap: await attempt('usage-snapshot', () => deps.tracker.snapshot()),
           canarySnap: deps.canary.snapshot(),
           alertConfig: deps.alertStore.get(),
           apiKeyRows: deps.apiKeyStore.list().map((e) => {
