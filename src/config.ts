@@ -43,6 +43,13 @@ export type AppConfig = Readonly<{
    * set; set `MESSAGES_LOG_ENABLED=false` to opt out. No-op when DATABASE_URL
    * is unset (no place to write). */
   messagesLogEnabled: boolean;
+  /** S3 bucket holding archived `messages_log` bodies (#150). Null disables the
+   * admin read-back path — the detail page then shows the object key and a
+   * copy-paste command instead of an inline view. The archiver itself runs as a
+   * separate process and reads its own env, so this only affects reads. */
+  messagesLogArchiveBucket: string | null;
+  /** Region for the archive bucket. Only used to construct the S3 read client. */
+  messagesLogArchiveRegion: string;
   discordWebhookUrl: string | null;
   slackWebhookUrl: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
@@ -115,6 +122,11 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): AppConfig => {
     canaryPercent: Number(env.CANARY_PERCENT ?? 0),
     accountsPath: env.ACCOUNTS_PATH ?? './data/accounts.json',
     messagesLogEnabled: (env.MESSAGES_LOG_ENABLED ?? 'true').toLowerCase() !== 'false',
+    messagesLogArchiveBucket:
+      env.MESSAGES_LOG_ARCHIVE_BUCKET && env.MESSAGES_LOG_ARCHIVE_BUCKET.length > 0
+        ? env.MESSAGES_LOG_ARCHIVE_BUCKET
+        : null,
+    messagesLogArchiveRegion: env.AWS_REGION ?? 'ap-northeast-2',
     discordWebhookUrl:
       env.DISCORD_WEBHOOK_URL && env.DISCORD_WEBHOOK_URL.length > 0
         ? env.DISCORD_WEBHOOK_URL
