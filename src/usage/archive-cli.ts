@@ -71,10 +71,61 @@ const main = async (): Promise<number> => {
     return 1;
   }
 
-  // Credentials come from S3_*/AWS_* env vars, which Bun's S3 client reads
-  // natively — including AWS_SESSION_TOKEN, which is what the host wrapper
-  // supplies from IMDS. Nothing long-lived is stored anywhere.
-  const s3 = new Bun.S3Client({ bucket, region: process.env.AWS_REGION ?? 'ap-northeast-2' });
+  // Credentials are passed EXPLICITLY, never left to Bun's env resolution.
+  //
+  // Bun reads S3_* first and falls back to AWS_* per-variable. This container
+  // has both sets, for two different identities: docker-compose supplies
+  // S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY (the long-lived read-only IAM user
+  // the admin UI uses to display archived bodies, which has no session token),
+  // while the host wrapper injects AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN (the
+  // instance role's temporary credentials). Implicit resolution therefore
+  // assembled a Frankenstein identity — the read-only user's key paired with
+  // the role's session token — and every PUT failed with "The provided token
+  // is malformed or otherwise invalid" (#158, caught by the first supervised
+  // production run).
+  //
+  // The archiver always wants the injected role credentials, so it says so.
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey) {
+    log.error(
+      '[archive] AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not set — run via ' +
+        'scripts/archive-messages-log.sh, which fetches them from IMDS on the host',
+    );
+    return 1;
+  }
+  const s3 = new Bun.S3Client({
+    bucket,
+    region: process.env.AWS_REGION ?? 'ap-northeast-2',
+    accessKeyId,
+    secretAccessKey,
+    // Present for IMDS role credentials, absent for a static IAM user key.
+    // Passing undefined is correct in the latter case; passing the OTHER
+    // identity's token is what broke #158.
+    ...(process.env.AWS_SESSION_TOKEN ? { sessionToken: process.env.AWS_SESSION_TOKEN } : {}),
+  });
+
+  // Credential preflight, in BOTH modes.
+  //
+  // #158's real damage was not the broken credentials — it was that --dry-run
+  // reported success with them. The dry run never calls s3.write(), so it never
+  // authenticated against S3 at all, and the rehearsal whose entire job is
+  // "prove this will work" happily green-lit a run that could not upload a
+  // single byte. A ListBucket probe costs one request and closes that gap; the
+  // write policy grants ListBucket on this prefix precisely so this can work.
+  try {
+    await s3.list({ prefix: 'messages-log/', maxKeys: 1 });
+    log.info(`[archive] S3 credentials OK for s3://${bucket}/messages-log/`);
+  } catch (err) {
+    log.error(
+      `[archive] S3 credential check failed: ${redact(err instanceof Error ? err.message : String(err))}`,
+    );
+    log.error(
+      '[archive] the archiver needs the INSTANCE ROLE credentials (AWS_*), not the ' +
+        'read-only S3_* pair used by the admin UI — check scripts/archive-messages-log.sh',
+    );
+    return 1;
+  }
 
   // Connecting is itself a failure mode worth reporting cleanly — this job runs
   // unattended, and "could not connect" in the cron log beats a stack trace.
@@ -90,10 +141,14 @@ const main = async (): Promise<number> => {
 
   let totalRows = 0;
   let totalBytes = 0;
-  let batches = 0;
+  // Counts batches that actually moved rows. Kept separate from the loop
+  // variable because the loop can exit via `break` before its increment runs,
+  // which made the dry-run summary report "200 rows in 0 batch(es)".
+  let batchesRun = 0;
+  let attempts = 0;
 
   try {
-    for (; batches < maxBatches; batches += 1) {
+    for (; attempts < maxBatches; attempts += 1) {
       const result = await archiveBatch({
         source: dryRun ? readOnly(source) : source,
         putObject: async (key, body) => {
@@ -110,6 +165,7 @@ const main = async (): Promise<number> => {
 
       if (result.rowsArchived === 0) break;
 
+      batchesRun += 1;
       totalRows += result.rowsArchived;
       for (const part of result.parts) {
         totalBytes += part.compressedBytes;
@@ -124,7 +180,7 @@ const main = async (): Promise<number> => {
       if (dryRun) break;
     }
 
-    if (batches === maxBatches) {
+    if (attempts === maxBatches) {
       // Not an error, but it must not be silent: the operator needs to know the
       // backlog is only partially drained and the next run has work left.
       log.warn(
@@ -132,7 +188,7 @@ const main = async (): Promise<number> => {
       );
     }
     log.info(
-      `[archive] done: ${totalRows} rows in ${batches} batch(es), ${totalBytes} B compressed, cutoff=${cutoffDays}d${dryRun ? ' (dry run)' : ''}`,
+      `[archive] done: ${totalRows} rows in ${batchesRun} batch(es), ${totalBytes} B compressed, cutoff=${cutoffDays}d${dryRun ? ' (dry run)' : ''}`,
     );
     return 0;
   } catch (err) {
