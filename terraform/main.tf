@@ -188,11 +188,21 @@ resource "random_password" "db_master" {
 }
 
 resource "aws_db_instance" "app" {
-  identifier             = "${var.name}-db"
-  engine                 = "postgres"
-  engine_version         = "16"
-  instance_class         = "db.t4g.micro"
-  allocated_storage      = 20
+  identifier     = "${var.name}-db"
+  engine         = "postgres"
+  engine_version = "16"
+  instance_class = "db.t4g.micro"
+  # 2026-07-30 incident: the instance hit `storage-full` at 20GB, Postgres went
+  # into recovery mode, and every /admin request 500'd because
+  # per-user-postgres.ts:snapshot() is the dashboard's only I/O. `messages_log`
+  # stores full request/response bodies (#13) with no retention policy, so
+  # growth is unbounded by design — a fixed ceiling was always going to be hit.
+  allocated_storage = 50
+  # Storage autoscaling: RDS grows the volume on its own when free space drops
+  # below ~10%, up to this ceiling. Without it a full volume is a hard outage
+  # (you can't even DELETE rows — that needs WAL write space). 200GB caps the
+  # blast radius on cost; gp3 bills per provisioned GB, not per max.
+  max_allocated_storage  = 200
   storage_type           = "gp3"
   storage_encrypted      = true
   db_name                = "claude_for_you"

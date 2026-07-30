@@ -123,6 +123,43 @@ const qs = (params: Record<string, string | null | undefined>): string => {
   return s ? `?${s}` : '';
 };
 
+/**
+ * Shown when the log store itself is unreachable (DB down / out of storage).
+ *
+ * Deliberately a 200-with-explanation rather than a 5xx: this page is part of
+ * the operator's diagnostic path, and the 2026-07-30 incident showed what the
+ * alternative looks like — a raw `internal_error` JSON body in the browser,
+ * which says nothing about WHICH dependency failed or where to look next.
+ */
+export const renderStoreUnavailable = (reason: string): string => `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>claude-for-you · messages (unavailable)</title>
+<style>${STYLE}</style>
+</head>
+<body>
+  <header>
+    <h1>messages</h1>
+    <span class="tag">log store unavailable</span>
+    <span style="margin-left:auto"><a href="/admin">← dashboard</a></span>
+  </header>
+  <section style="background:var(--surface);border:1px solid var(--bad);border-radius:6px;padding:1rem 1.1rem">
+    <h2 style="color:var(--bad)">store unavailable</h2>
+    <p>The messages log could not be read: <code>${esc(reason)}</code></p>
+    <p class="tag">This log lives in Postgres. Writes from the proxy are
+    fire-and-forget, so log rows are being dropped for as long as the failure
+    lasts but the log itself does not reject traffic. Proxy requests survive a
+    DB outage only while <code>DAILY_TOKEN_LIMIT_PER_KEY</code> is unset — with
+    a limit configured, the per-key quota check queries this same database on
+    every request and an outage becomes a full 5xx outage. Check
+    <code>docker logs claude-for-you</code> and the RDS instance state
+    (<code>storage-full</code> is the known cause).</p>
+  </section>
+</body>
+</html>`;
+
 export const renderMessagesList = (s: MessagesListSnapshot): string => {
   const { rows, filters, nextCursor, hasPrev } = s;
 

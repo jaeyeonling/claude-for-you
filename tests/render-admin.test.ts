@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  renderAdminError,
   renderAdminHtml,
   renderLiveSections,
   type AdminPageSnapshot,
@@ -29,7 +30,7 @@ const baseSnap = (overrides: Partial<AdminPageSnapshot> = {}): AdminPageSnapshot
     lastAlarmAt: null,
   },
   guardSnap: { remaining: null, observedAt: null },
-  usageSnap: {},
+  usageSnap: { ok: true, value: {} },
   canarySnap: {
     active: false,
     percent: 0,
@@ -613,5 +614,61 @@ describe('renderLiveSections vs renderAdminHtml split (SSE)', () => {
     // The change handler must call refreshEditMeta (not just applyEditSelection)
     // so external edits never leave stale values prefilled.
     expect(html).toContain('refreshEditMeta().then(applyEditSelection)');
+  });
+});
+
+// ---------- Degraded rendering (2026-07-30 storage-full incident) ----------
+//
+// The whole point of Degradable<UsageSnapshot> is that ONE dead dependency
+// must not cost the operator every other panel. These tests pin that: the
+// happy path still shows usage, the failure path still shows the in-memory
+// panels, and the reason survives to the page (escaped).
+
+describe('renderLiveSections — degraded usage panel', () => {
+  test('ok:true renders per-user rows and no degraded banner', () => {
+    const html = renderLiveSections(
+      baseSnap({
+        usageSnap: { ok: true, value: { alice: { day: '2026-07-30', tokens: 1234 } } },
+      }),
+    );
+    expect(html).toContain('alice');
+    expect(html).toContain('1,234 tok');
+    expect(html).not.toContain('>degraded<');
+  });
+
+  test('ok:false surfaces the reason and keeps in-memory panels', () => {
+    const html = renderLiveSections(
+      baseSnap({
+        usageSnap: { ok: false, reason: 'the database system is in recovery mode' },
+      }),
+    );
+    expect(html).toContain('the database system is in recovery mode');
+    expect(html).toContain('>degraded<');
+    // Non-DB panels must still be present — that is the entire benefit.
+    expect(html).toContain('billing health');
+    expect(html).toContain('account pool');
+  });
+
+  test('degraded reason is HTML-escaped (driver text is not trusted markup)', () => {
+    const html = renderLiveSections(
+      baseSnap({ usageSnap: { ok: false, reason: '<img src=x onerror=alert(1)>' } }),
+    );
+    expect(html).not.toContain('<img src=x');
+    expect(html).toContain('&lt;img src=x');
+  });
+});
+
+describe('renderAdminError', () => {
+  test('is HTML, not a JSON error envelope', () => {
+    const html = renderAdminError(new Date('2026-07-30T00:17:56Z'));
+    expect(html).toStartWith('<!doctype html>');
+    expect(html).not.toContain('internal_error');
+  });
+
+  test('carries the timestamp and points at the log + pitfalls entry', () => {
+    const html = renderAdminError(new Date('2026-07-30T00:17:56Z'));
+    expect(html).toContain('2026-07-30T00:17:56.000Z');
+    expect(html).toContain('docker logs');
+    expect(html).toContain('operational-pitfalls');
   });
 });

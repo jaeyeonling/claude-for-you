@@ -5,7 +5,12 @@ import type {
   MessageSource,
   StatusClass,
 } from '../usage/messages-log.js';
-import { renderMessageDetail, renderMessagesList } from './messages-render.js';
+import { attempt } from '../lib/degrade.js';
+import {
+  renderMessageDetail,
+  renderMessagesList,
+  renderStoreUnavailable,
+} from './messages-render.js';
 
 /**
  * Handlers for the messages-log admin pages. Pure orchestration — fetches
@@ -56,7 +61,9 @@ export const createMessagesListHandler =
       limit: PAGE_LIMIT,
     };
 
-    const rows = await deps.store.list(filters);
+    const listed = await attempt('messages-log-list', () => deps.store.list(filters));
+    if (!listed.ok) return c.html(renderStoreUnavailable(listed.reason));
+    const rows = listed.value;
     // Cursor for the next page = ts of the OLDEST row on this page (rows are
     // ordered DESC). When fewer than PAGE_LIMIT rows came back we've hit the
     // tail — no next cursor.
@@ -85,7 +92,9 @@ export const createMessageDetailHandler =
     const id = c.req.param('id');
     if (!id || !UUID_RE.test(id)) return c.text('invalid id', 400);
 
-    const record = await deps.store.get(id);
+    const fetched = await attempt('messages-log-get', () => deps.store.get(id));
+    if (!fetched.ok) return c.html(renderStoreUnavailable(fetched.reason));
+    const record = fetched.value;
     if (!record) return c.text('not found', 404);
 
     return c.html(renderMessageDetail(record));

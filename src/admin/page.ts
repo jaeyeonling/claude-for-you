@@ -10,6 +10,7 @@ import type { AlertStore } from '../alerts-store.js';
 import type { BillingMonitor } from '../usage/billing-monitor.js';
 import type { GlobalGuard } from '../usage/global.js';
 import type { UsageTracker } from '../usage/per-user.js';
+import { attempt } from '../lib/degrade.js';
 import { renderAdminHtml } from './render.js';
 import type { TestResultStore } from './test-runners.js';
 
@@ -48,7 +49,9 @@ export const createAdminPageHandler =
       poolSnap: deps.pool.snapshot(),
       billingSnap: deps.billingMonitor.snapshot(),
       guardSnap: deps.globalGuard.snapshot(),
-      usageSnap: await deps.tracker.snapshot(),
+      // The dashboard's ONLY I/O. A DB outage must degrade this one panel, not
+      // the page — see src/lib/degrade.ts for the incident that motivated it.
+      usageSnap: await attempt('usage-snapshot', () => deps.tracker.snapshot()),
       canarySnap: deps.canary.snapshot(),
       alertConfig: deps.alertStore.get(),
       apiKeyRows: deps.apiKeyStore.list().map((e) => {

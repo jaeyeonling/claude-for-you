@@ -9,6 +9,7 @@ import { createKeysHandlers } from './admin/keys.js';
 import { createMessageDetailHandler, createMessagesListHandler } from './admin/messages.js';
 import { createOAuthReplaceHandler } from './admin/oauth.js';
 import { createAdminPageHandler } from './admin/page.js';
+import { renderAdminError } from './admin/render.js';
 import { createSnapshotHandlers } from './admin/snapshot.js';
 import { createStatsHandler } from './admin/stats.js';
 import {
@@ -390,6 +391,15 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
       log.error(redact(err.stack));
     }
     void serverErrorSink(msg);
+    // Admin pages are browsed by a human, not consumed by an SDK. Handing a
+    // raw `{"error":{"type":"internal_error"}}` body to a browser (the
+    // 2026-07-30 symptom) tells the operator nothing about which dependency
+    // died or where to look. The JSON contract still holds for /v1/* — only
+    // the admin surface gets prose. The message stays generic on purpose:
+    // details are in the log line above, which is already redacted.
+    if (c.req.path.startsWith('/admin')) {
+      return c.html(renderAdminError(new Date()), 500);
+    }
     return c.json({ error: { type: 'internal_error', message: 'internal error' } }, 500);
   });
 

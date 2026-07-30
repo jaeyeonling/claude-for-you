@@ -47,8 +47,33 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
   /sk-[a-zA-Z0-9_-]{20,}/g,
 ]);
 
+// Credentials in a URL's userinfo segment (`postgres://claude:pw@host/db`,
+// `https://user:token@example.com`). Kept separate from TOKEN_PATTERNS because
+// it needs a capture-group replacement — the scheme and host stay visible so
+// the line remains diagnosable ("which database?"), only the credential pair
+// is dropped. Motivated by the degraded-read path (src/lib/degrade.ts), which
+// renders driver error text into the admin page: postgres.js does not normally
+// echo the DSN, but "normally" is not a guarantee worth betting a password on.
+//
+// Every quantifier here is BOUNDED, and that is load-bearing, not stylistic.
+// Every other pattern in TOKEN_PATTERNS begins with a literal (`Bearer`, `sk-`,
+// `eyJ`, `token`), so the engine rejects non-matching positions in O(1). This
+// one begins with a character class, which means an unbounded `[a-z...]*`
+// prefix would greedily consume any long lowercase run, fail to find `://`,
+// and backtrack — O(n²) over the whole input. Measured before bounding:
+// 50KB of `"a://" + "x"*50000` took 1.2s, and a 1MB body-derived string did
+// not finish. `redact` runs on EVERY emitted log line (logger.ts), so that is
+// an event-loop stall reachable from upstream error text.
+// Schemes are ≤32 chars in practice (`postgres`, `mongodb+srv`); userinfo
+// halves are capped at 256. Anything longer simply is not redacted — a missed
+// redaction is recoverable, a stalled proxy is not.
+const URL_USERINFO_PATTERN = /([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s:@/]{1,256}:[^\s@/]{1,256}@/gi;
+
 export const redact = (input: string): string =>
-  TOKEN_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '[REDACTED]'), input);
+  TOKEN_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '[REDACTED]'), input).replace(
+    URL_USERINFO_PATTERN,
+    '$1[REDACTED]@',
+  );
 
 export const redactObject = <T>(obj: T): T => {
   const json = JSON.stringify(obj);
