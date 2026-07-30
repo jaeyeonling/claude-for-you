@@ -96,6 +96,13 @@ export interface MessageLogRecord {
   /** Failure origin (see MessageSource). Optional so existing writers/tests
    * that predate the column keep compiling; null on legacy rows. */
   readonly source?: MessageSource | null;
+  /** When the bodies were moved to cold storage (#150). Null = still hot in
+   * Postgres. When set, `requestBody`/`responseBody` are null in the DB and
+   * the payload lives at `archiveKey`. */
+  readonly archivedAt?: Date | null;
+  /** S3 object key holding this row's archived bodies. See
+   * usage/messages-log-archive.ts for the key layout. */
+  readonly archiveKey?: string | null;
 }
 
 export interface MessageLogSummary {

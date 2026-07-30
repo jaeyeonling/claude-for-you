@@ -536,7 +536,67 @@ aws rds describe-db-instances --db-instance-identifier claude-for-you-db \
 - `src/lib/degrade.ts` → `attempt()`. DB 읽기 실패가 예외가 아니라 **값**이 되어, 죽은 패널만 경고를 띄우고 나머지는 그대로 렌더된다. `/admin`, `/admin/stats`, `/admin/events`(SSE), `/admin/messages`에 적용.
 - `/admin/*`의 unhandled 예외는 JSON이 아니라 **HTML 오류 페이지**를 반환한다 — 브라우저로 보는 화면에 raw JSON을 주면 어느 의존성이 죽었는지 알 수 없다.
 
-**근본 원인은 따로 있다**: `messages_log`가 요청/응답 전문을 저장하는데 보존 정책이 없었다(#13). 10주에 20GB. 스토리지 확장은 시간을 사는 것이고, 해결은 S3 콜드 스토리지 아카이빙이다.
+**근본 원인은 따로 있다**: `messages_log`가 요청/응답 전문을 저장하는데 보존 정책이 없었다(#13). 10주에 20GB. 스토리지 확장은 시간을 사는 것이고, 해결은 S3 콜드 스토리지 아카이빙(#150, 아래 런북)이다.
+
+---
+
+## messages_log 콜드 스토리지 운영 (#150)
+
+본문(`request_body`/`response_body`)만 S3로 옮기고 행은 **stub으로 남긴다**. 목록·검색·집계는 영구히 살아 있고, 상세 화면은 S3에서 본문을 지연 로드한다. 용량은 ~99% 줄어든다.
+
+```
+scripts/archive-messages-log.sh        (호스트 cron, 매일 04:17)
+  └─ IMDSv2 → 역할 임시 크리덴셜
+     └─ docker compose run --rm app bun src/usage/archive-cli.ts
+          SELECT (archived_at IS NULL AND ts < now()-14d) LIMIT 200
+          → gzip JSONL → s3://…/messages-log/dt=YYYY-MM-DD/part-<epoch>-<seq>.jsonl.gz
+          → UPDATE SET request_body=NULL, response_body=NULL, archived_at, archive_key
+```
+
+**최초 1회 절차**
+
+```bash
+# 1. 인프라
+cd terraform && terraform apply
+terraform output messages_archive_bucket          # → .env의 MESSAGES_LOG_ARCHIVE_BUCKET
+aws ssm get-parameter --name /claude-for-you/archive-reader-credentials \
+  --with-decryption --query Parameter.Value --output text   # → .env의 S3_* 두 줄
+
+# 2. .env를 SSM에 올리고 배포 (컨테이너가 S3 읽기 크리덴셜을 받아야 상세 화면이 열린다)
+aws ssm put-parameter --name /claude-for-you/env --value "$(cat .env)" \
+  --type SecureString --overwrite --region ap-northeast-2
+bash scripts/deploy.sh
+
+# 3. 리허설 — 아무것도 변경하지 않고 무엇이 올라갈지만 확인
+scripts/archive-messages-log.sh --dry-run
+
+# 4. 실제 실행. 배치 상한(기본 50)에 걸리면 백로그가 남았다는 경고가 찍힌다 → 다 빠질 때까지 재실행
+scripts/archive-messages-log.sh
+
+# 5. cron 등록
+sudo crontab -e
+# 17 4 * * * /home/ec2-user/claude-for-you/scripts/archive-messages-log.sh >> /var/log/cfy-archive.log 2>&1
+```
+
+> ⚠️ **`UPDATE … SET body = NULL`은 파일 크기를 줄이지 않는다.** TOAST 페이지가 테이블의 free space map으로 반환될 뿐이라 **성장은 멈추지만 이미 쓴 20GB는 OS로 돌아오지 않는다.** 실제로 줄이려면 첫 아카이브 후 저트래픽 시간대에 1회:
+>
+> ```sql
+> VACUUM (FULL, VERBOSE) messages_log;
+> ```
+>
+> 배타 락이 걸리지만 `messages_log` 쓰기는 fire-and-forget이라(`src/proxy/messages.ts`) 사용자 트래픽은 영향받지 않는다 — 그 시간 동안 로그 행이 유실될 뿐이다. **테이블 크기만큼의 여유 공간이 필요하다**(지금 50GB라 충족). 여유가 없으면 `VACUUM FULL`이 오히려 디스크를 꽉 채운다 — 그 경우엔 `pg_repack`.
+
+**아카이브된 대화를 보는 방법**
+
+- 어드민 상세 화면 → "archived to cold storage" → `open archived bodies`. 컨테이너에 `S3_*` 크리덴셜이 있어야 동작한다.
+- 크리덴셜이 없으면 같은 화면이 객체 키와 실행 가능한 `aws s3 cp … | gunzip | grep <id> | jq .` 명령을 보여준다.
+- 대량 분석은 Athena를 `dt=` 파티션에 붙이면 된다 — 그래서 처음부터 Hive 스타일 레이아웃으로 썼다.
+
+**함정**
+
+- **`request_body`의 NOT NULL 제약**. 기존 배포는 이 컬럼이 `NOT NULL`로 만들어져 있어서 아카이버의 UPDATE가 `23502`로 실패한다. 마이그레이션이 `ALTER COLUMN … DROP NOT NULL`을 idempotent하게 실행한다. 이게 없으면 **아카이빙이 조용히 아무 일도 안 하면서 테이블은 계속 자란다**.
+- **컨테이너는 IMDS에 못 간다** (`http_put_response_hop_limit = 1`, SSRF 방어). 그래서 쓰기 크리덴셜은 **호스트**가 받아서 주입하고, 읽기는 별도의 읽기 전용 IAM 사용자 키를 쓴다. 컨테이너 안에서 `aws sts get-caller-identity`를 시도하며 디버깅하지 말 것 — 설계상 안 되는 게 정상이다.
+- **업로드 → UPDATE 순서는 절대 바꾸지 말 것**. 업로드 성공 후 UPDATE 실패는 S3 고아 객체(무해, 재실행 시 새 키로 재업로드)를 남기지만, 역순은 S3에 없는 본문을 지우는 데이터 소실 경로다. `tests/messages-log-archive.test.ts`가 호출 순서를 고정한다.
 
 ---
 

@@ -6,6 +6,7 @@ import type {
   StatusClass,
 } from '../usage/messages-log.js';
 import { attempt } from '../lib/degrade.js';
+import { parseArchivedRow } from '../usage/messages-log-archive.js';
 import {
   renderMessageDetail,
   renderMessagesList,
@@ -38,6 +39,14 @@ const parseBefore = (raw: string | undefined): Date | undefined => {
 
 export interface MessagesAdminDeps {
   readonly store: MessageLogStore;
+  /**
+   * Fetches an archived part from cold storage (#150). Null when archiving is
+   * not configured, or when the app has no S3 read credentials — the app
+   * container cannot use the instance role (IMDS is unreachable at
+   * `http_put_response_hop_limit = 1`), so this is wired only when a read-only
+   * key is present. Absent capability degrades to showing the object key.
+   */
+  readonly readArchive?: ((key: string) => Promise<Uint8Array>) | null;
 }
 
 export const createMessagesListHandler =
@@ -97,5 +106,50 @@ export const createMessageDetailHandler =
     const record = fetched.value;
     if (!record) return c.text('not found', 404);
 
-    return c.html(renderMessageDetail(record));
+    return c.html(renderMessageDetail(record, { canReadArchive: Boolean(deps.readArchive) }));
+  };
+
+/**
+ * GET /admin/messages/:id/archived — re-hydrate a row whose bodies were moved
+ * to cold storage and render the ordinary detail page from the archived copy.
+ *
+ * Kept as a separate route rather than folded into the detail handler so the
+ * S3 round-trip is opt-in per click. Archived rows are by definition the old
+ * ones; making every detail view pay a possible cold-storage fetch would be a
+ * latency tax on the common case.
+ */
+export const createArchivedMessageHandler =
+  (deps: MessagesAdminDeps) =>
+  async (c: Context): Promise<Response> => {
+    const id = c.req.param('id');
+    if (!id || !UUID_RE.test(id)) return c.text('invalid id', 400);
+
+    const readArchive = deps.readArchive;
+    if (!readArchive) {
+      return c.text(
+        'archive reads are not configured on this instance (no S3 read credentials)',
+        501,
+      );
+    }
+
+    const fetched = await attempt('messages-log-get', () => deps.store.get(id));
+    if (!fetched.ok) return c.html(renderStoreUnavailable(fetched.reason));
+    const record = fetched.value;
+    if (!record) return c.text('not found', 404);
+
+    const key = record.archiveKey;
+    if (!key) return c.text('this message is not archived', 404);
+
+    const object = await attempt('messages-log-archive-read', () => readArchive(key));
+    if (!object.ok) return c.html(renderStoreUnavailable(object.reason));
+
+    // A miss here is a real inconsistency worth naming precisely rather than
+    // rendering an empty page: the row points at an object that does not
+    // contain it (stale key, or a part that was replaced by a lifecycle rule).
+    const archived = parseArchivedRow(object.value, id);
+    if (!archived) {
+      return c.text(`archived object ${key} does not contain row ${id}`, 502);
+    }
+
+    return c.html(renderMessageDetail(archived, { canReadArchive: true, restoredFrom: key }));
   };

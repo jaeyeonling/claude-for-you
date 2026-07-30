@@ -18,12 +18,14 @@ data "aws_ami" "al2023" {
 data "aws_caller_identity" "current" {}
 
 locals {
-  env_parameter_name        = "/${var.name}/env"
-  database_parameter_name   = "/${var.name}/database-url"
-  deploy_key_parameter_name = "/${var.name}/github-deploy-key"
-  env_parameter_arn         = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.env_parameter_name}"
-  database_parameter_arn    = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.database_parameter_name}"
-  deploy_key_parameter_arn  = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.deploy_key_parameter_name}"
+  env_parameter_name                 = "/${var.name}/env"
+  database_parameter_name            = "/${var.name}/database-url"
+  deploy_key_parameter_name          = "/${var.name}/github-deploy-key"
+  archive_credentials_parameter_name = "/${var.name}/archive-reader-credentials"
+  env_parameter_arn                  = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.env_parameter_name}"
+  archive_credentials_parameter_arn  = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.archive_credentials_parameter_name}"
+  database_parameter_arn             = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.database_parameter_name}"
+  deploy_key_parameter_arn           = "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.deploy_key_parameter_name}"
   # Transparently convert the HTTPS clone URL the operator supplies in var.git_repo_url
   # (kept as HTTPS for UI/docs consistency) into the SSH form actually used at boot,
   # now that the SSH deploy key replaces the GitHub PAT.
@@ -69,6 +71,11 @@ resource "aws_iam_role_policy" "env_param_read" {
           local.env_parameter_arn,
           local.database_parameter_arn,
           local.deploy_key_parameter_arn,
+          # Read-only S3 credentials for archived messages_log bodies (#150).
+          # Referenced via locals rather than the resource attribute to avoid a
+          # cycle: the parameter lives in archive.tf, whose IAM policy attaches
+          # to the same role this policy belongs to.
+          local.archive_credentials_parameter_arn,
         ]
       },
       {

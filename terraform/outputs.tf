@@ -37,3 +37,18 @@ output "alarm_name" {
   description = "Name of the NetworkIn drop alarm. Use with `aws cloudwatch describe-alarms --alarm-names` to inspect state."
   value       = aws_cloudwatch_metric_alarm.network_in_drop.alarm_name
 }
+
+output "messages_archive_bucket" {
+  description = "S3 bucket holding archived messages_log bodies. Set MESSAGES_LOG_ARCHIVE_BUCKET to this value in the app .env."
+  value       = aws_s3_bucket.messages_archive.bucket
+}
+
+output "archive_reader_credentials_parameter" {
+  description = "SSM SecureString holding the read-only S3 credentials the app container uses to display archived bodies. Fetch with: aws ssm get-parameter --name <this> --with-decryption --query Parameter.Value --output text"
+  value       = aws_ssm_parameter.archive_reader_credentials.name
+}
+
+output "rds_storage_alarm_name" {
+  description = "Name of the RDS free-storage alarm (#22). Use with `aws cloudwatch describe-alarms --alarm-names` to inspect state."
+  value       = aws_cloudwatch_metric_alarm.rds_free_storage.alarm_name
+}

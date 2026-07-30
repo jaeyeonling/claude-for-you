@@ -6,7 +6,11 @@ import { createAlertsHandlers } from './admin/alerts.js';
 import { csrfGuard } from './admin/csrf.js';
 import { createAdminEventsHandler } from './admin/events.js';
 import { createKeysHandlers } from './admin/keys.js';
-import { createMessageDetailHandler, createMessagesListHandler } from './admin/messages.js';
+import {
+  createArchivedMessageHandler,
+  createMessageDetailHandler,
+  createMessagesListHandler,
+} from './admin/messages.js';
 import { createOAuthReplaceHandler } from './admin/oauth.js';
 import { createAdminPageHandler } from './admin/page.js';
 import { renderAdminError } from './admin/render.js';
@@ -119,6 +123,41 @@ const buildTracker = async (config: AppConfig): Promise<UsageTracker> => {
     });
   }
   return createUsageTracker({ dailyLimitPerKey: config.dailyTokenLimitPerKey });
+};
+
+/**
+ * Read-only S3 accessor for archived message bodies (#150), or null when the
+ * capability is absent.
+ *
+ * Two independent preconditions, and both are genuinely optional: a bucket must
+ * be configured, and credentials must exist in the environment. Bun's S3 client
+ * reads `S3_*` then falls back to `AWS_*`; it has no IMDS path, and the
+ * container could not reach IMDS anyway (`http_put_response_hop_limit = 1`,
+ * verified on the instance). So we check for an explicit key rather than
+ * constructing a client that would fail on first use — a null capability
+ * renders a useful fallback, a broken client renders a 500.
+ */
+const buildArchiveReader = (
+  config: AppConfig,
+): ((key: string) => Promise<Uint8Array>) | null => {
+  if (!config.messagesLogArchiveBucket) return null;
+  const hasCredentials = Boolean(
+    (process.env.S3_ACCESS_KEY_ID ?? process.env.AWS_ACCESS_KEY_ID) &&
+      (process.env.S3_SECRET_ACCESS_KEY ?? process.env.AWS_SECRET_ACCESS_KEY),
+  );
+  if (!hasCredentials) {
+    log.warn(
+      '[archive] MESSAGES_LOG_ARCHIVE_BUCKET is set but no S3 credentials are present — ' +
+        'admin will show archive keys instead of bodies',
+    );
+    return null;
+  }
+  const client = new Bun.S3Client({
+    bucket: config.messagesLogArchiveBucket,
+    region: config.messagesLogArchiveRegion,
+  });
+  return async (key: string): Promise<Uint8Array> =>
+    new Uint8Array(await client.file(key).arrayBuffer());
 };
 
 const buildMessageLogStore = async (config: AppConfig): Promise<MessageLogStore> => {
@@ -343,8 +382,17 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   app.post('/admin/snapshot/promote', snapH.promote);
   app.post('/admin/snapshot/rollback', snapH.rollback);
 
-  app.get('/admin/messages', createMessagesListHandler({ store: messageLogStore }));
-  app.get('/admin/messages/:id', createMessageDetailHandler({ store: messageLogStore }));
+  // Cold-storage read-back (#150). Only wired when a bucket is configured AND
+  // S3 credentials are present in the environment: the app container cannot use
+  // the instance role (IMDS is unreachable at hop limit 1), so this depends on a
+  // read-only key injected via SSM. Without it the detail page degrades to
+  // showing the object key — which is why the capability is a nullable dep
+  // rather than an assumed one.
+  const archiveReader = buildArchiveReader(config);
+  const messagesDeps = { store: messageLogStore, readArchive: archiveReader };
+  app.get('/admin/messages', createMessagesListHandler(messagesDeps));
+  app.get('/admin/messages/:id', createMessageDetailHandler(messagesDeps));
+  app.get('/admin/messages/:id/archived', createArchivedMessageHandler(messagesDeps));
 
   app.post('/admin/oauth/replace', createOAuthReplaceHandler(pool));
   const alertsH = createAlertsHandlers(alertStore);
