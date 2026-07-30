@@ -8,6 +8,7 @@ import type {
   ResponseBody,
 } from "./messages-log.js";
 import { extractPreview, sanitizeJsonValue } from "./messages-log.js";
+import type { ArchivableRow, ArchiveSource } from "./messages-log-archive.js";
 
 /**
  * Postgres-backed MessageLogStore.
@@ -53,6 +54,8 @@ interface DetailRow {
   readonly served_by: string | null;
   readonly bypass_metadata: unknown;
   readonly source: MessageSource | null;
+  readonly archived_at: Date | null;
+  readonly archive_key: string | null;
 }
 
 interface SummaryRow {
@@ -107,6 +110,8 @@ const toRecord = (r: DetailRow): MessageLogRecord => ({
   servedBy: r.served_by,
   bypassMetadata: r.bypass_metadata,
   source: r.source ?? null,
+  archivedAt: r.archived_at ?? null,
+  archiveKey: r.archive_key ?? null,
 });
 
 export const createPostgresMessageLogStore = async (
@@ -135,7 +140,10 @@ export const createPostgresMessageLogStore = async (
       stop_reason TEXT,
       client_ip TEXT,
       user_agent TEXT,
-      request_body JSONB NOT NULL,
+      -- Nullable since #150: archiving nulls the bodies in place and keeps the
+      -- row as a queryable stub. Writers always populate request_body, so a
+      -- NULL here means exactly one thing — "archived, see archive_key".
+      request_body JSONB,
       response_body JSONB,
       preview TEXT NOT NULL DEFAULT '',
       error_message TEXT,
@@ -150,6 +158,15 @@ export const createPostgresMessageLogStore = async (
   await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS bypass_metadata JSONB`;
   // Failure-origin classifier (issue #144). NULL on rows written before it.
   await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS source TEXT`;
+  // Cold-storage archival (issue #150). archived_at NULL = bodies still here.
+  await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE messages_log ADD COLUMN IF NOT EXISTS archive_key TEXT`;
+  // Existing deployments created request_body as NOT NULL. The archiver's
+  // `SET request_body = NULL` would fail that constraint with 23502 on every
+  // batch — and because the archiver runs unattended, that failure would look
+  // like "archiving mysteriously does nothing" while the table keeps growing.
+  // Idempotent: a no-op once the column is already nullable.
+  await sql`ALTER TABLE messages_log ALTER COLUMN request_body DROP NOT NULL`;
   // Indexes: ts-desc is the dashboard's default scan; (user, ts) accelerates
   // per-user views; status-partial gates the "errors only" filter without
   // bloating the index for the 2xx majority.
@@ -161,6 +178,11 @@ export const createPostgresMessageLogStore = async (
   // excluded since the filter never queries it. Justified now because #145
   // will aggregate proxy-vs-upstream counts over this column.
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_source_ts ON messages_log (source, ts DESC) WHERE source IS NOT NULL`;
+  // Archiver scan index (#150): the job asks exactly one question — "oldest
+  // rows still holding their bodies". ASC (not DESC like the others) because it
+  // walks from the tail, and partial on `archived_at IS NULL` so the index
+  // shrinks as rows are archived instead of growing with the table forever.
+  await sql`CREATE INDEX IF NOT EXISTS idx_messages_log_unarchived_ts ON messages_log (ts) WHERE archived_at IS NULL`;
 
   // `preview ILIKE '%foo%'` has a leading-wildcard pattern that a plain B-tree
   // can't help with. pg_trgm + GIN gives us proper sub-string acceleration —
@@ -259,12 +281,73 @@ export const createPostgresMessageLogStore = async (
                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                service_tier, stop_reason, client_ip, user_agent,
                request_body, response_body, error_message,
-               served_by, bypass_metadata, source
+               served_by, bypass_metadata, source, archived_at, archive_key
           FROM messages_log
          WHERE id = ${id}
       `;
       const first = rows[0];
       return first ? toRecord(first) : null;
+    },
+
+    async close(): Promise<void> {
+      await sql.end({ timeout: 5 });
+    },
+  });
+};
+
+/**
+ * Postgres side of the cold-storage archiver (#150). Separate factory, separate
+ * connection: the archiver runs as its own short-lived process (host cron →
+ * one-shot container), so it must not depend on the serving app's pool — and
+ * conversely the serving app must never be able to reach these two statements.
+ *
+ * `max: 1` because the archiver is strictly sequential by design; a pool would
+ * only invite someone to parallelize it later, which is exactly what a database
+ * that has already filled its volume once does not need.
+ */
+export const createPostgresArchiveSource = async (
+  params: PostgresMessageLogStoreParams,
+): Promise<ArchiveSource & { close(): Promise<void> }> => {
+  const sql = postgres(params.databaseUrl, {
+    max: 1,
+    idle_timeout: 30,
+    connect_timeout: 10,
+  });
+
+  return Object.freeze({
+    async selectBatch(cutoff: Date, limit: number): Promise<readonly ArchivableRow[]> {
+      // ORDER BY ts ASC — walk the oldest first so a backlog drains in a
+      // predictable order and each run's `dt=` partitions are contiguous.
+      // Matches idx_messages_log_unarchived_ts (partial, ASC).
+      const rows = await sql<DetailRow[]>`
+        SELECT id, ts, user_name, model, status, streaming, duration_ms,
+               input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+               service_tier, stop_reason, client_ip, user_agent,
+               request_body, response_body, error_message,
+               served_by, bypass_metadata, source, archived_at, archive_key
+          FROM messages_log
+         WHERE archived_at IS NULL
+           AND ts < ${cutoff}
+         ORDER BY ts ASC
+         LIMIT ${limit}
+      `;
+      return rows.map(toRecord);
+    },
+
+    async markArchived(ids: readonly string[], archiveKey: string, at: Date): Promise<void> {
+      if (ids.length === 0) return;
+      // `archived_at IS NULL` in the WHERE clause makes this idempotent: a
+      // retry after a partial failure cannot re-stamp rows that already point
+      // at an earlier object, so a row's archive_key never silently moves.
+      await sql`
+        UPDATE messages_log
+           SET request_body = NULL,
+               response_body = NULL,
+               archived_at = ${at},
+               archive_key = ${archiveKey}
+         WHERE id IN ${sql(ids as string[])}
+           AND archived_at IS NULL
+      `;
     },
 
     async close(): Promise<void> {

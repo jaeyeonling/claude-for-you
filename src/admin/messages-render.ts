@@ -467,7 +467,52 @@ const renderBypassMetadata = (m: unknown): string => {
   </section>`;
 };
 
-export const renderMessageDetail = (r: MessageLogRecord): string => {
+export interface MessageDetailOptions {
+  /** True when the instance has S3 read credentials, so the "open" link works. */
+  readonly canReadArchive?: boolean;
+  /** Set when this page was rendered FROM cold storage, naming the object. */
+  readonly restoredFrom?: string;
+}
+
+/**
+ * Cold-storage banner (#150). Three distinct states, and conflating them would
+ * send the operator hunting for a bug that is not there:
+ *   1. rendered from the archive — bodies are real, say where they came from
+ *   2. archived and readable   — offer the fetch
+ *   3. archived, not readable  — no S3 read credentials on this instance; show
+ *      the key and the exact command, rather than a link that 501s
+ */
+const renderArchiveBanner = (r: MessageLogRecord, opts: MessageDetailOptions): string => {
+  if (opts.restoredFrom) {
+    return `<section class="detail" style="border-color:var(--accent)">
+    <h2>restored from cold storage</h2>
+    <div>Bodies below were read from <code>${esc(opts.restoredFrom)}</code>.</div>
+    <div class="tag">The Postgres row keeps only its metadata; this view reassembles the full payload from S3.</div>
+  </section>`;
+  }
+  if (!r.archivedAt || !r.archiveKey) return '';
+  const archivedAtText = fmtTs(r.archivedAt);
+  if (opts.canReadArchive) {
+    return `<section class="detail" style="border-color:var(--warn)">
+    <h2>archived to cold storage</h2>
+    <div>Request and response bodies were moved to S3 on ${esc(archivedAtText)} UTC.</div>
+    <div style="margin-top:.5rem"><a href="/admin/messages/${esc(r.id)}/archived">open archived bodies →</a></div>
+    <div class="tag">Object: <code>${esc(r.archiveKey)}</code></div>
+  </section>`;
+  }
+  return `<section class="detail" style="border-color:var(--warn)">
+    <h2>archived to cold storage</h2>
+    <div>Request and response bodies were moved to S3 on ${esc(archivedAtText)} UTC.
+    This instance has no S3 read credentials, so they cannot be shown here.</div>
+    <div class="tag" style="margin-top:.5rem">Fetch it from a machine with access:</div>
+    <pre>aws s3 cp s3://&lt;archive-bucket&gt;/${esc(r.archiveKey)} - | gunzip | grep ${esc(r.id)} | jq .</pre>
+  </section>`;
+};
+
+export const renderMessageDetail = (
+  r: MessageLogRecord,
+  opts: MessageDetailOptions = {},
+): string => {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -503,6 +548,8 @@ export const renderMessageDetail = (r: MessageLogRecord): string => {
       ${r.errorMessage ? `<dt>error</dt><dd><span class="badge b-bad">error</span> ${esc(r.errorMessage)}</dd>` : ''}
     </dl>
   </section>
+
+  ${renderArchiveBanner(r, opts)}
 
   ${renderBypassMetadata(r.bypassMetadata)}
 

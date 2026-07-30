@@ -50,3 +50,14 @@ variable "alert_email" {
     error_message = "alert_email must be either empty or a single token of the form user@host (no whitespace, exactly one '@'). Validation is intentionally loose — full RFC 5322 conformance is the SNS subscription confirmation step's job."
   }
 }
+
+variable "archive_expiration_days" {
+  description = "Delete archived messages_log objects after this many days. 0 = keep forever (default). These objects are the only record of what the proxy actually sent and received, so expiry is opt-in with a number you chose rather than a default you inherited."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.archive_expiration_days == 0 || var.archive_expiration_days >= 90
+    error_message = "archive_expiration_days must be 0 (keep forever) or at least 90. Objects transition to GLACIER_IR at day 90, and expiring before that pays the transition cost for nothing."
+  }
+}

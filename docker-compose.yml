@@ -35,6 +35,23 @@ services:
       # Drift alarm channel
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # messages_log cold storage (#150).
+      #
+      # The BUCKET is needed by two different consumers with different
+      # credentials, which is not an accident:
+      #   - the archiver (writes) runs as a one-shot container and gets
+      #     short-lived role credentials injected by
+      #     scripts/archive-messages-log.sh — nothing here.
+      #   - this long-running container (reads, for the admin detail view) uses
+      #     S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY, a read-only IAM user whose
+      #     key lives in SSM. It cannot use the instance role: IMDS is
+      #     unreachable from containers at http_put_response_hop_limit = 1.
+      # Leave the S3_* pair empty to disable read-back; the admin page then
+      # shows the object key and an `aws s3 cp` command instead of the bodies.
+      MESSAGES_LOG_ARCHIVE_BUCKET: ${MESSAGES_LOG_ARCHIVE_BUCKET:-}
+      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
       # Wire-fidelity tuning (optional)
       PACING_MIN_GAP_MS: ${PACING_MIN_GAP_MS:-0}
       ACCOUNT_UUID_OVERRIDE: ${ACCOUNT_UUID_OVERRIDE:-}
