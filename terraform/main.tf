@@ -207,9 +207,17 @@ resource "aws_db_instance" "app" {
   allocated_storage = 50
   # Storage autoscaling: RDS grows the volume on its own when free space drops
   # below ~10%, up to this ceiling. Without it a full volume is a hard outage
-  # (you can't even DELETE rows — that needs WAL write space). 200GB caps the
-  # blast radius on cost; gp3 bills per provisioned GB, not per max.
-  max_allocated_storage  = 200
+  # (you can't even DELETE rows — that needs WAL write space).
+  #
+  # 500GB, not 200: gp3 bills PROVISIONED capacity, not the ceiling, so raising
+  # this costs nothing until growth actually consumes it — and the cost of the
+  # ceiling being too low is an outage that cannot be resolved by deleting data.
+  # There is no symmetry between the two failure directions here.
+  #
+  # This is a safety net, not a fix. #150 (S3 archival) is what bounds growth;
+  # if the volume ever autoscales past ~100GB with archiving enabled, something
+  # is wrong with the archiver rather than with this number.
+  max_allocated_storage  = 500
   storage_type           = "gp3"
   storage_encrypted      = true
   db_name                = "claude_for_you"
