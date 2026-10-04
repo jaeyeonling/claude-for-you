@@ -10,7 +10,8 @@
  *
  *   Outbound headers (`user-agent: claude-cli/...`, `anthropic-beta: claude-code-...`,
  *   `x-app: cli`, `anthropic-dangerous-direct-browser-access: true`) are already
- *   forged correctly — the classifier reads prompt **content**, not headers.
+ *   CC-shaped (snapshot-replayed, or the client's own claude-cli UA when newer —
+ *   #163) — the classifier reads prompt **content**, not headers.
  *
  *   In-proxy bisection (recorded on #123) confirmed two independent triggers
  *   on the failing traffic:

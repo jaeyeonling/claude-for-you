@@ -242,7 +242,7 @@ The proxy ships a snapshot of Claude Code's HTTP wire shape and replays it on ev
 | TLS ClientHello | ✅ | Bun's TLS stack matches Claude Code's BoringSSL fingerprint. |
 | Header order | ✅ | Captured in TCP arrival order, replayed via `@hono/node-server`. |
 | `anthropic-beta` flags | ✅ | Static binary extraction + whitelist, client beta flags union'd. |
-| `user-agent`, `x-app`, `anthropic-version` | ✅ | Static. |
+| `user-agent`, `x-app`, `anthropic-version` | ✅ | `x-app` / `anthropic-version` static. `user-agent`: a real Claude Code client's `claude-cli/x.y.z …` is forwarded verbatim so upstream's per-model minimum-version gate tracks the *user's* CLI, not our capture age (#163); SDK-direct / other UAs get the snapshot value. |
 | Body key order | ✅ | Captured. |
 | Session lifecycle & pacing | ✅ | Snapshot's p50 inter-arrival used as pacing floor. |
 | Cumulative aggregates | ❌ | Multi-tenant traffic on one OAuth account is structurally unnatural over weeks. Multi-account pool is the only mitigation. |
