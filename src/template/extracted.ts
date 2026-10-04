@@ -144,6 +144,97 @@ const mergeAnthropicBeta = (baseValue: string, clientHeaders: Headers | undefine
   return value;
 };
 
+/**
+ * #163 — forward a real Claude Code client's `user-agent` when it is NEWER
+ * than the snapshot's; otherwise replay the snapshot's.
+ *
+ * Why: upstream gates each model family on the CC version in this header
+ * (as of 2026-10: claude-opus-5-5 → ≥2.1.280, claude-fable-5-1 → ≥2.1.251).
+ * Replaying a fixed snapshot value gated every user on *our* capture age,
+ * not their CLI (#160). Verified 2026-10-04 that upstream tolerates a UA
+ * newer than the rest of the replayed fingerprint (2.1.400 UA + 2.1.288
+ * beta/stainless set → 200 standard) and ignores the `cli`/`sdk-cli`
+ * suffix — see #163 for the matrix.
+ *
+ * Policy, and what is deliberately NOT forwarded:
+ *  - SDK-direct / cc-maxed / absent UAs → snapshot. Looking like CC for them
+ *    is the template's whole job.
+ *  - A claude-cli UA OLDER than the snapshot → snapshot. The user is never
+ *    worse off than before this change, and extreme values (`0.0.1`) can't
+ *    skew the shared account's fingerprint.
+ *  - Anything not matching the strict shape below (pre-release tags, extra
+ *    parentheticals, non-ASCII, control chars) → snapshot, with one warn per
+ *    distinct value so a future CC UA format change is visible in logs
+ *    instead of silently re-introducing the #160 gate.
+ * CR/LF is additionally impossible here: the Fetch `Headers` API rejects it
+ * before this code runs.
+ */
+const CLAUDE_CLI_UA =
+  /^claude-cli\/(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?: \([A-Za-z0-9 ,._:+/-]{1,60}\))?$/;
+// Generous pre-check so the regex never sees pathological input. Real values
+// are ~40 chars (`claude-cli/2.1.288 (external, sdk-cli)`).
+const MAX_FORWARDED_UA_LENGTH = 120;
+const MAX_WARNED_UA_SHAPES = 50;
+const warnedUaShapes = new Set<string>();
+
+type CliVersion = readonly [number, number, number];
+
+const parseClaudeCliUa = (ua: string): CliVersion | null => {
+  const m = CLAUDE_CLI_UA.exec(ua);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+};
+
+const compareVersions = (a: CliVersion, b: CliVersion): number =>
+  a[0] !== b[0] ? a[0] - b[0] : a[1] !== b[1] ? a[1] - b[1] : a[2] - b[2];
+
+// Re-capture signal: a client a minor/major ahead of the snapshot still gets
+// forwarded (verified up to 4.0.0 vs a 2.1.288 set → 200 standard, #163), but
+// it means the snapshot's beta/stainless set is now behind what real CC
+// sends — pitfall #8 territory. Warn once per (snapshot, client) major.minor.
+const warnedSkewKeys = new Set<string>();
+const warnSnapshotBehind = (snapshot: CliVersion, client: CliVersion): void => {
+  if (snapshot[0] === client[0] && snapshot[1] === client[1]) return;
+  const key = `${snapshot[0]}.${snapshot[1]}->${client[0]}.${client[1]}`;
+  if (warnedSkewKeys.has(key) || warnedSkewKeys.size >= MAX_WARNED_UA_SHAPES) return;
+  warnedSkewKeys.add(key);
+  log.warn(
+    `[template] snapshot user-agent ${snapshot.join('.')} is a minor/major behind a client at ${client.join('.')} — forwarding the client UA, but the replayed beta/stainless set is stale; re-capture (scripts/cron-capture.sh, pitfalls #23).`,
+  );
+};
+
+const warnUnrecognizedCliUa = (ua: string): void => {
+  if (warnedUaShapes.has(ua) || warnedUaShapes.size >= MAX_WARNED_UA_SHAPES) return;
+  warnedUaShapes.add(ua);
+  log.warn(
+    `[template] claude-cli user-agent not forwarded (unrecognized shape, replaying snapshot): ${JSON.stringify(ua.slice(0, MAX_FORWARDED_UA_LENGTH))}`,
+  );
+};
+
+export const resolveUserAgent = (
+  snapshotUserAgent: string,
+  clientHeaders: Headers | undefined,
+): string => {
+  const fromClient = clientHeaders?.get('user-agent');
+  if (!fromClient || !fromClient.startsWith('claude-cli/')) return snapshotUserAgent;
+
+  const clientVersion =
+    fromClient.length <= MAX_FORWARDED_UA_LENGTH ? parseClaudeCliUa(fromClient) : null;
+  if (clientVersion === null) {
+    warnUnrecognizedCliUa(fromClient);
+    return snapshotUserAgent;
+  }
+
+  // An unparseable snapshot UA (hand-edited snapshot?) can't be compared —
+  // forward the well-formed client value rather than replay something odd.
+  const snapshotVersion = parseClaudeCliUa(snapshotUserAgent);
+  if (snapshotVersion === null) return fromClient;
+
+  if (compareVersions(clientVersion, snapshotVersion) <= 0) return snapshotUserAgent;
+  warnSnapshotBehind(snapshotVersion, clientVersion);
+  return fromClient;
+};
+
 const buildHeaders = (
   snapshot: SnapshotV2,
   valueByHeader: ReadonlyMap<string, string>,
@@ -152,6 +243,7 @@ const buildHeaders = (
 ): Record<string, string> => {
   const out: Record<string, string> = {};
   let authSlotFilled = false;
+  let userAgentSlotSeen = false;
 
   for (const name of snapshot.headerOrder) {
     if (TRANSPORT.has(name)) continue;
@@ -179,12 +271,26 @@ const buildHeaders = (
       continue;
     }
 
+    if (name === 'user-agent') {
+      userAgentSlotSeen = true;
+      const ua = resolveUserAgent(valueByHeader.get('user-agent') ?? '', clientHeaders);
+      if (ua.length > 0) out['user-agent'] = ua;
+      continue;
+    }
+
     const val = valueByHeader.get(name);
     if (val !== undefined) out[name] = val;
   }
 
   if (!authSlotFilled) out.authorization = `Bearer ${accessToken}`;
   if (!('content-type' in out)) out['content-type'] = 'application/json';
+  // A snapshot with no user-agent slot (hand-edited / partial capture) must
+  // still let a well-formed client UA through — otherwise the #160 gate
+  // returns via the back door with no UA at all.
+  if (!userAgentSlotSeen) {
+    const ua = resolveUserAgent('', clientHeaders);
+    if (ua.length > 0) out['user-agent'] = ua;
+  }
 
   return out;
 };

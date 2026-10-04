@@ -242,7 +242,7 @@ curl -sS "$ANTHROPIC_BASE_URL/v1/models?limit=1000" -H "x-api-key: <프록시-�
 | TLS ClientHello | ✅ | Bun의 TLS 스택이 Claude Code의 BoringSSL fingerprint와 일치. |
 | 헤더 순서 | ✅ | TCP 도착 순서대로 캡처, `@hono/node-server`로 재생. |
 | `anthropic-beta` flags | ✅ | 정적 바이너리 추출 + 화이트리스트, 클라이언트 beta flag union. |
-| `user-agent`, `x-app`, `anthropic-version` | ✅ | 정적. |
+| `user-agent`, `x-app`, `anthropic-version` | ✅ | `x-app` / `anthropic-version`은 정적. `user-agent`는 실제 Claude Code 클라이언트의 `claude-cli/x.y.z …`가 **snapshot보다 새 버전일 때** 그대로 전달해 본사의 모델별 최소 버전 게이트가 캡처 시점이 아니라 **사용자 CLI** 버전을 보게 한다(#163). snapshot과 같거나 오래된 claude-cli, SDK 직접 호출 등 그 외 UA는 snapshot 값(이전보다 나빠지는 사용자는 없다). |
 | Body key 순서 | ✅ | 캡처. |
 | Session lifecycle & pacing | ✅ | Snapshot의 p50 inter-arrival을 pacing floor로 사용. |
 | Cumulative aggregates | ❌ | 한 OAuth 계정의 multi-tenant 트래픽은 주 단위로 구조적으로 부자연. Multi-account pool만이 완화책. |
