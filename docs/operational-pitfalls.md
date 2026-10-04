@@ -596,6 +596,8 @@ sudo crontab -e
 
 - **`request_body`의 NOT NULL 제약**. 기존 배포는 이 컬럼이 `NOT NULL`로 만들어져 있어서 아카이버의 UPDATE가 `23502`로 실패한다. 마이그레이션이 `ALTER COLUMN … DROP NOT NULL`을 idempotent하게 실행한다. 이게 없으면 **아카이빙이 조용히 아무 일도 안 하면서 테이블은 계속 자란다**.
 - **컨테이너는 IMDS에 못 간다** (`http_put_response_hop_limit = 1`, SSRF 방어). 그래서 쓰기 크리덴셜은 **호스트**가 받아서 주입하고, 읽기는 별도의 읽기 전용 IAM 사용자 키를 쓴다. 컨테이너 안에서 `aws sts get-caller-identity`를 시도하며 디버깅하지 말 것 — 설계상 안 되는 게 정상이다.
+- **`S3_*`와 `AWS_*` 크리덴셜이 한 컨테이너에 공존한다 (#158)**. compose가 넣는 `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`는 어드민 읽기용 **장기 IAM 사용자**(세션 토큰 없음)이고, 래퍼가 주입하는 `AWS_*`는 **인스턴스 역할 임시 크리덴셜**(세션 토큰 있음)이다. Bun은 변수별로 `S3_*` → `AWS_*` 순서로 폴백하므로, 암묵적 해석에 맡기면 **읽기 사용자의 키 + 역할의 세션 토큰**이라는 키메라가 조립되어 모든 PUT이 `The provided token is malformed or otherwise invalid`로 실패한다. `archive-cli.ts`는 그래서 `AWS_*`를 **명시적으로** 읽어 `Bun.S3Client`에 전달한다. 새 S3 소비자를 추가할 때 env 자동 해석에 기대지 말 것.
+- **`--dry-run`만 믿지 말 것 (#158의 진짜 교훈)**. 초기 dry-run은 `s3.write`를 호출하지 않아서 **S3 인증을 한 번도 시도하지 않았고**, 크리덴셜이 완전히 깨진 상태에서 초록불을 줬다. 지금은 두 모드 모두 시작 시 `ListBucket` 프로브를 돌린다 — 리허설이 "이게 될 것"을 증명하지 못하면 리허설이 아니다.
 - **업로드 → UPDATE 순서는 절대 바꾸지 말 것**. 업로드 성공 후 UPDATE 실패는 S3 고아 객체(무해, 재실행 시 새 키로 재업로드)를 남기지만, 역순은 S3에 없는 본문을 지우는 데이터 소실 경로다. `tests/messages-log-archive.test.ts`가 호출 순서를 고정한다.
 
 ---
