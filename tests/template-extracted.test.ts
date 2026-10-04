@@ -6,6 +6,7 @@ import {
 } from '../src/template/extracted.js';
 import snapshot from '../src/template/cc-snapshot.json';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createLogger, setLogger, type Logger } from '../src/lib/logger.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -245,6 +246,60 @@ describe('createExtractedTemplate apply() — user-agent forwarding (#163)', () 
       expect('user-agent' in plain.headers).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('resolveUserAgent — warns once when the client is a minor/major ahead of the snapshot (re-capture signal, #163)', () => {
+  const SNAP = 'claude-cli/2.1.288 (external, sdk-cli)';
+  const warns: string[] = [];
+  const capturing: Logger = {
+    debug: () => {},
+    info: () => {},
+    warn: (m) => {
+      warns.push(m);
+    },
+    error: () => {},
+  };
+  const restore = (): void => setLogger(createLogger({ level: 'info', pretty: true }));
+
+  test('patch-only skew forwards silently', () => {
+    setLogger(capturing);
+    try {
+      warns.length = 0;
+      resolveUserAgent(SNAP, new Headers({ 'user-agent': 'claude-cli/2.1.900 (external, cli)' }));
+      expect(warns.filter((w) => w.includes('behind'))).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  test('minor skew forwards AND warns once per (snapshot, client) major.minor pair', () => {
+    setLogger(capturing);
+    try {
+      warns.length = 0;
+      const a = resolveUserAgent(SNAP, new Headers({ 'user-agent': 'claude-cli/2.7.0 (external, cli)' }));
+      const b = resolveUserAgent(SNAP, new Headers({ 'user-agent': 'claude-cli/2.7.3 (external, cli)' }));
+      expect(a).toBe('claude-cli/2.7.0 (external, cli)');
+      expect(b).toBe('claude-cli/2.7.3 (external, cli)');
+      const behind = warns.filter((w) => w.includes('behind'));
+      expect(behind).toHaveLength(1);
+      expect(behind[0]).toContain('2.1');
+      expect(behind[0]).toContain('2.7');
+      expect(behind[0]).toContain('re-capture');
+    } finally {
+      restore();
+    }
+  });
+
+  test('major skew warns on its own key', () => {
+    setLogger(capturing);
+    try {
+      warns.length = 0;
+      resolveUserAgent(SNAP, new Headers({ 'user-agent': 'claude-cli/3.0.0 (external, cli)' }));
+      expect(warns.filter((w) => w.includes('behind') && w.includes('3.0'))).toHaveLength(1);
+    } finally {
+      restore();
     }
   });
 });

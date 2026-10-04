@@ -188,6 +188,21 @@ const parseClaudeCliUa = (ua: string): CliVersion | null => {
 const compareVersions = (a: CliVersion, b: CliVersion): number =>
   a[0] !== b[0] ? a[0] - b[0] : a[1] !== b[1] ? a[1] - b[1] : a[2] - b[2];
 
+// Re-capture signal: a client a minor/major ahead of the snapshot still gets
+// forwarded (verified up to 4.0.0 vs a 2.1.288 set → 200 standard, #163), but
+// it means the snapshot's beta/stainless set is now behind what real CC
+// sends — pitfall #8 territory. Warn once per (snapshot, client) major.minor.
+const warnedSkewKeys = new Set<string>();
+const warnSnapshotBehind = (snapshot: CliVersion, client: CliVersion): void => {
+  if (snapshot[0] === client[0] && snapshot[1] === client[1]) return;
+  const key = `${snapshot[0]}.${snapshot[1]}->${client[0]}.${client[1]}`;
+  if (warnedSkewKeys.has(key) || warnedSkewKeys.size >= MAX_WARNED_UA_SHAPES) return;
+  warnedSkewKeys.add(key);
+  log.warn(
+    `[template] snapshot user-agent ${snapshot.join('.')} is a minor/major behind a client at ${client.join('.')} — forwarding the client UA, but the replayed beta/stainless set is stale; re-capture (scripts/cron-capture.sh, pitfalls #23).`,
+  );
+};
+
 const warnUnrecognizedCliUa = (ua: string): void => {
   if (warnedUaShapes.has(ua) || warnedUaShapes.size >= MAX_WARNED_UA_SHAPES) return;
   warnedUaShapes.add(ua);
@@ -215,7 +230,9 @@ export const resolveUserAgent = (
   const snapshotVersion = parseClaudeCliUa(snapshotUserAgent);
   if (snapshotVersion === null) return fromClient;
 
-  return compareVersions(clientVersion, snapshotVersion) > 0 ? fromClient : snapshotUserAgent;
+  if (compareVersions(clientVersion, snapshotVersion) <= 0) return snapshotUserAgent;
+  warnSnapshotBehind(snapshotVersion, clientVersion);
+  return fromClient;
 };
 
 const buildHeaders = (
