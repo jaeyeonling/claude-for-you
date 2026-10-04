@@ -230,7 +230,7 @@ curl -sS "$ANTHROPIC_BASE_URL/v1/models?limit=1000" -H "x-api-key: <프록시-�
 - **토큰 회전**: `/admin` 진입, fresh refresh token paste, 제출. 재시작 불필요. 풀이 headroom 추정을 리셋하여 다음 요청이 새로 학습.
 - **Webhook 회전**: 같은 UI. `/data/alerts.json`에 영속화; 재시작 후에도 파일이 env baseline을 덮어씀.
 - **일일 quota**: per-user 카운터는 Postgres에 있음; `terraform destroy` 후 `apply`는 `usage_per_user` 히스토리만 잃음 (의도적 — 카운터지 source of truth는 아님).
-- **Snapshot 신선도**: 부팅 배너에 snapshot age 표시. 60일 초과 → 경고. CC 업데이트 후 `bun run extract-template` 실행, diff 검토, 커밋.
+- **Snapshot 신선도**: 부팅 배너에 snapshot age 표시. 60일 초과 → 경고. 단, 나이만 보면 못 잡는 실패가 있다 — 본사는 신규 모델 계열을 snapshot이 재생하는 `user-agent` 버전으로 게이트하므로, stale snapshot은 사용자 CLI 버전과 무관하게 `400 Claude Code 2.1.x does not support this model`로 터진다(#160). 재캡처는 `scripts/cron-capture.sh` (절차·사전조건: `docs/operational-pitfalls.md` #23), diff 검토, 커밋. `bun run extract-template`은 구 바이너리 추출 경로(schema v1)라 live snapshot 모양을 만들지 못한다.
 - **흔한 함정**: [`docs/operational-pitfalls.md`](./docs/operational-pitfalls.md) 참조. 가장 아픈 것: 같은 refresh token을 쓰는 어떤 머신에서든 `claude /logout`을 실행하면 **그 토큰을 쓰는 모든 머신**의 토큰을 서버 측에서 무효화.
 
 ## Wire fidelity (C-partial)
