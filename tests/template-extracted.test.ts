@@ -244,6 +244,13 @@ describe('createExtractedTemplate apply() — user-agent forwarding (#163)', () 
         clientHeaders: undefined,
       });
       expect('user-agent' in plain.headers).toBe(false);
+
+      const forwarded = await template.apply({
+        clientBody: { model: 'claude-opus-5-5', messages: [] },
+        accessToken: 'sk-ant-test-token',
+        clientHeaders: new Headers({ 'user-agent': 'claude-cli/99.0.0 (external, cli)' }),
+      });
+      expect(forwarded.headers['user-agent']).toBe('claude-cli/99.0.0 (external, cli)');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

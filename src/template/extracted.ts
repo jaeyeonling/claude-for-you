@@ -243,6 +243,7 @@ const buildHeaders = (
 ): Record<string, string> => {
   const out: Record<string, string> = {};
   let authSlotFilled = false;
+  let userAgentSlotSeen = false;
 
   for (const name of snapshot.headerOrder) {
     if (TRANSPORT.has(name)) continue;
@@ -271,6 +272,7 @@ const buildHeaders = (
     }
 
     if (name === 'user-agent') {
+      userAgentSlotSeen = true;
       const ua = resolveUserAgent(valueByHeader.get('user-agent') ?? '', clientHeaders);
       if (ua.length > 0) out['user-agent'] = ua;
       continue;
@@ -282,6 +284,13 @@ const buildHeaders = (
 
   if (!authSlotFilled) out.authorization = `Bearer ${accessToken}`;
   if (!('content-type' in out)) out['content-type'] = 'application/json';
+  // A snapshot with no user-agent slot (hand-edited / partial capture) must
+  // still let a well-formed client UA through — otherwise the #160 gate
+  // returns via the back door with no UA at all.
+  if (!userAgentSlotSeen) {
+    const ua = resolveUserAgent('', clientHeaders);
+    if (ua.length > 0) out['user-agent'] = ua;
+  }
 
   return out;
 };
