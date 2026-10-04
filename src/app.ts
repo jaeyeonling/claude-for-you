@@ -254,13 +254,18 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     '/v1/messages',
     createOutcomeObserver({ store: messageLogStore, errorSink: messageLogErrorSink }),
   );
+  // 32MB matches the Anthropic Messages API's own request cap. The previous
+  // 4MB sat right at the JSON size of a 1M-context Claude Code session, so
+  // long sessions hit 413 (Content-Length reject, 0ms) until compaction —
+  // 28 rows in messages_log, all claude-cli, 2026-07-30..10-04 (#165). Caddyfile
+  // `request_body max_size` mirrors this value; change both together.
   app.use(
     '/v1/messages',
     bodyLimit({
-      maxSize: 4 * 1024 * 1024,
+      maxSize: 32 * 1024 * 1024,
       onError: (c) =>
         c.json(
-          { error: { type: 'invalid_request', message: 'request body too large (>4MB)' } },
+          { error: { type: 'invalid_request', message: 'request body too large (>32MB)' } },
           413,
         ),
     }),

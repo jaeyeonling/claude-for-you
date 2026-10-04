@@ -26,7 +26,7 @@
 	# rest. If you need true per-IP rate limiting, install the community
 	# `caddy-ratelimit` module — the default Caddy build does not ship it.
 	request_body {
-		max_size 4MB
+		max_size 32MB
 	}
 
 	# Trust nothing about client identity at the edge — the app handles auth.
