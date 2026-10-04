@@ -34,6 +34,7 @@ const SCHEMA_VERSION = 2;
 // tool-loop gaps is dominated by model latency, not client pacing — baking
 // e.g. p50=2.7s from 4 samples would throttle every prod session. Require a
 // real distribution before emitting it; below this, pacing stays disabled.
+// HACK: 20 is a heuristic, not derived — raise it if an emitted p50 still tracks model latency.
 const MIN_PACING_SAMPLES = 20;
 
 // Hop-by-hop and body-framing headers we should NOT replay (the HTTP stack
@@ -211,7 +212,7 @@ const buildSnapshot = (dumps) => {
     headerValues, // [{name, value}, ...] in the same wire order
     bodyKeyOrder: bodyKeyOrder.dominantOrder,
     bodyKeyOrderDistribution: bodyKeyOrder.distribution.map(([k, n]) => ({ count: n, keys: k.split('|') })),
-    pacing, // null if no same-session pairs available
+    pacing, // null when there are no, or fewer than MIN_PACING_SAMPLES, same-session gaps
   };
 };
 
@@ -242,7 +243,7 @@ const main = async () => {
   if (snap.pacing) {
     console.log(`  samples=${snap.pacing.samples}  min=${snap.pacing.minMs}ms  p50=${snap.pacing.p50Ms}ms  p95=${snap.pacing.p95Ms}ms  max=${snap.pacing.maxMs}ms`);
   } else {
-    console.log('  (no same-session pairs — pacing unmeasurable from this batch)');
+    console.log('  (pacing not emitted — no or too few same-session gaps; see above. Proxy pacing stays disabled.)');
   }
   console.log('');
   console.log('header order distribution (top patterns):');

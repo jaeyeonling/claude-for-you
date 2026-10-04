@@ -2,6 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { ApplyInput, ClaudeTemplate, OutboundRequest } from './types.js';
 
 /**
+ * @deprecated UNUSED — not wired anywhere (grep `staticTemplate`). The live
+ * template is `createExtractedTemplate` (./extracted.ts) replaying
+ * `cc-snapshot.json`. The `claude-cli/2.1.142` below is a frozen 2026-05
+ * capture kept for reference only; when an upstream error quotes a CC version,
+ * check the snapshot's `user-agent`, not this file (pitfalls #23 / #160).
+ */
+
+/**
  * `?beta=true` is required by upstream — without it, sonnet/opus return
  * rate_limit_error while haiku still works. CC v2.1.142 sends it on every
  * /v1/messages POST. Treat it as part of the URL, not a feature toggle.

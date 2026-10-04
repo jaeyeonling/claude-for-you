@@ -18,7 +18,7 @@
 #       >> /tmp/cfy-capture.log 2>&1
 #
 # Required:
-#   - bun + git in PATH
+#   - bun + git + lsof in PATH
 #   - claude CLI installed (CC OAuth credentials in Keychain are NOT used —
 #     we run CC in HOME-isolated API-key mode pointing at the local proxy)
 #   - .env at repo root with valid ANTHROPIC_OAUTH_* (operator's tokens)
@@ -43,6 +43,8 @@ log() { echo "$LOG_PREFIX $*"; }
 command -v bun >/dev/null || { log "bun not in PATH"; exit 1; }
 command -v claude >/dev/null || { log "claude CLI not in PATH"; exit 1; }
 command -v git >/dev/null || { log "git not in PATH"; exit 1; }
+command -v lsof >/dev/null || { log "lsof not in PATH (needed for the stale-proxy port check)"; exit 1; }
+umask 077  # proxy/synth logs and capture dumps hold a live bearer + API key
 [ -f .env ] || { log ".env missing at $REPO_ROOT"; exit 1; }
 
 PORT="${CFY_PORT:-13456}"
@@ -98,7 +100,9 @@ for i in $(seq 1 30); do
   fi
   sleep 1
 done
-curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null || { log "proxy never healthy"; exit 1; }
+curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null || {
+  log "proxy never healthy — last proxy log lines:"; tail -15 /tmp/cfy-capture-proxy.log | sed -E 's/sk-ant-[A-Za-z0-9_-]+/sk-ant-[redacted]/g'; exit 1
+}
 
 # ---- 3. drive CC scenarios through it ----
 TMP_HOME="$(mktemp -d -t cfy-cc-home-XXXX)"
