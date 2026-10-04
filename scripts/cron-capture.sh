@@ -67,6 +67,9 @@ else
 fi
 
 # ---- 2. start proxy in capture mode on an isolated port ----
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  log "port :$PORT already in use — a stale capture proxy? (lsof -iTCP:$PORT)"; exit 1
+fi
 log "starting capture proxy on :$PORT"
 TMP_CAPTURE_DIR="$(mktemp -d -t cfy-captures-XXXX)"
 ENV_OVERRIDE=(
@@ -76,9 +79,13 @@ ENV_OVERRIDE=(
   "CAPTURE_DIR=$TMP_CAPTURE_DIR"
 )
 
+# `exec` so $PROXY_PID is bun itself, not the wrapper subshell. Without it,
+# `kill $PROXY_PID` only reaps the subshell and the orphaned bun keeps :$PORT —
+# the next run's proxy then fails to bind while /healthz (served by the stale
+# process, with the OLD snapshot) still passes, silently capturing nothing.
 (
   for kv in "${ENV_OVERRIDE[@]}"; do export "$kv"; done
-  bun run src/server.ts
+  exec bun run src/server.ts
 ) > /tmp/cfy-capture-proxy.log 2>&1 &
 PROXY_PID=$!
 trap 'kill $PROXY_PID 2>/dev/null; rm -rf "$TMP_CAPTURE_DIR" "$TMP_HOME"' EXIT

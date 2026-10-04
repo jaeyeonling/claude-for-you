@@ -29,6 +29,13 @@ const CAPTURE_DIR = join(ROOT, 'captures');
 const SNAPSHOT_OUT = join(ROOT, 'src', 'template', 'cc-snapshot.json');
 const SCHEMA_VERSION = 2;
 
+// `pacing.p50Ms` becomes the proxy's same-session outbound gap floor when
+// PACING_MIN_GAP_MS is unset (src/app.ts → recommendedMinGapMs). A handful of
+// tool-loop gaps is dominated by model latency, not client pacing — baking
+// e.g. p50=2.7s from 4 samples would throttle every prod session. Require a
+// real distribution before emitting it; below this, pacing stays disabled.
+const MIN_PACING_SAMPLES = 20;
+
 // Hop-by-hop and body-framing headers we should NOT replay (the HTTP stack
 // recomputes them per request).
 const TRANSPORT_HEADERS = new Set([
@@ -149,6 +156,12 @@ const synthPacing = (dumps) => {
     }
   }
   if (gaps.length === 0) return null;
+  if (gaps.length < MIN_PACING_SAMPLES) {
+    console.log(
+      `  (pacing: only ${gaps.length} same-session gaps < ${MIN_PACING_SAMPLES} — not emitted, pacing stays disabled)`,
+    );
+    return null;
+  }
   gaps.sort((a, b) => a - b);
   const pick = (p) => gaps[Math.min(gaps.length - 1, Math.floor(gaps.length * p))];
   return {
