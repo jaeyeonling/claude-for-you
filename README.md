@@ -230,7 +230,7 @@ All `/admin/*` routes require API-key auth (the proxy's authorized keys list —
 - **Token rotation.** Open `/admin`, paste a fresh refresh token, submit. No restart. The pool resets headroom estimates so the next request re-learns.
 - **Webhook rotation.** Same UI. Persisted to `/data/alerts.json`; the file overrides the env baseline even after restart.
 - **Daily quota.** Per-user counters live in Postgres; `terraform destroy` followed by `apply` recovers everything except `usage_per_user` history (intentional — counter, not source of truth).
-- **Snapshot freshness.** Boot banner shows snapshot age. Older than 60 days → warning. Run `bun run extract-template` after a CC update, review the diff, commit.
+- **Snapshot freshness.** Boot banner shows snapshot age. Older than 60 days → warning — but age is not the only failure mode: Anthropic gates new model families on the `user-agent` version the snapshot replays, so a stale snapshot surfaces as `400 Claude Code 2.1.x does not support this model` for *every* user regardless of their own CLI version (#160). Re-capture with `scripts/cron-capture.sh` — prerequisites, the capture-only token setup and the verification query are in [`docs/operational-pitfalls.md` #23](./docs/operational-pitfalls.md); review the diff, commit. `bun run extract-template` is the older binary-extraction path (schema v1) and no longer produces the live snapshot shape.
 - **Common pitfalls.** See [`docs/operational-pitfalls.md`](./docs/operational-pitfalls.md). The most painful one: `claude /logout` on any machine sharing the same refresh token revokes it server-side for **all** machines using it.
 
 ## Wire fidelity, briefly (C-partial)

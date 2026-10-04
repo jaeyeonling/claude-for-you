@@ -4,6 +4,11 @@ dist
 .env.local
 .env.bak
 .env.*.local
+# local capture-only OAuth (scripts/cron-capture.sh via `set -a; source .env.capture`)
+.env.capture
+.env.bak-*
+# local token store / accounts (TOKEN_STORE_PATH, ACCOUNTS_PATH defaults)
+data/
 !.env.example
 *.log
 .DS_Store

@@ -170,6 +170,14 @@ if [ -n "$SWAP_TOTAL_KB" ] && [ "$SWAP_TOTAL_KB" -gt 0 ] && [ -n "$SWAP_FREE_KB"
   fi
 fi
 
+# Refuse the capture-only token file (pitfalls #23) — it carries a placeholder
+# refresh token; uploading it would replace prod's OAuth and kill the proxy.
+if grep -q 'capture-placeholder' .env; then
+  echo "✗ .env contains the capture-only placeholder refresh token (.env.capture was copied over .env?)." >&2
+  echo "  Restore the real env (aws ssm get-parameter --name $ENV_PARAM --with-decryption ...) before deploying." >&2
+  exit 1
+fi
+
 echo "▸ Uploading .env to SSM SecureString ($ENV_PARAM)..."
 aws ssm put-parameter \
   --name "$ENV_PARAM" \

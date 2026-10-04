@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "extractedAt": "2026-05-12T23:13:52.338Z",
-  "capturedCount": 42,
-  "capturedFrom": "2026-05-12T23:01:55.555Z",
-  "capturedTo": "2026-05-12T23:10:23.754Z",
+  "extractedAt": "2026-10-04T03:14:00.606Z",
+  "capturedCount": 14,
+  "capturedFrom": "2026-10-04T03:09:20.519Z",
+  "capturedTo": "2026-10-04T03:11:10.921Z",
   "headerOrder": [
     "accept",
     "content-type",
@@ -29,7 +29,7 @@
   ],
   "headerOrderDistribution": [
     {
-      "count": 41,
+      "count": 14,
       "names": [
         "accept",
         "content-type",
@@ -53,20 +53,6 @@
         "accept-encoding",
         "content-length"
       ]
-    },
-    {
-      "count": 1,
-      "names": [
-        "host",
-        "user-agent",
-        "accept",
-        "z-last-header",
-        "a-first-header",
-        "m-middle-header",
-        "x-api-key",
-        "content-type",
-        "content-length"
-      ]
     }
   ],
   "headerValues": [
@@ -80,7 +66,7 @@
     },
     {
       "name": "user-agent",
-      "value": "claude-cli/2.1.126 (external, cli)"
+      "value": "claude-cli/2.1.288 (external, sdk-cli)"
     },
     {
       "name": "x-stainless-arch",
@@ -96,7 +82,7 @@
     },
     {
       "name": "x-stainless-package-version",
-      "value": "0.81.0"
+      "value": "0.128.0"
     },
     {
       "name": "x-stainless-retry-count",
@@ -108,7 +94,7 @@
     },
     {
       "name": "x-stainless-runtime-version",
-      "value": "v24.3.0"
+      "value": "v26.3.0"
     },
     {
       "name": "x-stainless-timeout",
@@ -116,7 +102,7 @@
     },
     {
       "name": "anthropic-beta",
-      "value": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,effort-2025-11-24"
+      "value": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,afk-mode-2026-01-31"
     },
     {
       "name": "anthropic-dangerous-direct-browser-access",
@@ -140,12 +126,13 @@
     "max_tokens",
     "thinking",
     "context_management",
+    "safeguards",
     "output_config",
     "stream"
   ],
   "bodyKeyOrderDistribution": [
     {
-      "count": 27,
+      "count": 13,
       "keys": [
         "model",
         "messages",
@@ -155,34 +142,8 @@
         "max_tokens",
         "thinking",
         "context_management",
+        "safeguards",
         "output_config",
-        "stream"
-      ]
-    },
-    {
-      "count": 10,
-      "keys": [
-        "model",
-        "messages",
-        "system",
-        "tools",
-        "metadata",
-        "max_tokens",
-        "temperature",
-        "output_config",
-        "stream"
-      ]
-    },
-    {
-      "count": 4,
-      "keys": [
-        "model",
-        "messages",
-        "system",
-        "tools",
-        "metadata",
-        "max_tokens",
-        "temperature",
         "stream"
       ]
     },
@@ -190,9 +151,16 @@
       "count": 1,
       "keys": [
         "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
         "max_tokens",
-        "messages"
+        "thinking",
+        "context_management",
+        "stream"
       ]
     }
-  ]
+  ],
+  "pacing": null
 }

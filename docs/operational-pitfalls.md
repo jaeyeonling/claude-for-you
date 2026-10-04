@@ -666,3 +666,63 @@ git push origin "$GOOD:deploy" --force                            # deploy 마�
 3. **새 RT는 프록시에만 둘 것.** 로컬 claude에서 같은 OAuth를 계속 쓰면 single-holder 충돌로 재사망(#11). 로컬은 OAuth 없는 클라이언트로 유지(user-guide 권장 설정). 토큰 무효화 상세는 #1/#10/#11.
 
 **왜 IP 안전한가**: R1/R2-SSM은 `aws ssm`·`git` → AWS API 직통(프록시 경유 X). R2-admin은 RT를 저장만 하고 refresh(=토큰 사용)는 EC2가 자기 IP로 수행. 로컬에서 upstream을 프록시 토큰으로 직접 치지 않는 한 토큰은 안 죽는다.
+
+---
+
+## 23. 스냅샷 `user-agent` 버전이 신규 모델 게이트에 걸린다 — "Claude Code 2.1.126 does not support this model" (#160)
+
+**증상**: 특정 모델(예: `claude-opus-5-5`, `claude-fable-5-1`) 요청만 업스트림 `400`:
+
+```
+Claude Code 2.1.126 does not support this model; version 2.1.251 or newer is required. Run 'claude update' …
+```
+
+사용자가 CLI를 최신으로 올려도 그대로. 에러 속 버전이 **항상 같은 숫자**다.
+
+**원인**: 에러의 버전은 사용자 CLI가 아니라 **프록시가 위조해서 보내는 `user-agent`** 다. live 템플릿(`createExtractedTemplate`, `src/app.ts`)은 `cc-snapshot.json`의 헤더 값을 그대로 재생하고, 클라이언트 헤더 중 통과시키는 건 `x-claude-code-session-id`·`anthropic-beta` 둘뿐이다. 본사는 신규 모델 계열마다 최소 클라이언트 버전을 UA로 검사하므로, 스냅샷이 오래되면 **모델별로** 깨진다. 60일 stale 경고는 나이만 보고 이 실패를 못 잡는다.
+
+함정 #8(새 body 필드 → 400)과 같은 뿌리(스냅샷 stale)지만, 증상이 "특정 모델만 400"이라 처음엔 클라이언트 탓으로 보인다. `src/template/static.ts`의 `2.1.142`는 **사용되지 않는 템플릿**이니 grep에 걸려도 속지 말 것.
+
+**진단 (10초)**: `messages_log`에서 `status=400 AND source='upstream'` + 위 메시지 → 확진. 또는 스냅샷의 `headerValues[name=user-agent]` 버전을 에러 메시지와 대조.
+
+**복구**: 스냅샷 재캡처.
+
+사전조건 (스크립트가 조용히 전제하는 것들):
+
+- `bun`, `claude`, `git`, `lsof` in PATH
+- 로컬 dev Postgres: `docker compose --profile dev up -d postgres` (호스트 5433, `.env`의 `DATABASE_URL`이 가리켜야 `messages_log`로 검증 가능)
+- 레포 루트 `.env`에 `API_KEYS=name:key,...` 최소 1개 (`API_KEYS_PATH`는 읽지 않음; 캡처 덤프에 그 키가 평문으로 남으니 **일회용 키** 권장)
+- `./data/tokens.json`이 있으면 삭제. `selectInitial`(`src/auth/oauth.ts`)은 파일 쪽 `expiresAt`이 더 크면 **env를 무시**하므로 아래 `.env.capture` 토큰이 조용히 버려진다 (runbook의 "selectInitial 함정"과 동일)
+
+로컬 `.env`는 더미라 캡처 프록시가 502(`invalid_grant`)를 내고 CC가 재시도 백오프에 걸려 수 분씩 늘어진다. **prod refresh token을 로컬에 가져오면 안 된다**(#11 rotation 충돌로 prod 즉사). 대신 refresh가 필요 없는 장기 access token을 쓴다:
+
+```bash
+claude setup-token          # 별도 터미널(대화형 — `!` 접두 실행은 입력을 못 받아 멈춘다). Keychain 안 건드림. sk-ant-oat01-… 1년 유효
+echo $(( ($(date +%s) + 330*86400) * 1000 ))   # EXPIRES_AT = epoch **밀리초** (13자리). 초(10자리)를 넣으면 즉시 만료 취급 → refresh 시도 → 502
+cat > .env.capture <<'EOF'   # gitignored. 절대 .env로 복사하지 말 것 — deploy.sh가 .env를 SSM에 통째로 올린다
+ANTHROPIC_OAUTH_ACCESS_TOKEN=sk-ant-oat01-…
+ANTHROPIC_OAUTH_EXPIRES_AT=<위 출력값>          # 만료가 멀면 refresh 경로를 영영 안 탄다
+ANTHROPIC_OAUTH_REFRESH_TOKEN=capture-placeholder-never-refreshed   # 비어있지만 않으면 됨. deploy.sh는 이 문자열이 .env에 있으면 거부한다
+EOF
+( set -a; source .env.capture; bash scripts/cron-capture.sh )   # 서브셸: export가 현재 쉘에 남지 않게. 쉘 export가 Bun의 .env 자동 로드보다 우선
+```
+
+`cron-capture.sh`의 5개 시나리오는 **기본 모델만** 친다. 게이트에 걸린 모델을 확인하려면 같은 방식(`HOME=<tmp> ANTHROPIC_BASE_URL=http://127.0.0.1:13456 ANTHROPIC_API_KEY=<key> claude --print --model claude-opus-5-5 "..."`)으로 모델별 요청을 추가하거나 스크립트의 `SCENARIOS`를 늘린다. 포트는 `CFY_PORT`로 바꿀 수 있다.
+
+검증 — 캡처 후 모델별로 **200 + `service_tier=standard`**:
+
+```bash
+docker compose --profile dev exec -T postgres psql -U claude -d claude_for_you -Atc \
+  "select model, status, service_tier, count(*) from messages_log where ts > now() - interval '30 min' group by 1,2,3 order by 1"
+```
+
+2026-10-04 재캡처는 fable/opus/sonnet/haiku 4계열 14건 전부 standard. UA는 `(external, sdk-cli)` — 캡처 스크립트가 `--print`로 CC를 돌리기 때문이며 대화형 `cli` 접미는 캡처되지 않았다. 본사가 접미로 차별하지 않음을(4계열 standard) 확인한 뒤 의도적으로 수용했다. 접미를 `cli`로 맞추고 싶으면 대화형 세션을 캡처 프록시에 물려야 한다.
+
+캡처가 끝나면 `.env.capture`를 삭제하고 토큰을 폐기한다(1년짜리 bearer가 디스크에 남는다). 폐기는 콘솔 또는 해당 토큰으로만 로그인된 환경에서 `claude /logout` — **prod가 쓰는 chain에서 `/logout`하면 안 된다**(#1).
+
+**재캡처 시 함정 2개**:
+
+- **좀비 캡처 프록시**: 예전 `cron-capture.sh`는 `kill $PROXY_PID`가 래퍼 서브셸만 죽여 bun이 포트를 계속 잡고 있었다. 다음 실행은 bind 실패하는데 `/healthz`는 (옛 스냅샷을 든) 좀비가 응답해 통과 → "captured 0 requests" + 여전히 옛 UA. `exec bun`으로 고치고 포트 선점 시 즉시 실패하도록 했다. `captured 0`이 보이면 `lsof -iTCP:13456`부터.
+- **pacing p50 오염**: 표본이 적은 tool-loop 캡처는 inter-arrival이 모델 지연에 지배된다(p50≈2.7s). `pacing.p50Ms`는 `PACING_MIN_GAP_MS` 미설정 시 prod의 same-session 바닥값이 되므로 그대로 박히면 전 세션이 느려진다. 합성기는 이제 same-session gap 20개 미만이면 pacing을 비운다.
+
+**예방**: CC 메이저 변경(새 모델 계열 출시) 직후 재캡처. 주간 cron은 유지하되, 어드민에서 스냅샷 UA 버전을 노출하는 건 follow-up 이슈(#161)로.

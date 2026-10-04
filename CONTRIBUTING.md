@@ -48,17 +48,21 @@ CI will re-run both. Don't push if either is red locally.
 
 - Tests that catch a regression we shipped.
 - Documentation gaps you noticed while setting up.
-- A new wire-fidelity capture (`scripts/extract-cc-template.mjs` + a fresh `cc-snapshot.json` diff).
+- A new wire-fidelity capture (`scripts/cron-capture.sh` + a fresh `cc-snapshot.json` diff).
 - Operability improvements that show up in `/admin` rather than as new env vars.
 
 ## Snapshot updates
 
-When Claude Code releases a new version:
+When Claude Code releases a new version — or a new model family 400s with `Claude Code 2.1.x does not support this model` (the proxy replays the snapshot's `user-agent`, so that version is ours, not the caller's):
 
 ```bash
-bun run extract-template       # writes src/template/cc-snapshot.json
-bun run extract-template:check # diff against committed snapshot
+# live capture → synthesize. Prereqs + the capture-only token setup are in
+# docs/operational-pitfalls.md #23 (do NOT point this at the prod refresh token).
+( set -a; source .env.capture; bash scripts/cron-capture.sh )
+git diff src/template/cc-snapshot.json
 ```
+
+`bun run extract-template` is the legacy binary-extraction path (schema v1); it does not produce the live snapshot shape and is kept only for reference.
 
 Review the diff carefully — every change is a wire-shape change that an Anthropic classifier could notice. Commit the snapshot together with the CC version in the commit message.
 

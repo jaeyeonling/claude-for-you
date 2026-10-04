@@ -49,7 +49,7 @@ const MODELS_TIMEOUT_MS = 20_000;
  *
  * If upstream ever rejects this specific set on `/v1/models` (verified against
  * live upstream before ship), escalate to the full Claude Code disguise
- * (`CC_HEADERS` in template/static.ts: `user-agent: claude-cli/...`, `x-app`,
+ * (the header set `cc-snapshot.json` replays via template/extracted.ts: `user-agent: claude-cli/...`, `x-app`,
  * `x-stainless-*`, the full `anthropic-beta` list) — lift it into a shared
  * exported constant rather than duplicating. (This header set is a deliberate
  * second copy of admin/test-runners' `callAnthropicDirect` headers; see that
