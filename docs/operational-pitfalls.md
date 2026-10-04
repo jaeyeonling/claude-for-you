@@ -666,3 +666,43 @@ git push origin "$GOOD:deploy" --force                            # deploy 마�
 3. **새 RT는 프록시에만 둘 것.** 로컬 claude에서 같은 OAuth를 계속 쓰면 single-holder 충돌로 재사망(#11). 로컬은 OAuth 없는 클라이언트로 유지(user-guide 권장 설정). 토큰 무효화 상세는 #1/#10/#11.
 
 **왜 IP 안전한가**: R1/R2-SSM은 `aws ssm`·`git` → AWS API 직통(프록시 경유 X). R2-admin은 RT를 저장만 하고 refresh(=토큰 사용)는 EC2가 자기 IP로 수행. 로컬에서 upstream을 프록시 토큰으로 직접 치지 않는 한 토큰은 안 죽는다.
+
+---
+
+## 23. 스냅샷 `user-agent` 버전이 신규 모델 게이트에 걸린다 — "Claude Code 2.1.126 does not support this model" (#160)
+
+**증상**: 특정 모델(예: `claude-opus-5-5`, `claude-fable-5-1`) 요청만 업스트림 `400`:
+
+```
+Claude Code 2.1.126 does not support this model; version 2.1.251 or newer is required. Run 'claude update' …
+```
+
+사용자가 CLI를 최신으로 올려도 그대로. 에러 속 버전이 **항상 같은 숫자**다.
+
+**원인**: 에러의 버전은 사용자 CLI가 아니라 **프록시가 위조해서 보내는 `user-agent`** 다. live 템플릿(`createExtractedTemplate`, `src/app.ts`)은 `cc-snapshot.json`의 헤더 값을 그대로 재생하고, 클라이언트 헤더 중 통과시키는 건 `x-claude-code-session-id`·`anthropic-beta` 둘뿐이다. 본사는 신규 모델 계열마다 최소 클라이언트 버전을 UA로 검사하므로, 스냅샷이 오래되면 **모델별로** 깨진다. 60일 stale 경고는 나이만 보고 이 실패를 못 잡는다.
+
+함정 #8(새 body 필드 → 400)과 같은 뿌리(스냅샷 stale)지만, 증상이 "특정 모델만 400"이라 처음엔 클라이언트 탓으로 보인다. `src/template/static.ts`의 `2.1.142`는 **사용되지 않는 템플릿**이니 grep에 걸려도 속지 말 것.
+
+**진단 (10초)**: `messages_log`에서 `status=400 AND source='upstream'` + 위 메시지 → 확진. 또는 스냅샷의 `headerValues[name=user-agent]` 버전을 에러 메시지와 대조.
+
+**복구**: 스냅샷 재캡처. 단, 로컬 `.env`는 더미라 캡처 프록시가 502(`invalid_grant`)를 내고 CC가 재시도 백오프에 걸려 수 분씩 늘어진다. **prod refresh token을 로컬에 가져오면 안 된다**(#11 rotation 충돌로 prod 즉사). 대신 refresh가 필요 없는 장기 access token을 쓴다:
+
+```bash
+claude setup-token          # 별도 터미널(대화형). Keychain 안 건드림. sk-ant-oat01-… 1년 유효
+cat > .env.capture <<'EOF'   # gitignored
+ANTHROPIC_OAUTH_ACCESS_TOKEN=sk-ant-oat01-…
+ANTHROPIC_OAUTH_EXPIRES_AT=<now + ~330d, ms>   # 만료가 멀면 refresh 경로를 영영 안 탄다
+ANTHROPIC_OAUTH_REFRESH_TOKEN=capture-placeholder-never-refreshed   # 비어있지만 않으면 됨
+EOF
+set -a; source .env.capture; set +a      # 쉘 export가 Bun의 .env 자동 로드보다 우선
+bash scripts/cron-capture.sh
+```
+
+캡처 후 `messages_log`에서 **200 + `service_tier=standard`** 를 모델별로 확인하고(fable/opus/sonnet/haiku), diff 검토 → 커밋. `(external, sdk-cli)` UA(`--print` 모드)로도 전 모델 standard 확인됨(2026-10-04).
+
+**재캡처 시 함정 2개**:
+
+- **좀비 캡처 프록시**: 예전 `cron-capture.sh`는 `kill $PROXY_PID`가 래퍼 서브셸만 죽여 bun이 포트를 계속 잡고 있었다. 다음 실행은 bind 실패하는데 `/healthz`는 (옛 스냅샷을 든) 좀비가 응답해 통과 → "captured 0 requests" + 여전히 옛 UA. `exec bun`으로 고치고 포트 선점 시 즉시 실패하도록 했다. `captured 0`이 보이면 `lsof -iTCP:13456`부터.
+- **pacing p50 오염**: 표본이 적은 tool-loop 캡처는 inter-arrival이 모델 지연에 지배된다(p50≈2.7s). `pacing.p50Ms`는 `PACING_MIN_GAP_MS` 미설정 시 prod의 same-session 바닥값이 되므로 그대로 박히면 전 세션이 느려진다. 합성기는 이제 same-session gap 20개 미만이면 pacing을 비운다.
+
+**예방**: CC 메이저 변경(새 모델 계열 출시) 직후 재캡처. 주간 cron은 유지하되, 어드민에서 스냅샷 UA 버전을 노출하는 건 #160 follow-up.

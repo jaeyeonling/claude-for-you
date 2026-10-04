@@ -1,5 +1,7 @@
 # CC Wire Reference
 
+> **Snapshot drift note (2026-10-04, #160):** the content analysis below is from the 2026-05-12 / CC 2.1.126 capture set. The live `src/template/cc-snapshot.json` was re-captured from CC 2.1.288 (`user-agent: claude-cli/2.1.288 (external, sdk-cli)`, 14 captures across fable/opus/sonnet/haiku, all `service_tier: standard`). Header values and the `anthropic-beta` flag list in the snapshot supersede §1 where they differ; the body-level observations (system block shape, billing header, tools) remain valid as reference.
+
 Empirical reference compiled from **42 live `/v1/messages` captures** of Claude Code 2.1.126 (build `e44c1d97`), captured 2026-05-12 via our own `CAPTURE_MODE` proxy. This document supplements `src/template/cc-snapshot.json` with content-level data that the snapshot intentionally omits (since our wire rebuild forwards body content verbatim).
 
 Use this when:
