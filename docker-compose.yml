@@ -8,9 +8,11 @@ services:
     restart: unless-stopped
     # cgroup-scoped memory cap: a runaway here OOM-kills only this container,
     # not the host. Pairs with `restart: unless-stopped` for auto-recovery.
-    # Basis: idle ~50MB (issue #110), 1G upper bound absorbs SSE buffering /
-    # model-swap bursts with headroom on t4g.medium (4G RAM + 2G swap).
-    mem_limit: 1g
+    # Basis: steady-state RSS is 690-790MiB in prod (not the ~50MB measured in
+    # #110), and multi-MB request bodies (#166 raised the cap to 32MB) pushed
+    # bun past 1g into repeated memcg OOM kills (#167). 2g fits t4g.medium
+    # (4G RAM + 2G swap) next to caddy's 128m.
+    mem_limit: 2g
     mem_reservation: 256m
     environment:
       # OAuth — pick ONE source:
