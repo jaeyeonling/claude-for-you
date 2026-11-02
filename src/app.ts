@@ -39,6 +39,7 @@ import type { AppConfig } from './config.js';
 import { ConfigError, DomainError, FORBIDDEN_ERROR_HEADERS } from './lib/errors.js';
 import { log } from './lib/logger.js';
 import { redact } from './lib/redact.js';
+import { createMemoryWatch, readCgroupMemoryLimit } from './memory-alerts.js';
 import { createPacingEnforcer } from './pacing.js';
 import { createConcurrencyLimiter, createPerKeyConcurrencyLimiter } from './proxy/concurrency.js';
 import { createIpRateLimiter } from './proxy/rate-limit.js';
@@ -50,6 +51,7 @@ import {
   recommendedMinGapMs,
   tryCreateCandidateTemplate,
 } from './template/extracted.js';
+import { checkUncleanRestart, clearRunMarker } from './run-marker.js';
 import { createBillingMonitor } from './usage/billing-monitor.js';
 import { createDriftAnalyzer } from './usage/drift-analyzer.js';
 import { createGlobalGuard } from './usage/global.js';
@@ -181,6 +183,20 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   const usageErrorSink = withCooldown(rawSink, 60_000);
 
   const messageLogErrorSink = withCooldown(rawSink, 60_000);
+
+  // #169: report a previous SIGKILL (OOM) and warn before the next one.
+  // Not awaited so a slow webhook can't delay boot; dispose awaits it so a
+  // late marker write can't outlive a graceful stop.
+  const runMarkerPath = join(dirname(config.tokenStorePath), '.run-marker');
+  const runMarkerChecked = checkUncleanRestart({ markerPath: runMarkerPath, sink: rawSink });
+  const memoryLimit = readCgroupMemoryLimit();
+  const memoryWatch = memoryLimit ? createMemoryWatch({ sink: rawSink, limitBytes: memoryLimit }) : null;
+  memoryWatch?.start();
+  log.info(
+    memoryWatch
+      ? `[memory] pressure watch armed (limit ${Math.round((memoryLimit ?? 0) / 1048576)}MiB)`
+      : '[memory] pressure watch disabled (no cgroup v2 memory.max limit)',
+  );
 
   const pool = await buildPool(config, oauthFailSink);
   const tracker = await buildTracker(config);
@@ -493,6 +509,11 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
   };
 
   const dispose = async (): Promise<void> => {
+    // Clear first: if SIGKILL lands mid-drain (docker's 10s stop timeout), it
+    // was still an intentional stop and must not be reported as a crash.
+    await runMarkerChecked;
+    await clearRunMarker(runMarkerPath);
+    memoryWatch?.stop();
     try {
       await tracker.close?.();
     } catch (err: unknown) {

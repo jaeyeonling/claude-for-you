@@ -728,3 +728,40 @@ docker compose --profile dev exec -T postgres psql -U claude -d claude_for_you -
 - **pacing p50 오염**: 표본이 적은 tool-loop 캡처는 inter-arrival이 모델 지연에 지배된다(p50≈2.7s). `pacing.p50Ms`는 `PACING_MIN_GAP_MS` 미설정 시 prod의 same-session 바닥값이 되므로 그대로 박히면 전 세션이 느려진다. 합성기는 이제 same-session gap 20개 미만이면 pacing을 비운다.
 
 **예방**: CC 메이저 변경(새 모델 계열 출시) 직후 재캡처. 주간 cron은 유지하되, 어드민에서 스냅샷 UA 버전을 노출하는 건 follow-up 이슈(#161)로.
+
+---
+
+## 24. App memcg OOM kills — 502 버스트인데 `/healthz`·`messages_log`·알람은 전부 정상 (#167, #169)
+
+**증상**: 사용자는 "요청이 자꾸 실패한다"고 하는데 `/healthz`는 `{"ok":true}`, CloudWatch 알람은 OK, `messages_log`의 `status >= 400`은 0건. 실패는 Caddy 로그에만 남는다 — 같은 초에 `502 ... EOF` 몇 건 → `dial tcp ...:3456: connect: connection refused` 몇 건.
+
+**원인**: 앱 컨테이너가 `docker-compose.yml`의 `mem_limit`에 닿아 커널이 bun을 memcg OOM kill → `restart: unless-stopped`가 몇 초 만에 되살린다. 죽은 프로세스는 처리 중이던 요청을 `messages_log`에 못 쓰고, `/healthz`는 재시작 후 바로 정상이라 어떤 synthetic check에도 안 걸린다. 2026-07-29 ~ 11-01 사이 60회. 10/4 이미지(#166 body limit 4MB→32MB 포함) 이후 급증 — 수 MB 요청 본문이 여러 벌 버퍼링되는 것으로 추정(미검증). #168에서 1g → 2g.
+
+**알림** (#169, `src/memory-alerts.ts`, `src/run-marker.ts`):
+
+| 태그 | 언제 | 의미 |
+|---|---|---|
+| `[memory]` | working set(`memory.current` − `inactive_file`)이 `memory.max`의 85% 이상. 70% 아래로 내려가야 재무장 | 다음은 OOM kill. **#167 유형(큰 본문)에는 거의 안 울린다**: R2에서 28MiB 본문을 512KiB/s로 올리자 업로드 중엔 72%까지 완만히 오르다가 수신 완료 순간 한 번에 OOM까지 뛰었다(파싱·복사가 본문 1~2배를 동시에 잡는 것으로 추정). 샘플 간격과 무관 — 그때는 `[restart]`가 사후에 잡는다. 이 경고가 잡는 건 완만한 증가(릭)다 |
+| `[restart]` | 부팅 시 `/data/.run-marker`가 남아 있음 (정상 종료 SIGTERM/SIGINT/SIGHUP만 지운다) | 이전 실행이 SIGKILL됨 — OOM kill·크래시·호스트 재부팅 중 하나. **원인은 앱이 판별하지 않는다**: Docker는 재시작마다 cgroup을 새로 만들어 `memory.events`의 `oom_kill`이 0으로 돌아가고 `State.OOMKilled`도 cgroup v2에선 `false`로 남는다(R2에서 실제 memcg OOM kill이 둘 다 'OOM 아님'으로 나옴). 판별은 호스트 `dmesg`로 |
+
+부팅 로그에 `[memory] pressure watch armed (limit 2048MiB)` 또는 `disabled (no cgroup v2 memory.max limit)`가 한 줄 찍힌다. macOS 로컬 dev는 항상 disabled(정상). `bun --hot` 리로드는 같은 프로세스라 `[restart]`를 보내지 않는다.
+
+**런북**:
+
+```bash
+IID=$(terraform -chdir=terraform output -raw instance_id)
+aws ssm start-session --target $IID --region ap-northeast-2
+# 이하 인스턴스 안 (dmesg는 컨테이너 안에서 안 됨 — 호스트에서 sudo)
+docker inspect -f '{{.State.StartedAt}} restarts={{.RestartCount}} limit={{.HostConfig.Memory}}' claude-for-you
+docker stats --no-stream claude-for-you
+sudo dmesg -T | grep 'Killed process' | tail
+docker logs --since 1h claude-for-you-caddy 2>&1 | grep -E '"status":50[24]' | tail
+```
+
+- `[memory]`만 오고 재시작이 없다 → 아직 여유. 어떤 사용자/모델이 큰 본문을 보내는지 `messages_log`를 **ts 범위를 좁혀서** 본다(아래 주의).
+- `[restart]` + `dmesg`에 bun kill → 그 시각 직전 `messages_log`에서 큰 요청을 찾는다. 반복되면 `mem_limit` 상향은 시간 벌기일 뿐 — 버퍼링 경로(`src/proxy/messages.ts`)를 본다.
+- `[restart]` + `dmesg`에 kill 없음 → `docker logs --since 1h claude-for-you`에서 크래시 스택, 호스트 `uptime`으로 재부팅 여부.
+
+**주의 — 조사하다 앱을 죽이지 말 것**: `docker exec claude-for-you bun ...`으로 DB를 조회하면 그 스크립트가 **앱과 같은 메모리 cgroup**을 쓴다. `request_body::text` 같은 전체 스캔은 금지 — `statement_timeout`을 걸고 ts 범위를 좁힌다. `docker cp`로 넣은 파일은 root 소유라 `docker exec -u 0 ... rm`으로 지운다.
+
+**모니터링 공백**: 부팅 도중 바로 죽는 크래시 루프(설정 오류 등)는 마커 쓰기·알림 전송 전에 프로세스가 사라져 `[restart]`가 안 나간다(R2 확인). 원인 판별도 앱 안에선 불가능. 호스트 쪽 CloudWatch 알람은 #170.
