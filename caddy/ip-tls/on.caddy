@@ -1,0 +1,26 @@
+# HTTPS on the bare NLB IP with a Let's Encrypt IP-address certificate (#174).
+# An explicit `issuer acme` is required: for IP hosts Caddy otherwise uses its
+# internal CA. `shortlived` is the LE profile that allows IP identifiers
+# (~6-day certs); Caddy renews them in the background. Spike results: #173.
+#
+# This file's name is load-bearing: docker-compose.yml sets TLS_IP_SITE=on and
+# the Caddyfile imports `{$TLS_IP_SITE}.caddy*`. Rename one, rename both — a
+# mismatch only logs a warning and the HTTPS site silently disappears.
+{$TLS_IP} {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+	import app_proxy
+}
+
+# Plain HTTP to the IP: drop the connection instead of serving or redirecting.
+# A redirect would still have received the API key in cleartext on the first
+# request, and every request after it; a hard failure makes a missing "s" in
+# ANTHROPIC_BASE_URL obvious at once. ACME http-01 is answered before routing,
+# so certificate issuance through port 80 is unaffected. (The `:80` catch-all
+# above stays for the legacy EIP path until clients have moved — #174 step 3.)
+http://{$TLS_IP} {
+	abort
+}

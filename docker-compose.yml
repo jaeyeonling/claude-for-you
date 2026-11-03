@@ -37,6 +37,8 @@ services:
       # Drift alarm channel
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # #174: the app checks its own https://<TLS_IP> certificate expiry.
+      TLS_IP: ${TLS_IP:-}
       # messages_log cold storage (#150).
       #
       # The BUCKET is needed by two different consumers with different
@@ -77,8 +79,16 @@ services:
       # Required by Caddy itself. Empty → Caddyfile syntax error at boot.
       # IP-only deployment can set DOMAIN=:80 to serve HTTP without ACME.
       DOMAIN: ${DOMAIN:-}
-    # caddyfile-hash propagates the SHA-256 of the bind-mounted Caddyfile
-    # into the compose service spec so `docker compose up -d` recreates this
+      # No-domain HTTPS (#174): the NLB EIP (`terraform output nlb_public_ip`).
+      # Set → Caddy also serves https://<TLS_IP> with a Let's Encrypt IP cert.
+      TLS_IP: ${TLS_IP:-}
+      # Both derived, never set by hand. TLS_IP_SITE must stay the literal "on"
+      # — it is the filename caddy/ip-tls/on.caddy that the Caddyfile imports.
+      # TLS_DEFAULT_SNI must never be empty (see the Caddyfile comment).
+      TLS_IP_SITE: ${TLS_IP:+on}
+      TLS_DEFAULT_SNI: ${TLS_IP:-none}
+    # caddyfile-hash propagates the SHA-256 of the bind-mounted Caddyfile (and
+    # the caddy/ip-tls/*.caddy files it imports) into the compose service spec so `docker compose up -d` recreates this
     # container whenever the file changes. Without this trigger the bind
     # mount keeps pointing at the original inode and Caddyfile edits do not
     # take effect until something else forces a recreate (see pitfall #16).
@@ -91,6 +101,7 @@ services:
       - '443:443'
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy:/etc/caddy/caddy:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:

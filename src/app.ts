@@ -52,6 +52,7 @@ import {
   tryCreateCandidateTemplate,
 } from './template/extracted.js';
 import { checkUncleanRestart, clearRunMarker } from './run-marker.js';
+import { createTlsExpiryWatch } from './tls-expiry.js';
 import { createBillingMonitor } from './usage/billing-monitor.js';
 import { createDriftAnalyzer } from './usage/drift-analyzer.js';
 import { createGlobalGuard } from './usage/global.js';
@@ -197,6 +198,10 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
       ? `[memory] pressure watch armed (limit ${Math.round((memoryLimit ?? 0) / 1048576)}MiB)`
       : '[memory] pressure watch disabled (no cgroup v2 memory.max limit)',
   );
+  // #174: the IP certificate lives ~6 days; hear about a stalled renewal early.
+  const tlsWatch = config.tlsIp ? createTlsExpiryWatch({ host: config.tlsIp, sink: rawSink }) : null;
+  tlsWatch?.start();
+  if (tlsWatch) log.info(`[tls] certificate watch armed for https://${config.tlsIp}`);
 
   const pool = await buildPool(config, oauthFailSink);
   const tracker = await buildTracker(config);
@@ -514,6 +519,7 @@ export const composeApp = async (config: AppConfig): Promise<ComposedApp> => {
     await runMarkerChecked;
     await clearRunMarker(runMarkerPath);
     memoryWatch?.stop();
+    tlsWatch?.stop();
     try {
       await tracker.close?.();
     } catch (err: unknown) {

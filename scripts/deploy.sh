@@ -312,7 +312,8 @@ echo "▸ Running remote setup (SSH key bootstrap, git pull, fetch-env, docker b
 # per deploy but covers all paths uniformly. `--no-deps` keeps Caddy
 # out of the cascade — Caddy only needs recreation when its
 # `caddyfile-hash` label changes, which the trailing `docker compose up
-# -d` handles idempotently. The argument is the compose **service
+# -d` handles idempotently. The hash covers the imported caddy/ip-tls/*.caddy
+# too (#174) — otherwise editing only an imported file never recreates Caddy. The argument is the compose **service
 # name** (`app` — `docker-compose.yml:2`), not the host container name
 # (`claude-for-you`, which is `container_name` and the image tag); see
 # issue #82. SSE stream drain during the recreate window is tracked as
@@ -342,7 +343,7 @@ CMD_ID=$(aws ssm send-command \
     "sudo -Hu ec2-user git reset --hard origin/main",
     "HEAD_LOCAL=$(sudo -Hu ec2-user git -C /home/ec2-user/claude-for-you rev-parse HEAD); HEAD_REMOTE=$(sudo -Hu ec2-user git -C /home/ec2-user/claude-for-you rev-parse origin/main); [ \"$HEAD_LOCAL\" = \"$HEAD_REMOTE\" ] || { echo \"[deploy] HEAD did not advance to origin/main ($HEAD_LOCAL != $HEAD_REMOTE) -- git fetch or reset silently failed. Aborting before docker build.\" >&2; exit 1; }",
     "sudo /usr/local/bin/fetch-env.sh",
-    "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(sha256sum Caddyfile | cut -d \" \" -f 1) && [ \"${#CADDYFILE_SHA256}\" -eq 64 ] && docker build -t claude-for-you:latest . && docker compose up -d --force-recreate --no-deps app && docker compose up -d"
+    "cd /home/ec2-user/claude-for-you && export CADDYFILE_SHA256=$(cat Caddyfile caddy/ip-tls/*.caddy | sha256sum | cut -d \" \" -f 1) && [ \"${#CADDYFILE_SHA256}\" -eq 64 ] && docker build -t claude-for-you:latest . && docker compose up -d --force-recreate --no-deps app && docker compose up -d"
   ]' \
   --query 'Command.CommandId' \
   --output text)
@@ -393,6 +394,30 @@ else
   echo "  /healthz response: $HEALTH"
   echo "  → containers may still be coming up. Check via:"
   echo "    aws ssm start-session --target $INSTANCE_ID --region $REGION"
+fi
+
+# NLB + Let's Encrypt IP certificate path (#174). Strict TLS verification on
+# purpose: this is the address clients use. Run from outside any TLS-inspecting
+# corporate proxy, or the proxy's own certificate makes this check meaningless.
+# Only when TLS_IP is in the .env we just uploaded — after `terraform apply`
+# but before TLS_IP is set, the NLB exists yet Caddy has no IP site, and a
+# "wait for issuance" hint would send the operator waiting for nothing.
+NLB_IP="$(cd terraform && terraform output -raw nlb_public_ip 2>/dev/null || true)"
+ENV_TLS_IP="$(grep -E '^TLS_IP=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+if [ -n "$NLB_IP" ] && [ -z "$ENV_TLS_IP" ]; then
+  echo "  NLB $NLB_IP exists but TLS_IP is not set in .env → IP HTTPS site is off."
+  echo "  → add TLS_IP=$NLB_IP to .env and re-run deploy.sh (terraform/README.md 'NLB + IP certificate rollout')."
+elif [ -n "$NLB_IP" ] && [ "$ENV_TLS_IP" != "$NLB_IP" ]; then
+  echo "  ✗ TLS_IP in .env ($ENV_TLS_IP) != terraform nlb_public_ip ($NLB_IP) — the certificate would be for the wrong IP."
+elif [ -n "$NLB_IP" ]; then
+  TLS_HEALTH=$(curl -s --max-time 10 "https://$NLB_IP/healthz" || echo "FAIL")
+  if [ "$TLS_HEALTH" = '{"ok":true}' ]; then
+    echo "  https://$NLB_IP/healthz ✓"
+  else
+    echo "  https://$NLB_IP/healthz response: $TLS_HEALTH"
+    echo "  → first issuance can take ~2-3 min after Caddy starts (ACME retries until NLB targets are healthy)."
+    echo "    Check: docker logs claude-for-you-caddy 2>&1 | grep -E 'certificate obtained|challenge failed'"
+  fi
 fi
 
 echo
