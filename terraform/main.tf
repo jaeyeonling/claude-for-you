@@ -140,7 +140,8 @@ resource "aws_ssm_parameter" "github_deploy_key" {
 }
 
 # ---------- RDS Postgres ----------
-# Default VPC + its subnets — RDS subnet groups require ≥2 AZs.
+# Default VPC + its subnets — RDS subnet groups require ≥2 AZs. Also the
+# VPC for the NLB (nlb.tf) and the app's private subnet + NAT (network.tf).
 data "aws_vpc" "default" {
   default = true
 }
@@ -245,25 +246,28 @@ resource "aws_ssm_parameter" "database_url" {
 
 # ---------- Security group ----------
 # No port 22 — SSM Session Manager replaces SSH. Outbound HTTPS reaches SSM endpoints.
+# Ingress only from the NLB (#178). With client IP preservation the packets
+# carry the caller's IP, but a rule referencing the NLB SG still matches them
+# (verified in #173). No 0.0.0.0/0 here — that was the security notice's ask.
 resource "aws_security_group" "app" {
   name        = "${var.name}-sg"
   description = "claude-for-you: 80/443 only. SSM Session Manager replaces SSH."
 
-  # 80 is REQUIRED for Let's Encrypt http-01 ACME challenge.
+  # 80 is REQUIRED for Let's Encrypt http-01 ACME challenge (via the NLB).
   ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTP (Caddy ACME)"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.nlb.id]
+    description     = "HTTP from NLB (ACME http-01)"
   }
 
   ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTPS (Caddy)"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.nlb.id]
+    description     = "HTTPS from NLB"
   }
 
   egress {
@@ -428,6 +432,11 @@ resource "aws_instance" "app" {
   iam_instance_profile   = aws_iam_instance_profile.app.name
   vpc_security_group_ids = [aws_security_group.app.id]
 
+  # #178: private subnet, no public IP. Changing either forces replacement —
+  # see terraform/README.md "Private subnet cutover" for the /data migration.
+  subnet_id                   = aws_subnet.private.id
+  associate_public_ip_address = false
+
   root_block_device {
     volume_size = var.root_volume_size_gb
     volume_type = "gp3"
@@ -455,6 +464,9 @@ resource "aws_instance" "app" {
     Name = var.name
   }
 
+  # user_data runs `dnf install` on first boot: the NAT route must exist first.
+  depends_on = [aws_route_table_association.private, aws_nat_gateway.egress]
+
   lifecycle {
     # `user_data` changes are routine (deploy.sh re-templates it); never let
     # them recreate the instance.
@@ -467,13 +479,19 @@ resource "aws_instance" "app" {
   }
 }
 
-# ---------- Elastic IP (stable DNS target) ----------
+# ---------- Elastic IP (egress) ----------
+# Was the instance's public IP; since #178 it is the NAT Gateway's (network.tf)
+# — the source IP Anthropic sees for every upstream call. Kept, not replaced,
+# so that identity does not change. Releasing it loses it for good.
 resource "aws_eip" "app" {
-  instance = aws_instance.app.id
-  domain   = "vpc"
+  domain = "vpc"
 
   tags = {
     Name = "${var.name}-eip"
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 
@@ -485,5 +503,5 @@ resource "aws_route53_record" "app" {
   name    = var.domain_name
   type    = "A"
   ttl     = 300
-  records = [aws_eip.app.public_ip]
+  records = [aws_eip.nlb.public_ip]
 }

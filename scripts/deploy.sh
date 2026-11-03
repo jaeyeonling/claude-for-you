@@ -384,18 +384,10 @@ if [ "$STATUS" != "Success" ]; then
   exit 1
 fi
 
-PUBLIC_IP="$(cd terraform && terraform output -raw public_ip)"
+# The instance has no public IP since #178 — every smoke test goes through
+# the NLB, which is also exactly the path clients take.
 echo
-echo "▸ Smoke test against $PUBLIC_IP..."
-HEALTH=$(curl -s --max-time 10 "http://$PUBLIC_IP/healthz" || echo "FAIL")
-if [ "$HEALTH" = '{"ok":true}' ]; then
-  echo "  /healthz ✓ ($HEALTH)"
-else
-  echo "  /healthz response: $HEALTH"
-  echo "  → containers may still be coming up. Check via:"
-  echo "    aws ssm start-session --target $INSTANCE_ID --region $REGION"
-fi
-
+echo "▸ Smoke test via the NLB..."
 # NLB + Let's Encrypt IP certificate path (#174). Strict TLS verification on
 # purpose: this is the address clients use. Run from a network without TLS
 # interception, or the intercepting proxy's certificate makes this meaningless.
@@ -407,8 +399,12 @@ ENV_TLS_IP="$(grep -E '^TLS_IP=' .env 2>/dev/null | tail -1 | cut -d= -f2- || tr
 if [ -n "$NLB_IP" ] && [ -z "$ENV_TLS_IP" ]; then
   echo "  NLB $NLB_IP exists but TLS_IP is not set in .env → IP HTTPS site is off."
   echo "  → add TLS_IP=$NLB_IP to .env and re-run deploy.sh (terraform/README.md 'NLB + IP certificate rollout')."
+  HEALTH=$(curl -s --max-time 10 "http://$NLB_IP/healthz" || echo "FAIL")
+  echo "  http://$NLB_IP/healthz: $HEALTH (only answers with a legacy DOMAIN=:80)"
 elif [ -n "$NLB_IP" ] && [ "$ENV_TLS_IP" != "$NLB_IP" ]; then
   echo "  ✗ TLS_IP in .env ($ENV_TLS_IP) != terraform nlb_public_ip ($NLB_IP) — the certificate would be for the wrong IP."
+elif [ -z "$NLB_IP" ]; then
+  echo "  ✗ no terraform output nlb_public_ip — smoke test skipped (the instance has no public IP to test instead)."
 elif [ -n "$NLB_IP" ]; then
   TLS_HEALTH=$(curl -s --max-time 10 "https://$NLB_IP/healthz" || echo "FAIL")
   if [ "$TLS_HEALTH" = '{"ok":true}' ]; then
@@ -424,5 +420,5 @@ echo
 echo "Done."
 echo "Next steps for first deploy (one-time):"
 echo "  1. SSM-session in: aws ssm start-session --target $INSTANCE_ID --region $REGION"
-echo "  2. Visit http://$PUBLIC_IP/admin (basic auth: any API key)"
+echo "  2. Visit https://${NLB_IP:-<nlb_public_ip>}/admin (basic auth: any API key)"
 echo "  3. Paste a fresh refresh token in the OAuth section"

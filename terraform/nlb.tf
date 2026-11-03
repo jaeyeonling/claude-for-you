@@ -7,9 +7,9 @@
 # An NLB passes TCP through untouched, so Caddy keeps terminating TLS and
 # keeps answering the ACME http-01 / tls-alpn-01 challenges. Spike: #173.
 #
-# Step 1 (this file) runs NLB *alongside* the old EIP path so clients can move
-# to https://<nlb_public_ip> at their own pace. Step 2 removes the 0.0.0.0/0
-# ingress on the instance and moves it into a private subnet behind NAT.
+# #174 ran this NLB alongside the old EIP path so clients could move to
+# https://<nlb_public_ip>; #178 (network.tf) then removed the instance's
+# public IP and 0.0.0.0/0 ingress — the NLB is now the only way in.
 
 # Static, operator-owned address — clients pin it in ANTHROPIC_BASE_URL and it
 # is the IP the certificate is issued for, so it must never change.
@@ -18,6 +18,12 @@ resource "aws_eip" "nlb" {
 
   tags = {
     Name = "${var.name}-nlb-eip"
+  }
+
+  # Clients pin it in ANTHROPIC_BASE_URL and the certificate is issued for it.
+  # A released EIP can't be reclaimed.
+  lifecycle {
+    prevent_destroy = true
   }
 }
 
@@ -44,21 +50,23 @@ resource "aws_security_group" "nlb" {
   }
 
   # Without an explicit egress block terraform drops the default allow-all,
-  # so the NLB could not reach its targets.
+  # so the NLB could not reach its targets. VPC CIDR rather than the app SG:
+  # the app SG's ingress references this SG, and a reference back would be a
+  # terraform dependency cycle. The app SG still only admits this SG.
   egress {
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
-    description     = "To Caddy HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
+    description = "To Caddy HTTP"
   }
 
   egress {
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
-    description     = "To Caddy HTTPS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
+    description = "To Caddy HTTPS"
   }
 }
 
@@ -68,10 +76,12 @@ resource "aws_lb" "app" {
   internal           = false
   security_groups    = [aws_security_group.nlb.id]
 
-  # Single AZ: the NLB EIP lives in the instance's subnet. A second AZ would
-  # need a second EIP (= a second IP clients and the cert would have to know).
+  # Single AZ: the NLB EIP lives in the default public subnet of AZ "a"
+  # (network.tf); the instance sits in the private subnet of the same AZ. A
+  # second AZ would need a second EIP (= a second IP clients and the cert
+  # would have to know).
   subnet_mapping {
-    subnet_id     = aws_instance.app.subnet_id
+    subnet_id     = data.aws_subnet.public.id
     allocation_id = aws_eip.nlb.id
   }
 }

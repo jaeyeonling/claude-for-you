@@ -34,6 +34,12 @@ variable "domain_name" {
   default     = ""
 }
 
+variable "private_subnet_cidr" {
+  description = "CIDR for the app's private subnet inside the default VPC (172.31.0.0/16). Must not overlap the default /20 subnets."
+  type        = string
+  default     = "172.31.64.0/24"
+}
+
 variable "git_repo_url" {
   description = "Git URL the EC2 will clone on first boot. Empty = skip auto-clone."
   type        = string
