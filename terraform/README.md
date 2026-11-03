@@ -17,8 +17,12 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 | Resource | Notes |
 |---|---|
 | `aws_instance.app` | t3.micro · AL2023 · gp3 root EBS encrypted · IMDSv2 required |
-| `aws_eip.app` | Stable public IP (free while attached) |
-| `aws_security_group.app` | 80/443 inbound only · all egress |
+| `aws_eip.app` | NAT Gateway's EIP = egress IP for upstream calls (`prevent_destroy`) |
+| `aws_security_group.app` | 80/443 from the NLB SG only · all egress |
+| `aws_subnet.private` + `aws_route_table.private` | App's private subnet (no public IP); default route via NAT |
+| `aws_nat_gateway.egress` | Outbound for the private subnet · ≈ $43/mo + $0.059/GB |
+| `aws_vpc_endpoint.s3` | Free S3 gateway endpoint (archive traffic skips the NAT) |
+| `aws_lb.app` + `aws_eip.nlb` + `aws_security_group.nlb` | Public NLB, TCP 80/443 → Caddy; the only way in (`prevent_destroy` on the EIP) |
 | `aws_db_instance.app` | Postgres 16 · t4g.micro · 20 GB gp3 · single-AZ · encrypted · 1-day backup |
 | `aws_db_subnet_group.app` + `aws_security_group.db` | Postgres reachable only from the app SG |
 | `random_password.db_master` | 32-char alphanumeric + `_-` (URL-safe) |
@@ -50,7 +54,8 @@ AWS infrastructure for `claude-for-you`. Provisions an EC2 instance (Amazon Linu
 
 | Output | Use |
 |---|---|
-| `public_ip` | EIP — point an A record here when not using Route53. |
+| `nlb_public_ip` | Client entry point (`https://<this>`) and the IP the certificate is for. Point an A record here when using a domain. |
+| `egress_ip` | NAT EIP — source IP of upstream calls. Not reachable inbound. |
 | `instance_id` | For `aws ssm start-session --target …`. |
 | `ssm_session_command` | One-liner to open a shell on the instance. |
 | `put_env_parameter_command` | One-liner to push the local `.env` into SSM SecureString. |
@@ -110,9 +115,34 @@ sudo docker compose up -d
 4. **Confirm** `docker logs claude-for-you-caddy 2>&1 | grep 'certificate obtained'` on the instance, and the app log line `[tls] certificate watch armed`. Verify the cert from a network **without TLS interception** and **not from the instance itself** (intercepting proxy / NLB hairpin — `docs/operational-pitfalls.md` #25).
 5. **`git push origin main:deploy`**.
 6. **Move clients** to `ANTHROPIC_BASE_URL=https://<nlb_public_ip>`. Watch Caddy logs for requests still arriving on the old IP before step 7.
-7. *(#174 step 3, separate PR)* drop `0.0.0.0/0` ingress on the instance SG, move it to a private subnet behind NAT.
+7. *(#174 step 3 / #178)* drop `0.0.0.0/0` ingress on the instance SG, move it to a private subnet behind NAT — next section.
 
 Rollback after clients moved: only to a SHA that still contains `caddy/ip-tls/on.caddy`, or move clients back first.
+
+## Private subnet cutover (#178)
+
+`network.tf` moves the instance into a private subnet; its former EIP becomes the NAT Gateway's (same egress IP). Moving subnets **replaces the instance**, and the Docker volumes on its root disk go with it — so this is a migration, with ~10–15 minutes of downtime. Do it once clients are on `https://<nlb_public_ip>`. Cost: NAT ≈ $43/mo + $0.059/GB processed (S3 bypasses it via a free gateway endpoint).
+
+Each step exists because skipping it breaks something. `OLD` = current instance id (`terraform output -raw instance_id`).
+
+1. **Stop app + Caddy on OLD** — the OAuth refresh token rotates on use; a refresh after the backup leaves the new instance with a dead token (pitfall #11):
+   `aws ssm send-command --instance-ids $OLD --document-name AWS-RunShellScript --parameters 'commands=["cd /home/ec2-user/claude-for-you && docker compose stop app caddy"]'`
+2. **Back up the volumes off the box** — `bash scripts/volume-backup.sh $OLD <dir>` (end-to-end encrypted through SSM; refuses while the app runs). Do this *before* step 4: OLD's disk dies with OLD in step 6.
+3. **Snapshot OLD's root volume** as a fallback and wait for `completed` (`aws ec2 wait snapshot-completed`). It holds every secret — delete it once the new instance has run cleanly for a few days.
+4. **Free the EIP** so the NAT can take it (else terraform may create the NAT before destroying OLD → "already associated"):
+   `aws ec2 disassociate-address --association-id "$(aws ec2 describe-addresses --filters Name=tag:Name,Values=claude-for-you-eip --query 'Addresses[0].AssociationId' --output text)"`
+   OLD was launched with an auto-assigned public IP, so it gets a new one and stays reachable over SSM until step 6.
+5. **Local `.env`: `DOMAIN=`** (empty). With the NLB in front, any `{$DOMAIN}` site on :80 would be a plaintext proxy for a spoofed Host header (asserted by `scripts/check-caddyfile.sh`).
+6. **Network first, then the instance** — so a NAT failure doesn't leave you with OLD already destroyed:
+   `terraform apply -target=aws_route_table_association.private -target=aws_nat_gateway.egress -target=aws_vpc_endpoint.s3`, then `terraform apply`.
+7. **Wait for NEW** (`terraform output -raw instance_id`): `aws ssm describe-instance-information` shows `Online`, and `test -f /var/log/user-data-done` via send-command succeeds (Docker installed through the NAT; ~3–5 min).
+8. **Restore** — `bash scripts/volume-restore.sh $NEW <dir>/volumes.tgz` (Compose-labelled volumes, original owners/modes — the app's uid 10001 must own `tokens` to rewrite them).
+9. **`bash scripts/deploy.sh`** (only the NLB path exists now). Verify from a network without TLS interception: `https://<nlb_public_ip>/healthz`; in-container `[tls]` check (pitfall #25); egress IP from inside the container equals `terraform output egress_ip`; `aws ec2 describe-instances` shows no public IP.
+10. **`git push origin main:deploy`**, then delete `<dir>/volumes.tgz`.
+
+Expect one `network-in-drop` alarm email during the gap (the alarm treats missing data as breaching).
+
+Rollback: before step 6 — re-associate the EIP (`aws ec2 associate-address --allocation-id "$(aws ec2 describe-addresses --filters Name=tag:Name,Values=claude-for-you-eip --query 'Addresses[0].AllocationId' --output text)" --instance-id $OLD`) and `docker compose start app caddy` on OLD. After step 6 OLD is gone: roll forward with the step-2 archive (or the step-3 snapshot). **Never `terraform apply` from a pre-#178 SHA** — it would pull the instance back to a public subnet and fight the NAT for the EIP.
 
 ## Alarms
 

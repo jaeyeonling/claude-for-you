@@ -8,7 +8,7 @@
 # root_volume_size_gb = 20
 
 # If your domain lives in Route53, set both. Otherwise leave empty and
-# create the A record manually with the public_ip output.
+# create the A record manually with the nlb_public_ip output.
 # domain_zone_id = "Z1234567890ABC"
 # domain_name    = "claude.your-domain.com"
 

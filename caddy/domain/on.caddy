@@ -1,0 +1,10 @@
+# The {$DOMAIN} site (FQDN with Let's Encrypt, or a legacy plaintext `:80`).
+# Imported only when DOMAIN is set: docker-compose.yml derives DOMAIN_SITE=on
+# from it (same load-bearing filename contract as caddy/ip-tls/on.caddy).
+#
+# No-domain deployments behind the NLB leave DOMAIN empty (#178): any site
+# here — even `http://localhost` — would be a plaintext proxy on :80 for
+# whoever sends that Host header.
+{$DOMAIN} {
+	import app_proxy
+}

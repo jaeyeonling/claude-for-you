@@ -76,9 +76,12 @@ services:
     mem_limit: 128m
     mem_reservation: 32m
     environment:
-      # Required by Caddy itself. Empty → Caddyfile syntax error at boot.
-      # IP-only deployment can set DOMAIN=:80 to serve HTTP without ACME.
+      # FQDN for a Let's Encrypt site. Empty → no {$DOMAIN} site at all, which
+      # is right for no-domain deployments behind the NLB (TLS_IP set, #178):
+      # any :80 site would be a plaintext proxy for a spoofed Host header.
+      # `:80` = legacy plaintext IP-only mode; don't combine it with the NLB.
       DOMAIN: ${DOMAIN:-}
+      DOMAIN_SITE: ${DOMAIN:+on}
       # No-domain HTTPS (#174): the NLB EIP (`terraform output nlb_public_ip`).
       # Set → Caddy also serves https://<TLS_IP> with a Let's Encrypt IP cert.
       TLS_IP: ${TLS_IP:-}

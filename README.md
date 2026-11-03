@@ -134,7 +134,7 @@ The terraform module provisions: EC2 (t3.micro, AL2023, IMDSv2 required, SSM-onl
 | `TOKEN_STORE_PATH` | `./data/tokens.json` | Where the OAuth manager persists refreshed tokens. Mount as a volume in containers. |
 | `DISCORD_WEBHOOK_URL` | _(optional)_ | Primary alert channel. |
 | `SLACK_WEBHOOK_URL` | _(optional)_ | Fallback when Discord is unset. |
-| `DOMAIN` | _(required by Caddy)_ | FQDN for ACME, or `:80` for HTTP-only IP-only deployments. |
+| `DOMAIN` | _(empty)_ | FQDN for a Let's Encrypt site. Leave empty for no-domain deployments behind the NLB (`TLS_IP` set) — any `DOMAIN` site would be a plaintext proxy on :80. `:80` = legacy plaintext mode, not behind the NLB. |
 | `TLS_IP` | _(empty)_ | No-domain HTTPS: the NLB EIP (`terraform output nlb_public_ip`). Caddy also serves `https://<TLS_IP>` with a Let's Encrypt IP certificate; the app alerts `[tls]` if renewal stalls. Empty → off. |
 | `LOG_LEVEL` | `info` | `debug` enables the per-request access log. |
 | `PACING_MIN_GAP_MS` | `0` | Min ms between two outbound requests sharing the same session id. `0` = use snapshot p50. |
@@ -149,13 +149,13 @@ You issue them a key, then send them two things plus a link to the user guide.
 
 ```bash
 # operator side — issue a new key
-curl -sS -u admin:<your-key> http://<proxy-host>/admin/keys \
+curl -sS -u admin:<your-key> https://<proxy-host>/admin/keys \
   -H 'content-type: application/json' \
   -d '{"name":"bob"}'
 # response includes the key value — shown once, never again.
 
 # Restrict by model family (haiku-only for a casual user)
-curl -sS -u admin:<your-key> http://<proxy-host>/admin/keys \
+curl -sS -u admin:<your-key> https://<proxy-host>/admin/keys \
   -H 'content-type: application/json' \
   -d '{"name":"carol", "allowedModels": ["claude-haiku-*"]}'
 # Restricted users hit 403 model_not_allowed if they request a denied model.
@@ -172,7 +172,7 @@ curl -sS -u admin:<your-key> http://<proxy-host>/admin/keys \
 
 # Edit an existing file-issued key (rename or change allowedModels)
 curl -sS -u admin:<your-key> -X PATCH \
-  http://<proxy-host>/admin/keys/carol \
+  https://<proxy-host>/admin/keys/carol \
   -H 'content-type: application/json' \
   -d '{"allowedModels": ["claude-haiku-*", "claude-sonnet-4-6"]}'
 # Or via the admin UI's "edit api key" panel. Name field is readonly by
@@ -182,7 +182,7 @@ curl -sS -u admin:<your-key> -X PATCH \
 
 Message you send them:
 
-> Proxy URL: `http://<proxy-host>`
+> Proxy URL: `https://<proxy-host>`
 > API key: `<value from the response above>`
 > Setup: [`docs/user-guide.md`](./docs/user-guide.md) — follow the **Recommended setup**.
 > To see brand-new model families (e.g. Fable) in `/model`, also set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in your environment (see [Model discovery](#model-discovery-new-model-families) below).

@@ -1,5 +1,5 @@
-output "public_ip" {
-  description = "EC2 public IP (Elastic). Point your DNS A record here if not using Route53."
+output "egress_ip" {
+  description = "NAT Gateway EIP — the source IP of every outbound call (Anthropic API, GitHub). Not reachable inbound; clients use nlb_public_ip."
   value       = aws_eip.app.public_ip
 }
 
@@ -25,7 +25,7 @@ output "fetch_env_command" {
 
 output "dns_record" {
   description = "Created DNS record (only if domain_zone_id was set)"
-  value       = length(aws_route53_record.app) > 0 ? aws_route53_record.app[0].fqdn : "(not managed by terraform — point A record to ${aws_eip.app.public_ip})"
+  value       = length(aws_route53_record.app) > 0 ? aws_route53_record.app[0].fqdn : "(not managed by terraform — point A record to ${aws_eip.nlb.public_ip})"
 }
 
 output "sns_topic_arn" {

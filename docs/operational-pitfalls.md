@@ -657,7 +657,7 @@ git push origin "$GOOD:deploy" --force                            # deploy 마�
 
 1. **fresh RT 발급**: 원래 `ANTHROPIC_OAUTH_REFRESH_TOKEN`을 뽑던 방식으로 재인증 → 새 `sk-ant-ort01-…`.
 2. **프록시에 주입** (둘 중 하나):
-   - **(권장·빠름, `/admin` 살아있을 때)** 브라우저 `http://<프록시-호스트>/admin` 접속(프록시 키로 인증) → oauth replace 폼에 새 refreshToken 붙여넣고 제출. 재시작 불필요. RT는 **저장만** 되고 실제 refresh는 EC2가 자기 IP로 수행 → IP 안전. curl: `POST /admin/oauth/replace`(`memberName=default`, `src/admin/oauth.ts`).
+   - **(권장·빠름, `/admin` 살아있을 때)** 브라우저 `https://<프록시-호스트>/admin` 접속(프록시 키로 인증) → oauth replace 폼에 새 refreshToken 붙여넣고 제출. 재시작 불필요. RT는 **저장만** 되고 실제 refresh는 EC2가 자기 IP로 수행 → IP 안전. curl: `POST /admin/oauth/replace`(`memberName=default`, `src/admin/oauth.ts`).
    - **(폴백, `/admin`도 죽음)** SSM env 갱신 후 재배포:
      ```bash
      aws ssm get-parameter --name /claude-for-you/env --with-decryption --query Parameter.Value --output text > /tmp/env
@@ -784,7 +784,10 @@ docker logs --since 1h claude-for-you-caddy 2>&1 | grep -E '"status":50[24]' | t
 - **NLB 보안 그룹의 80번을 닫으면 안 된다.** http-01 검증 경로다(tls-alpn-01은 443). 하나가 막혀도 다른 쪽으로 발급되지만, 둘 다 막히면 6일 안에 전 클라이언트가 깨진다.
 - **NLB TCP idle timeout은 900초.** 기본 350초면 thinking 중 SSE 공백에서 연결이 끊긴다. Caddy의 read/write timeout(10분)보다 길게 유지한다.
 
-- **전환 기간(옛 EIP 경로와 NLB 경로 병행) 동안 드물게 연결이 RST될 수 있다.** 같은 NAT 뒤 클라이언트가 두 경로에 같은 출발 IP:포트를 재사용하면 인스턴스 입장에서 4-tuple이 겹친다(클라이언트 IP 보존의 알려진 부작용). 옛 경로를 닫는 #174 3단계에서 사라진다. 전환을 오래 끌지 않는다.
+- **#178 이후 인스턴스는 private subnet**(공인 IP 없음, 보안 그룹은 NLB 보안 그룹만 허용)이고 옛 EIP는 NAT의 나가는 IP다. 운영 `.env`는 `DOMAIN=` (비움) — `{$DOMAIN}` 사이트 자체가 없다. `DOMAIN`에 무엇이든 넣으면(`:80`은 물론 `http://localhost`조차) NLB 80번으로 그 Host 헤더를 보낸 요청이 평문 프록시된다. `scripts/check-caddyfile.sh`가 이 형태를 검사한다.
+- **#178 이전 SHA에서 `terraform apply` 금지.** 인스턴스를 public subnet으로 되돌리면서 NAT가 쥔 EIP를 다시 붙이려 한다. 롤백은 `scripts/deploy.sh`(앱 코드)만, 인프라는 roll-forward.
+- **NAT idle timeout은 350초**(변경 불가). 업스트림(Anthropic) SSE가 350초 넘게 바이트 없이 멈추면 끊긴다. Anthropic은 보통 `ping` 이벤트를 보내지만 미검증 — 전환 후 CloudWatch `AWS/NATGateway` `IdleTimeoutCount`를 본다.
+- **(#174 1단계 기록) 전환 기간(옛 EIP 경로와 NLB 경로 병행) 동안 드물게 연결이 RST될 수 있다.** 같은 NAT 뒤 클라이언트가 두 경로에 같은 출발 IP:포트를 재사용하면 인스턴스 입장에서 4-tuple이 겹친다(클라이언트 IP 보존의 알려진 부작용). 옛 경로를 닫는 #174 3단계에서 사라진다. 전환을 오래 끌지 않는다.
 - **롤백 주의**: 클라이언트가 `https://<nlb_ip>`로 옮긴 뒤 #174 이전 SHA로 롤백하면 IP 사이트가 즉시 사라져 그 클라이언트가 전부 TLS 오류를 본다. 롤백 대상은 #174 이후 SHA로 한정하거나, 옛 SHA로 가야 하면 클라이언트를 먼저 옛 주소로 되돌린다.
 - **HSTS는 이 경로에서 아무것도 지켜 주지 않는다.** 브라우저는 IP 리터럴에 HSTS를 적용하지 않고(RFC 6797 §8.1.1) Claude Code도 무시한다. 평문 차단은 `on.caddy`의 `http://{$TLS_IP} { abort }`가 한다 — 리다이렉트가 아니라 연결 끊기인 이유: 리다이렉트는 첫 요청의 API 키를 이미 평문으로 받은 뒤다.
 
