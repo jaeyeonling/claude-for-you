@@ -14,7 +14,26 @@ setLogger(
   }),
 );
 
-const { app, banner, dispose, captureModeEnabled } = await composeApp(config);
+// Graceful shutdown — close DB pools before the runtime tears them out from
+// under in-flight queries. Docker sends SIGTERM, then SIGKILL after 10s by
+// default; we finish within 5s thanks to per-tracker close() timeouts.
+// Registered *before* composeApp: a signal during boot must still reach
+// dispose(), or the #169 run marker survives and the next boot reports a
+// clean stop as a crash. SIGHUP (terminal closed) is a deliberate stop too.
+const composed = composeApp(config);
+let shuttingDown = false;
+const shutdown = async (signal: string): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info(`[claude-for-you] ${signal} received, draining...`);
+  await (await composed).dispose();
+  process.exit(0);
+};
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGHUP', () => void shutdown('SIGHUP'));
+
+const { app, banner, captureModeEnabled } = await composed;
 
 if (captureModeEnabled) {
   // node:http adapter exposes wire-order req.rawHeaders, which Bun.serve's
@@ -37,19 +56,5 @@ if (captureModeEnabled) {
   });
   banner(server.hostname ?? config.host, server.port ?? config.port, 'Bun.serve');
 }
-
-// Graceful shutdown — close DB pools before the runtime tears them out from
-// under in-flight queries. Docker sends SIGTERM, then SIGKILL after 10s by
-// default; we finish within 5s thanks to per-tracker close() timeouts.
-let shuttingDown = false;
-const shutdown = async (signal: string): Promise<void> => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  log.info(`[claude-for-you] ${signal} received, draining...`);
-  await dispose();
-  process.exit(0);
-};
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
-process.on('SIGINT', () => void shutdown('SIGINT'));
 
 export { app };
