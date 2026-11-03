@@ -38,15 +38,26 @@ const CONNECT_TIMEOUT_MS = 10_000;
  * notAfter (epoch ms) of the certificate served at dialHost:port, verified as
  * if a client had connected to `identity` (the public IP).
  */
-export const fetchCertNotAfter = (dialHost: string, identity: string, port = 443): Promise<number> =>
+export const fetchCertNotAfter = (
+  dialHost: string,
+  identity: string,
+  port = 443,
+  /** Extra trust anchor — tests only; production uses the default roots. */
+  ca?: string,
+): Promise<number> =>
   new Promise((resolve, reject) => {
-    // No `servername`: clients reach us by IP, which sends no SNI. Default
+    // No SNI: clients reach us by IP, which sends none. Default
     // rejectUnauthorized=true, so an expired/untrusted cert rejects here, and
     // the identity check rejects a cert that isn't for the public IP.
     const socket = connect({
       host: dialHost,
       port,
       timeout: CONNECT_TIMEOUT_MS,
+      // Must be explicit: left unset, the runtime derives SNI from dialHost
+      // ("caddy"), Caddy has no cert for that name and aborts the handshake
+      // (#176). "" sends no SNI — exactly what an IP-addressed client does.
+      servername: '',
+      ...(ca ? { ca } : {}),
       checkServerIdentity: (_host: string, cert: PeerCertificate) => checkServerIdentity(identity, cert),
     }, () => {
       const notAfter = Date.parse(socket.getPeerCertificate().valid_to);
