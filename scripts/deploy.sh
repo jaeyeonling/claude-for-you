@@ -397,8 +397,8 @@ else
 fi
 
 # NLB + Let's Encrypt IP certificate path (#174). Strict TLS verification on
-# purpose: this is the address clients use. Run from outside any TLS-inspecting
-# corporate proxy, or the proxy's own certificate makes this check meaningless.
+# purpose: this is the address clients use. Run from a network without TLS
+# interception, or the intercepting proxy's certificate makes this meaningless.
 # Only when TLS_IP is in the .env we just uploaded — after `terraform apply`
 # but before TLS_IP is set, the NLB exists yet Caddy has no IP site, and a
 # "wait for issuance" hint would send the operator waiting for nothing.

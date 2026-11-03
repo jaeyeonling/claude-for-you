@@ -777,14 +777,14 @@ docker logs --since 1h claude-for-you-caddy 2>&1 | grep -E '"status":50[24]' | t
 **함정**:
 
 - **배포 직후 약 2~3분은 HTTPS가 안 된다.** NLB 대상이 healthy가 되기 전 ACME 검증이 `Timeout during connect`로 실패하고, Caddy가 2분 뒤 재시도해 성공한다. 첫 전환 때는 `docker logs claude-for-you-caddy 2>&1 | grep 'certificate obtained'`를 확인한 뒤 클라이언트를 옮긴다.
-- **사내망에서는 인증서가 다르게 보인다.** 회사 TLS 검사 프록시(`Woowa Brothers ROOT CERT / AirFRONT`)가 바꿔 끼운다. 사내망 클라이언트는 원래 프록시 인증서를 신뢰하도록 설정돼 있어 동작에는 문제없지만, 사내망에서 한 검증은 아무것도 증명하지 않는다.
+- **TLS 검사 프록시가 있는 네트워크에서는 인증서가 다르게 보인다.** 프록시가 자기 인증서로 바꿔 끼우므로 그 네트워크에서 한 검증은 아무것도 증명하지 않는다(그 네트워크의 클라이언트는 프록시 CA를 신뢰하도록 설정돼 있어 동작에는 문제없다). 검증은 TLS 검사가 없는 네트워크에서 한다.
 - **운영 인스턴스에서 자기 NLB로 접속하면 실패한다(hairpin).** NLB 대상이 그 인스턴스 하나뿐이고 `preserve_client_ip=true`라 NAT loopback이 안 된다 — `curl https://<nlb_public_ip>` from the prod EC2는 타임아웃. 외부 검증은 다른 AWS 호스트·CloudShell·사외망에서. 인스턴스 안에서는 compose 내부망으로 Caddy를 직접 친다: `docker exec claude-for-you bun -e "const {fetchCertNotAfter}=await import('/app/src/tls-expiry.ts');console.log(new Date(await fetchCertNotAfter('caddy', process.env.TLS_IP)))"` (`[tls]` 감시도 같은 경로를 쓴다).
 - **클라이언트는 IP로 접속하므로 SNI를 보내지 않는다.** Caddyfile 전역의 `default_sni {$TLS_IP}`가 없으면 인증서를 못 받는다.
 - **Caddy `import` 상대경로는 작업 디렉터리(`/srv`) 기준**이라 절대경로를 쓴다. `{$VAR:default}`의 기본값은 변수가 *비어 있을 때*는 적용되지 않는다(정의되지 않았을 때만). 그래서 `TLS_IP_SITE`는 glob(`{$TLS_IP_SITE}.caddy*`)으로 import한다.
 - **NLB 보안 그룹의 80번을 닫으면 안 된다.** http-01 검증 경로다(tls-alpn-01은 443). 하나가 막혀도 다른 쪽으로 발급되지만, 둘 다 막히면 6일 안에 전 클라이언트가 깨진다.
 - **NLB TCP idle timeout은 900초.** 기본 350초면 thinking 중 SSE 공백에서 연결이 끊긴다. Caddy의 read/write timeout(10분)보다 길게 유지한다.
 
-- **전환 기간(옛 EIP 경로와 NLB 경로 병행) 동안 드물게 연결이 RST될 수 있다.** 같은 회사 NAT 뒤 클라이언트가 두 경로에 같은 출발 IP:포트를 재사용하면 인스턴스 입장에서 4-tuple이 겹친다(클라이언트 IP 보존의 알려진 부작용). 옛 경로를 닫는 #174 3단계에서 사라진다. 전환을 오래 끌지 않는다.
+- **전환 기간(옛 EIP 경로와 NLB 경로 병행) 동안 드물게 연결이 RST될 수 있다.** 같은 NAT 뒤 클라이언트가 두 경로에 같은 출발 IP:포트를 재사용하면 인스턴스 입장에서 4-tuple이 겹친다(클라이언트 IP 보존의 알려진 부작용). 옛 경로를 닫는 #174 3단계에서 사라진다. 전환을 오래 끌지 않는다.
 - **롤백 주의**: 클라이언트가 `https://<nlb_ip>`로 옮긴 뒤 #174 이전 SHA로 롤백하면 IP 사이트가 즉시 사라져 그 클라이언트가 전부 TLS 오류를 본다. 롤백 대상은 #174 이후 SHA로 한정하거나, 옛 SHA로 가야 하면 클라이언트를 먼저 옛 주소로 되돌린다.
 - **HSTS는 이 경로에서 아무것도 지켜 주지 않는다.** 브라우저는 IP 리터럴에 HSTS를 적용하지 않고(RFC 6797 §8.1.1) Claude Code도 무시한다. 평문 차단은 `on.caddy`의 `http://{$TLS_IP} { abort }`가 한다 — 리다이렉트가 아니라 연결 끊기인 이유: 리다이렉트는 첫 요청의 API 키를 이미 평문으로 받은 뒤다.
 
