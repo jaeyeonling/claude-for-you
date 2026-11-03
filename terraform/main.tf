@@ -322,12 +322,19 @@ locals {
     # ---- Docker Compose v2 (pinned) ----
     mkdir -p /usr/local/lib/docker/cli-plugins
     ARCH=$(uname -m)
-    curl -sL "https://github.com/docker/compose/releases/download/${local.docker_compose_version}/docker-compose-linux-$${ARCH}" \
+    # -f: a 404 must fail here, not save an HTML page as the plugin and
+    # surface later as a confusing `docker build` error in deploy.sh.
+    # --retry: with -f under set -e, a transient GitHub 5xx/429 would abort boot.
+    curl -fsSL --retry 5 --retry-all-errors "https://github.com/docker/compose/releases/download/${local.docker_compose_version}/docker-compose-linux-$${ARCH}" \
       -o /usr/local/lib/docker/cli-plugins/docker-compose
     chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
     # ---- Docker Buildx (required by Dockerfile syntax=docker/dockerfile:1.7) ----
-    curl -sL "https://github.com/docker/buildx/releases/download/${local.docker_buildx_version}/buildx-${local.docker_buildx_version}.linux-$${ARCH == "x86_64" && "amd64" || "arm64"}" \
+    # buildx names arches amd64/arm64, not uname's x86_64/aarch64. Map in bash:
+    # `$${…}` passes text to bash verbatim, so an HCL conditional inside it
+    # becomes a bash "bad substitution" that aborted every fresh boot (#180).
+    BUILDX_ARCH=$([ "$${ARCH}" = x86_64 ] && echo amd64 || echo arm64)
+    curl -fsSL --retry 5 --retry-all-errors "https://github.com/docker/buildx/releases/download/${local.docker_buildx_version}/buildx-${local.docker_buildx_version}.linux-$${BUILDX_ARCH}" \
       -o /usr/local/lib/docker/cli-plugins/docker-buildx
     chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
