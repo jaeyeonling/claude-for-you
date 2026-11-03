@@ -100,6 +100,20 @@ sudo docker build -t claude-for-you:latest .
 sudo docker compose up -d
 ```
 
+## NLB + IP certificate rollout
+
+`nlb.tf` (#174) puts an NLB with its own static EIP in front of the instance and Caddy serves `https://<nlb_public_ip>` with a Let's Encrypt IP-address certificate — HTTPS without a domain. Step 1 runs it **alongside** the old `http://<public_ip>` path. Order matters:
+
+1. **`terraform apply`** — creates the NLB, its EIP and SG; only adds tags elsewhere. Nothing changes for current clients.
+2. **`terraform output -raw nlb_public_ip`** → add `TLS_IP=<that IP>` to your **local** `.env`. (`deploy.sh` uploads it to SSM; never edit `.env` on the instance — `fetch-env.sh` rebuilds it from SSM on every deploy.)
+3. **`bash scripts/deploy.sh`** → recreates Caddy with the IP site. First issuance takes ~2–3 min (ACME fails until NLB targets are healthy, then Caddy retries).
+4. **Confirm** `docker logs claude-for-you-caddy 2>&1 | grep 'certificate obtained'` on the instance, and the app log line `[tls] certificate watch armed`. Verify the cert from a network **without TLS interception** and **not from the instance itself** (intercepting proxy / NLB hairpin — `docs/operational-pitfalls.md` #25).
+5. **`git push origin main:deploy`**.
+6. **Move clients** to `ANTHROPIC_BASE_URL=https://<nlb_public_ip>`. Watch Caddy logs for requests still arriving on the old IP before step 7.
+7. *(#174 step 3, separate PR)* drop `0.0.0.0/0` ingress on the instance SG, move it to a private subnet behind NAT.
+
+Rollback after clients moved: only to a SHA that still contains `caddy/ip-tls/on.caddy`, or move clients back first.
+
 ## Alarms
 
 Two alarms publish to the `${var.name}-alerts` SNS topic:

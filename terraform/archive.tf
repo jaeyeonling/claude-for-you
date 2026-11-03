@@ -113,6 +113,42 @@ resource "aws_s3_bucket_lifecycle_configuration" "messages_archive" {
       days_after_initiation = 7
     }
   }
+
+  # The two `infra-managed-rule-*` rules below are added to every bucket by the
+  # org's infra automation, not by us. This resource is authoritative for the
+  # whole lifecycle config, so leaving them out makes `apply` delete them.
+  # Mirror them verbatim; if infra changes them, the next plan shows the drift.
+  rule {
+    id     = "infra-managed-rule-delete-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 2
+    }
+  }
+
+  rule {
+    id     = "infra-managed-rule-transition-intelligent-tiering"
+    status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
+
+    transition {
+      days          = 0
+      storage_class = "INTELLIGENT_TIERING"
+    }
+
+    noncurrent_version_transition {
+      noncurrent_days = 0
+      storage_class   = "INTELLIGENT_TIERING"
+    }
+  }
 }
 
 # ---------- Write path: the EC2 instance role ----------

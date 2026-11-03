@@ -87,3 +87,17 @@ jobs:
       - name: terraform validate
         working-directory: terraform
         run: terraform validate
+
+  caddyfile:
+    name: caddyfile adapt (compose env)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      # Parses the Caddyfile with the env docker compose actually renders, for
+      # TLS_IP unset and set. #174 nearly shipped a Caddyfile that only failed
+      # under compose's "defined but empty" TLS_IP — Caddy would not boot.
+      # ubuntu-latest ships docker + compose v2 + jq.
+      - name: check Caddyfile
+        run: bash scripts/check-caddyfile.sh

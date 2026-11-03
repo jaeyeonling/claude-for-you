@@ -52,6 +52,8 @@ export type AppConfig = Readonly<{
   messagesLogArchiveRegion: string;
   discordWebhookUrl: string | null;
   slackWebhookUrl: string | null;
+  /** NLB EIP served over HTTPS with a Let's Encrypt IP cert (#174). Enables the [tls] expiry watch. */
+  tlsIp: string | null;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }>;
 
@@ -121,6 +123,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): AppConfig => {
         : null,
     canaryPercent: Number(env.CANARY_PERCENT ?? 0),
     accountsPath: env.ACCOUNTS_PATH ?? './data/accounts.json',
+    tlsIp: env.TLS_IP && env.TLS_IP.length > 0 ? env.TLS_IP : null,
     messagesLogEnabled: (env.MESSAGES_LOG_ENABLED ?? 'true').toLowerCase() !== 'false',
     messagesLogArchiveBucket:
       env.MESSAGES_LOG_ARCHIVE_BUCKET && env.MESSAGES_LOG_ARCHIVE_BUCKET.length > 0

@@ -52,3 +52,8 @@ output "rds_storage_alarm_name" {
   description = "Name of the RDS free-storage alarm (#22). Use with `aws cloudwatch describe-alarms --alarm-names` to inspect state."
   value       = aws_cloudwatch_metric_alarm.rds_free_storage.alarm_name
 }
+
+output "nlb_public_ip" {
+  description = "Client entry point and the IP the Let's Encrypt certificate is issued for. Set TLS_IP to this in .env; clients use https://<this>."
+  value       = aws_eip.nlb.public_ip
+}

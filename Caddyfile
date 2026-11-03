@@ -5,6 +5,10 @@
 #   - Security Group allows 80/tcp + 443/tcp inbound (and 80 reachable from
 #     Let's Encrypt — leave it open for ACME http-01 challenge).
 #   - DNS A record points {$DOMAIN} at the EC2 public IP.
+#
+# No-domain deployments (#174): set TLS_IP to the NLB's EIP. Caddy then also
+# serves https://<TLS_IP> with a Let's Encrypt IP-address certificate
+# (caddy/ip-tls/on.caddy). Unset → nothing is imported.
 
 # Global config — keep the auto-HTTPS issuer logs quiet on stdout, and serve
 # a slim error page that doesn't leak Caddy version when something upstream
@@ -14,9 +18,16 @@
 		# Helps Caddy strip hop-by-hop headers cleanly when forwarding to Bun.
 		strict_sni_host insecure_off
 	}
+	# Clients that connect by IP send no SNI. Without a default they'd get no
+	# certificate at all. TLS_DEFAULT_SNI is derived in docker-compose.yml
+	# (`${TLS_IP:-none}`) so it is never empty: compose always *defines*
+	# TLS_IP, and `{$TLS_IP:none}` would expand to nothing → parse error →
+	# Caddy refuses to boot (R1 finding on #174). "none" matches no cert.
+	default_sni {$TLS_DEFAULT_SNI:none}
 }
 
-{$DOMAIN} {
+# Everything a client-facing site does, shared by {$DOMAIN} and the IP site.
+(app_proxy) {
 	encode zstd gzip
 
 	# Defense-in-depth: even though the proxy enforces application-layer
@@ -72,3 +83,16 @@
 		level INFO
 	}
 }
+
+{$DOMAIN} {
+	import app_proxy
+}
+
+# TLS_IP_SITE is derived in docker-compose.yml: "on" iff TLS_IP is set, else
+# the empty string. The trailing `*` makes this a glob: empty → `.caddy*`
+# matches nothing, which Caddy treats as a warning, not an error (a literal
+# path that doesn't exist is an error). `{$VAR:default}` can't help here —
+# Caddy only applies the default when the variable is unset, not empty.
+# Absolute path: Caddy resolves relative imports against its working dir
+# (/srv in the official image), not against this file's directory.
+import /etc/caddy/caddy/ip-tls/{$TLS_IP_SITE}.caddy*
