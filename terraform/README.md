@@ -123,7 +123,9 @@ Rollback after clients moved: only to a SHA that still contains `caddy/ip-tls/on
 
 `network.tf` moves the instance into a private subnet; its former EIP becomes the NAT Gateway's (same egress IP). Moving subnets **replaces the instance**, and the Docker volumes on its root disk go with it — so this is a migration, with ~10–15 minutes of downtime. Do it once clients are on `https://<nlb_public_ip>`. Cost: NAT ≈ $43/mo + $0.059/GB processed (S3 bypasses it via a free gateway endpoint).
 
-Each step exists because skipping it breaks something. `OLD` = current instance id (`terraform output -raw instance_id`).
+Each step exists because skipping it breaks something. `OLD` = current instance id (`terraform output -raw instance_id`) before step 6; `NEW` = the same output after it.
+
+**Before step 1 — run the cutover from a client that does not use this proxy.** If your own Claude Code has `ANTHROPIC_BASE_URL` pointed at this proxy, step 1 cuts off its API and the session dies with the service down (happened in the #178 cutover). Use a session with a direct API connection or do it by hand. Keep the machine awake and online for the whole run (macOS: prefix long commands with `caffeinate -i`): a network drop mid-cutover killed a script polling step 7 and stretched the outage by over an hour.
 
 1. **Stop app + Caddy on OLD** — the OAuth refresh token rotates on use; a refresh after the backup leaves the new instance with a dead token (pitfall #11):
    `aws ssm send-command --instance-ids $OLD --document-name AWS-RunShellScript --parameters 'commands=["cd /home/ec2-user/claude-for-you && docker compose stop app caddy"]'`
@@ -135,7 +137,16 @@ Each step exists because skipping it breaks something. `OLD` = current instance 
 5. **Local `.env`: `DOMAIN=`** (empty). With the NLB in front, any `{$DOMAIN}` site on :80 would be a plaintext proxy for a spoofed Host header (asserted by `scripts/check-caddyfile.sh`).
 6. **Network first, then the instance** — so a NAT failure doesn't leave you with OLD already destroyed:
    `terraform apply -target=aws_route_table_association.private -target=aws_nat_gateway.egress -target=aws_vpc_endpoint.s3`, then `terraform apply`.
+   Prefer `terraform plan -out=<file>` → review → `terraform apply <file>` for each: only the reviewed changes are applied, and `terraform apply <file>` doesn't prompt (a plain `terraform apply` in a non-interactive shell exits at the `yes` prompt with nothing applied). The plan file can hold sensitive values; delete it after applying.
 7. **Wait for NEW** (`terraform output -raw instance_id`): `aws ssm describe-instance-information` shows `Online`, and `test -f /var/log/user-data-done` via send-command succeeds (Docker installed through the NAT; ~3–5 min).
+   **Not done after ~10 min → it failed; waiting longer won't help.** user_data runs under `set -e` and stops at the first error. To recover:
+   1. Open a shell: `aws ssm start-session --target $NEW`, then `sudo -i`.
+   2. Find the failing line: `cloud-init status --long` and `tail -40 /var/log/cloud-init-output.log` (the error names `part-001: line N`).
+   3. Rule out egress first: `curl -fsS https://checkip.amazonaws.com` must print `terraform output -raw egress_ip`. If it doesn't, fix the NAT route; the script is fine.
+   4. The rendered script is on the box at `/var/lib/cloud/instance/scripts/part-001`. Copy it from line N to the end: `sed -n 'N,$p' /var/lib/cloud/instance/scripts/part-001 > /root/resume.sh`. Fix the failing line in `/root/resume.sh`, prepend `#!/bin/bash`, `set -e` and any variables it uses from earlier lines (e.g. `ARCH=$(uname -m)`), then `bash /root/resume.sh`. The script ends by writing `/var/log/user-data-done`.
+   5. Fix the same line in `terraform/main.tf`, run `bash scripts/check-user-data.sh` (terraform + jq, no AWS credentials needed), and open a PR. `ignore_changes = [user_data]` means this won't touch the running instance; it fixes the next one.
+
+   (#180: a broken buildx line aborted every fresh boot; `scripts/check-user-data.sh` now catches that class of bug in CI.)
 8. **Restore** — `bash scripts/volume-restore.sh $NEW <dir>/volumes.tgz` (Compose-labelled volumes, original owners/modes — the app's uid 10001 must own `tokens` to rewrite them).
 9. **`bash scripts/deploy.sh`** (only the NLB path exists now). Verify from a network without TLS interception: `https://<nlb_public_ip>/healthz`; in-container `[tls]` check (pitfall #25); egress IP from inside the container equals `terraform output egress_ip`; `aws ec2 describe-instances` shows no public IP.
 10. **`git push origin main:deploy`**, then delete `<dir>/volumes.tgz`.
