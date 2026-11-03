@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { createTlsExpiryWatch } from '../src/tls-expiry.js';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createServer, type Server } from 'node:tls';
+import { createTlsExpiryWatch, fetchCertNotAfter } from '../src/tls-expiry.js';
 
 const H = 60 * 60 * 1000;
 const NOW = Date.parse('2026-11-03T00:00:00Z');
@@ -110,5 +116,60 @@ describe('createTlsExpiryWatch', () => {
     const after = checks;
     await Bun.sleep(30);
     expect(checks).toBe(after);
+  });
+});
+
+describe('fetchCertNotAfter (real TLS)', () => {
+  // Reproduces #176: real clients reach us by IP and send no SNI, and Caddy
+  // only has a certificate for the IP. If the check lets the runtime derive
+  // SNI from the dial hostname, Caddy aborts the handshake. We record the SNI
+  // the server actually saw (Bun's tls server doesn't invoke SNICallback, so a
+  // rejecting callback would silently pass).
+  const makeCert = (): { key: string; cert: string } => {
+    const dir = mkdtempSync(join(tmpdir(), 'cfy-tls-'));
+    try {
+      const r = spawnSync('openssl', [
+        'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes',
+        '-days', '1', '-subj', '/CN=cfy-test', '-addext', 'subjectAltName=IP:127.0.0.1',
+        '-keyout', join(dir, 'k.pem'), '-out', join(dir, 'c.pem'),
+      ]);
+      if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`);
+      return { key: readFileSync(join(dir, 'k.pem'), 'utf8'), cert: readFileSync(join(dir, 'c.pem'), 'utf8') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const listen = (server: Server): Promise<number> =>
+    new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port)));
+
+  test('connects without SNI and verifies the IP identity', async () => {
+    const { key, cert } = makeCert();
+    const seen: Array<string | false | undefined> = [];
+    const server = createServer({ key, cert }, (socket) => {
+      seen.push((socket as unknown as { servername?: string | false }).servername);
+      socket.end();
+    });
+    const port = await listen(server);
+    try {
+      const notAfter = await fetchCertNotAfter('localhost', '127.0.0.1', port, cert);
+      expect(notAfter).toBeGreaterThan(Date.now());
+      await Bun.sleep(20);
+      expect(seen).toHaveLength(1);
+      expect(seen[0] || null).toBeNull(); // no SNI on the wire
+    } finally {
+      server.close();
+    }
+  });
+
+  test('rejects a certificate that is not for the expected IP', async () => {
+    const { key, cert } = makeCert();
+    const server = createServer({ key, cert });
+    const port = await listen(server);
+    try {
+      await expect(fetchCertNotAfter('localhost', '127.0.0.2', port, cert)).rejects.toThrow();
+    } finally {
+      server.close();
+    }
   });
 });
