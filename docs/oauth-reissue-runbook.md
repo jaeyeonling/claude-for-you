@@ -74,14 +74,15 @@ security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 \
 
 ### 3-1. 새 refresh token 확보
 
-재발급 대상 계정(전용 계정 권장)으로 로그인 후 Keychain에서 추출:
+재발급 대상 계정(전용 계정 권장)으로 **격리된 config dir**에서 로그인한다. 업무용 세션의 Keychain 항목을 건드리지 않기 위해서다:
 
 ```bash
-claude login    # 해당 계정
-security find-generic-password -w -s "Claude Code-credentials" | python3 -m json.tool
+CLAUDE_CONFIG_DIR=/tmp/cc-login claude auth login --claudeai   # 브라우저 authorize → 코드 붙여넣기까지 완결
 ```
 
-출력에서 `refreshToken`(`sk-ant-ort01-…`)을 확보. access token/expiresAt은 넣지 않아도 된다 — 비우면 첫 요청에서 강제 refresh된다.
+> CLI 2.1.x(2.1.328에서 확인)에는 `claude login` 서브커맨드가 없다 — `login`을 프롬프트로 처리해 `Not logged in · Please run /login`만 찍고 끝난다. 반드시 `claude auth login`.
+
+`CLAUDE_CONFIG_DIR`를 주면 Keychain 항목명이 `Claude Code-credentials-<sha256(dir)[:8]>`가 된다(`/tmp/cc-login` → `a9683f94`). 추출·검증·주입은 `scripts/oauth-reissue.sh inject`가 한 번에 한다(부록 A). access token/expiresAt은 넣지 않아도 된다 — 비우면 첫 요청에서 강제 refresh된다.
 
 ### 3-2. `/admin/oauth/replace`로 즉시 교체
 
@@ -109,6 +110,8 @@ curl -sS -X POST "https://<PROXY_HOST>/admin/oauth/replace" \
 ## 4단계 — 내구성: SSM 동기화 (볼륨 유실·신규 인스턴스 대비)
 
 3단계는 `tokens` 볼륨에만 쓴다. 볼륨이 날아가거나(#4) 새 인스턴스가 뜨면 프록시는 **SSM `/claude-for-you/env`의 값으로 폴백**하므로, 거기가 옛 죽은 토큰이면 다시 죽는다. 그래서 SSM의 OAuth 필드도 새 값으로 맞춰둔다.
+
+> **한계 — 이 단계는 효과가 짧다.** refresh 응답마다 새 `refresh_token`이 내려오고 프록시는 그걸 볼륨에 저장한다(`src/auth/oauth.ts` rotation). 즉 첫 refresh가 일어난 순간 SSM에 넣은 값은 이미 낡은 토큰이다. 볼륨 유실 대비의 실효 수단은 SSM 동기화가 아니라 `scripts/volume-backup.sh`/`volume-restore.sh`와 이 runbook의 재주입이다. 2026-11-19 복구에서는 이 단계를 생략했다.
 
 > ⚠️ **`scripts/deploy.sh`로 하지 말 것.** deploy.sh는 로컬 워킹카피 `.env`를 통째로 SSM에 업로드하는데, 이 `.env`는 보통 smoke-test **더미**다(더미면 prod 사망). SSM 파라미터의 OAuth 필드만 표적 갱신할 것.
 
@@ -140,6 +143,16 @@ rm -f /tmp/prod.env    # 시크릿 즉시 삭제
 - **로컬 gateway 강등** — 본인 로컬 = OAuth 없는(프록시 키만) 클라이언트. 프록시 OAuth = 전용 계정으로 프록시만 보유 → #11 원천 차단.
 - **멀티계정 풀(`ACCOUNTS_PATH`)** — 한 계정 chain이 죽어도 나머지가 서빙, rotation 부하 분산. 재발급이 prod 전면 중단이 아니게 된다.
 
+## 만료 이력 — 주기를 예측하지 말 것
+
+| 재발급 | 직전 재발급 이후 | 로그 |
+|---|---|---|
+| 2026-07-27 | — | `invalid_grant` |
+| 2026-10-22 | ~87일 | `invalid_grant` |
+| 2026-11-19 | **28일** | `invalid_grant: Refresh token expired` |
+
+"refresh token TTL ≈ 90일" 가설은 11-19에 깨졌다. 고정 TTL로 보고 달력에 다음 날짜를 박아두지 말고, 앱 로그의 `oauth refresh failed`로 판단한다. 재발할 때마다 이 표에 한 줄 추가.
+
 ## 관련 함정
 
 [`operational-pitfalls.md`](./operational-pitfalls.md): #1(`/logout` server-side revoke) · #4(볼륨 유실) · #10(refresh TTL·자동 revoke) · #11(rotation 충돌).
@@ -160,7 +173,20 @@ rm -f /tmp/prod.env    # 시크릿 즉시 삭제
 - `accessToken` = 빈값 → 첫 호출에서 강제 refresh 유도(`ensureFresh`가 accessToken 비면 refresh)
 - 첫 refresh 성공 시 `writeAtomic`이 실제 access token + 실제 `expiresAt`로 덮어씀 → 그때 `expiresAt`가 253402…가 아닌 실제 미래값이면 복구 성공 신호
 
-**절차 (RT를 명령 로그에 안 남기려 SecureString 릴레이):**
+**스크립트 (권장, 2026-11-19 실전 검증):** 아래 수동 절차 전체를 `scripts/oauth-reissue.sh`가 수행한다. RT는 SecureString 릴레이로만 이동하고 끝나면 임시 파라미터를 지운다.
+
+```bash
+bash scripts/oauth-reissue.sh diag            # 실패 로그 + tokens.json expiresAt (토큰 값은 안 찍음)
+CLAUDE_CONFIG_DIR=/tmp/cc-login claude auth login --claudeai
+bash scripts/oauth-reissue.sh inject          # 주입 → restart → expiresAt 확인
+security delete-generic-password -s "Claude Code-credentials-a9683f94" && rm -rf /tmp/cc-login   # 검증 후 로컬 사본 제거(#11)
+```
+
+인스턴스 ID는 `terraform output -raw instance_id`에서 자동으로 읽는다(#178 이후 바뀜 — 하드코딩 금지). 자동 모드 Claude Code는 SSM·Keychain 접근이 막히므로 운영자가 `!`로 실행한다.
+
+판정 주의: `diag`의 실패 카운트는 restart 이전 줄도 센다. **마지막 실패 시각 < restart 시각**이고 `expiresAt`이 `253402300799000`이 아닌 실값(≈ 지금 + 8h)이면 복구 성공이다.
+
+**수동 절차 (스크립트가 하는 일, RT를 명령 로그에 안 남기려 SecureString 릴레이):**
 
 1. RT를 SecureString에 넣기(암호화·CloudTrail redact):
    ```bash
@@ -177,19 +203,20 @@ rm -f /tmp/prod.env    # 시크릿 즉시 삭제
    chown 10001:10001 "$D/tokens.json"; chmod 600 "$D/tokens.json"   # 컨테이너 uid=10001
    cd /home/ec2-user/claude-for-you && docker compose restart app
    ```
-   중첩 따옴표 회피: 로컬에서 위 스크립트를 파일로 저장 → `base64 < file` → `send-command --parameters '{"commands":["echo <b64> | base64 -d | bash"]}'`. (긴 base64를 손으로 붙여넣지 말고 항상 `base64 < file`로 생성 — 붙여넣기 손상 잦음.)
+   중첩 따옴표 회피: 로컬에서 위 스크립트를 파일로 저장 → `base64 < file` → `send-command --parameters '{"commands":["echo <b64> | base64 -d | bash"]}'`. (긴 base64를 손으로 붙여넣지 말고 항상 `base64 < file`로 생성 — 붙여넣기 손상 잦음.) 원격 스크립트를 `$(cat <<'EOF' … EOF)`로 감쌀 거면 `case … ;;`를 쓰지 말 것 — macOS bash 3.2가 파싱 못 해 SecureString에 RT만 올린 채 중단된다(2026-11-19 실제 발생).
 3. 재시작 필수 — oauth manager는 boot 시에만 파일을 읽는다(`createOAuthManager`). 런타임 파일 변경은 restart 전까지 무효.
 4. 검증: `docker compose logs --since 5m app | grep -ic 'oauth refresh failed'` = 0 + `tokens.json`의 `expiresAt`가 실제 미래값으로 갱신.
 5. 정리: `aws ssm delete-parameter --name /claude-for-you/tmp-newrt`.
 
 원격 경로 확정값(`scripts/deploy.sh` 기준): 작업 디렉토리 `/home/ec2-user/claude-for-you`, compose 서비스명 `app`, 볼륨 `claude-for-you_tokens` → `/var/lib/docker/volumes/claude-for-you_tokens/_data`, 컨테이너 uid `10001`.
 
-## 부록 B — refresh token 확보: `claude login` 주의 (실전 검증됨)
+## 부록 B — refresh token 확보: `claude auth login` 주의 (실전 검증됨)
 
 프록시는 **`sk-ant-ort01-` refresh token**이 필수다(`grant_type=refresh_token`). 그런데 자격증명 획득 시 함정:
 
 - **`claude setup-token` = access-only(`sk-ant-oat01-`, 장기) → refresh token 없음.** 프록시에 못 쓴다.
-- **`claude login`이라도 브라우저 authorize를 끝까지 완료하지 않으면** keychain이 갱신되지 않거나 `refreshToken`이 빈 문자열로 남는다. `CLAUDE_CONFIG_DIR` 격리 로그인은 keychain을 안 건드릴 수 있어 신뢰 어려움 — **평범한 `claude login`을 완결**하는 게 가장 확실했다.
+- **로그인이라도 브라우저 authorize를 끝까지 완료하지 않으면** keychain이 갱신되지 않거나 `refreshToken`이 빈 문자열로 남는다.
+- **`CLAUDE_CONFIG_DIR` 격리 로그인은 동작한다** — 다만 항목명에 해시 접미사가 붙는다(3-1 참고). 무접미 `Claude Code-credentials`를 읽으면 `claudeAiOauth`가 없어 `KeyError`가 나는데, 이건 로그인 실패가 아니라 항목을 잘못 짚은 것이다. 2026-10-22·11-19 모두 `CLAUDE_CONFIG_DIR=/tmp/cc-login claude auth login --claudeai`로 확보했다.
 - 획득 후 **반드시 검증** (accessToken이 아니라 refreshToken을, 그것도 `sk-ant-ort01-` prefix + 미래 `expiresAt`인지):
   ```python
   # keychain JSON은 {"claudeAiOauth":{"accessToken","refreshToken","expiresAt","subscriptionType",...}}
@@ -197,7 +224,7 @@ rm -f /tmp/prod.env    # 시크릿 즉시 삭제
   ```
   `security find-generic-password -w -s "Claude Code-credentials"` → `claudeAiOauth.refreshToken`이 `sk-ant-ort01-`로 시작하는지 확인.
 
-> 로컬이 이미 gateway(프록시 키)로 돌면 `claude login`은 BASE_URL(settings.json `env`)을 안 타는 것으로 보였다(정상 로그인됨). 단 settings.json `env`는 shell env를 이기므로 `ANTHROPIC_BASE_URL=... claude login` 오버라이드는 안 먹는다.
+> 로컬이 이미 gateway(프록시 키)로 돌면 `claude auth login`은 BASE_URL(settings.json `env`)을 안 타는 것으로 보였다(정상 로그인됨). 단 settings.json `env`는 shell env를 이기므로 `ANTHROPIC_BASE_URL=... claude auth login` 오버라이드는 안 먹는다.
 
 ## 부록 C — 확인된 미해결: SSM `API_KEYS` 드리프트
 
