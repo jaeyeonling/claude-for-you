@@ -10,15 +10,7 @@
 
 **원인**: Claude.ai OAuth의 logout은 client-side 캐시 삭제가 아니라 **server-side revoke API 호출**. 같은 토큰이 어디 박혀있든 한 번에 죽음.
 
-**복구**:
-
-1. 본인 머신에서 `claude login` 재수행
-2. Keychain에서 새 자격증명 추출:
-   ```bash
-   security find-generic-password -w -s "Claude Code-credentials" | python3 -m json.tool
-   ```
-3. SSH로 EC2 `.env` 갱신 (`ANTHROPIC_OAUTH_REFRESH_TOKEN`, `ANTHROPIC_OAUTH_ACCESS_TOKEN`, `ANTHROPIC_OAUTH_EXPIRES_AT`)
-4. `docker compose restart app`
+**복구**: [`oauth-reissue-runbook.md`](./oauth-reissue-runbook.md) — `scripts/oauth-reissue.sh diag` → `CLAUDE_CONFIG_DIR=/tmp/cc-login claude auth login --claudeai` → `scripts/oauth-reissue.sh inject`. (예전 절차의 `claude login`은 CLI 2.1.x에 없고, `.env` 직접 수정은 boot 시 `selectInitial`이 볼륨 `tokens.json`과 `expiresAt`을 비교해 고르므로 무시될 수 있다.)
 
 **예방**: **본인 머신에서 절대 `claude /logout` 금지**. 운영 토큰을 회전하고 싶으면 별도 dummy 계정 만들고 그쪽으로 회전. multi-account pool로 운영하면 한 계정 logout해도 나머지로 흡수 가능.
 
