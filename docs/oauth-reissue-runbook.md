@@ -182,7 +182,7 @@ bash scripts/oauth-reissue.sh inject          # 주입 → restart → expiresAt
 security delete-generic-password -s "Claude Code-credentials-a9683f94" && rm -rf /tmp/cc-login   # 검증 후 로컬 사본 제거(#11)
 ```
 
-인스턴스 ID는 `terraform output -raw instance_id`에서 자동으로 읽는다(#178 이후 바뀜 — 하드코딩 금지). 자동 모드 Claude Code는 SSM·Keychain 접근이 막히므로 운영자가 `!`로 실행한다.
+인스턴스 ID는 `terraform output -raw instance_id`에서 자동으로 읽는다(#178 이후 바뀜 — 하드코딩 금지). 자동 모드 Claude Code는 SSM·Keychain 접근이 막히므로 운영자가 `!`로 실행한다. 단일 계정 모드 전용이다. `/data/accounts.json`이 있으면(풀 모드) 앱이 `tokens.json`을 읽지 않으므로 `inject`는 아무것도 쓰지 않고 중단하고, `diag`는 `pool_mode=yes`를 출력한다. 풀 모드에서는 4단계의 `accounts.json` 절차를 따른다.
 
 판정 주의: `diag`의 실패 카운트는 restart 이전 줄도 센다. **마지막 실패 시각 < restart 시각**이고 `expiresAt`이 `253402300799000`이 아닌 실값(≈ 지금 + 8h)이면 복구 성공이다.
 

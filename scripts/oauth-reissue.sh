@@ -56,8 +56,12 @@ diag() {
   echo "▸ OAuth state on $IID"
   ssm_run "$(cat <<EOF
 cd $APP_DIR
-echo "refresh_failures_24h=\$(docker compose logs --since 24h app 2>&1 | grep -ic 'oauth refresh failed')"
-docker compose logs --since 24h app 2>&1 | grep -i 'oauth refresh failed' | tail -2 | cut -c1-240
+if ! LOGS=\$(docker compose logs --since 24h app 2>&1); then echo "✗ docker compose logs failed — cannot judge" >&2; exit 1; fi
+# Matches both "[oauth] ⚠️  refresh failed" (src/app.ts, incl. boot) and "oauth refresh failed".
+FAILS=\$(printf '%s\n' "\$LOGS" | grep -i 'refresh failed' || true)
+echo "refresh_failures_24h=\$(printf '%s' "\$FAILS" | grep -c . || true)"
+printf '%s\n' "\$FAILS" | tail -2 | cut -c1-240
+if [ -e $VOL/accounts.json ]; then echo "pool_mode=yes — app reads tokens-{name}.json, inject will refuse"; else echo "pool_mode=no"; fi
 echo "tokens_json_expiresAt=\$(grep -o '"expiresAt":[0-9]*' $VOL/tokens.json | cut -d: -f2)"
 echo "now_ms=\$(date +%s)000"
 EOF
@@ -83,14 +87,19 @@ inject() {
   fi
   echo "▸ refresh token ok (ort01, len=${#rt}) from \"$svc\""
 
+  # Trap before the upload: an interrupt between put and trap would strand the RT.
+  # Tolerates an absent parameter (upload never happened).
+  trap 'aws ssm delete-parameter --name "$TMP_PARAM" --region "$REGION" >/dev/null 2>&1 && echo "▸ $TMP_PARAM deleted" || true' EXIT
   aws ssm put-parameter --name "$TMP_PARAM" --type SecureString --overwrite \
     --region "$REGION" --value "$rt" >/dev/null
   unset rt
-  trap 'aws ssm delete-parameter --name "$TMP_PARAM" --region "$REGION" >/dev/null 2>&1 && echo "▸ $TMP_PARAM deleted"' EXIT
 
   echo "▸ Writing tokens.json on $IID and restarting app"
   ssm_run "$(cat <<EOF
 set -euo pipefail
+# Pool mode (accounts.json present) loads tokens-{name}.json and ignores tokens.json —
+# writing it would "succeed" while changing nothing.
+if [ -e $VOL/accounts.json ]; then echo "POOL_MODE: $VOL/accounts.json exists — tokens.json is unused; update the member store instead" >&2; exit 1; fi
 NEWRT=\$(aws ssm get-parameter --name $TMP_PARAM --with-decryption --region $REGION --query Parameter.Value --output text)
 if [ "\${NEWRT#sk-ant-ort01-}" = "\$NEWRT" ]; then echo BAD_OR_MISSING_RT >&2; exit 1; fi
 cp -p $VOL/tokens.json $VOL/tokens.json.bak-\$(date +%Y%m%d%H%M%S) 2>/dev/null || true
