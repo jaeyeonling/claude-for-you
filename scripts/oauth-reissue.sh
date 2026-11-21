@@ -87,11 +87,22 @@ inject() {
   fi
   echo "▸ refresh token ok (ort01, len=${#rt}) from \"$svc\""
 
-  # Trap before the upload: an interrupt between put and trap would strand the RT.
-  # Tolerates an absent parameter (upload never happened).
-  trap 'aws ssm delete-parameter --name "$TMP_PARAM" --region "$REGION" >/dev/null 2>&1 && echo "▸ $TMP_PARAM deleted" || true' EXIT
-  aws ssm put-parameter --name "$TMP_PARAM" --type SecureString --overwrite \
-    --region "$REGION" --value "$rt" >/dev/null
+  # TMP_PARAM doubles as a lock: no --overwrite, so a second concurrent inject
+  # fails here instead of racing on tokens.json (or having its RT deleted by the
+  # first run's trap). The fixed name means a SIGKILLed run leaves at most one
+  # stale param, never a pile of them. Trap is armed before the upload so an
+  # interrupt cannot strand the RT; `owned` keeps a refused run from deleting
+  # the lock it does not hold.
+  owned=1
+  trap '[ "$owned" = 1 ] && aws ssm delete-parameter --name "$TMP_PARAM" --region "$REGION" >/dev/null 2>&1 && echo "▸ $TMP_PARAM deleted" || true' EXIT
+  if ! aws ssm put-parameter --name "$TMP_PARAM" --type SecureString \
+      --region "$REGION" --value "$rt" >/dev/null; then
+    owned=0
+    echo "✗ could not create $TMP_PARAM (aws error above)." >&2
+    echo "  ParameterAlreadyExists = another inject is running, or a killed run left it." >&2
+    echo "  If no inject is running: aws ssm delete-parameter --name $TMP_PARAM --region $REGION" >&2
+    exit 1
+  fi
   unset rt
 
   echo "▸ Writing tokens.json on $IID and restarting app"
